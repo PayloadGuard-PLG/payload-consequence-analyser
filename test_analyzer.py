@@ -243,18 +243,18 @@ class TestCriticalPathPatterns(unittest.TestCase):
 
 class TestStructuralPayloadAnalyzer(unittest.TestCase):
     def test_no_deletions_status_is_safe(self):
-        result = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, SIMPLE_ORIGINAL).analyze_structural_drift()
+        result = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, SIMPLE_ORIGINAL, file_path="test.py").analyze_structural_drift()
         self.assertEqual(result["status"], "SAFE")
         self.assertEqual(result["metrics"]["deleted_node_count"], 0)
 
     def test_detects_deleted_classes(self):
-        result = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, SIMPLE_MODIFIED).analyze_structural_drift()
+        result = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, SIMPLE_MODIFIED, file_path="test.py").analyze_structural_drift()
         self.assertIn("Database", result["deleted_components"])
         self.assertIn("Cache", result["deleted_components"])
 
     def test_full_delete_has_higher_deletion_ratio_than_partial(self):
-        full = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, "").analyze_structural_drift()
-        partial = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, SIMPLE_MODIFIED).analyze_structural_drift()
+        full = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, "", file_path="test.py").analyze_structural_drift()
+        partial = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, SIMPLE_MODIFIED, file_path="test.py").analyze_structural_drift()
         self.assertGreater(
             full["metrics"]["structural_deletion_ratio"],
             partial["metrics"]["structural_deletion_ratio"],
@@ -264,35 +264,35 @@ class TestStructuralPayloadAnalyzer(unittest.TestCase):
         # 2-function file losing 1: ratio 50% exceeds threshold but count (1) < 3
         tiny_original = "def foo(): pass\ndef bar(): pass"
         tiny_modified = "def foo(): pass"
-        result = StructuralPayloadAnalyzer(tiny_original, tiny_modified).analyze_structural_drift()
+        result = StructuralPayloadAnalyzer(tiny_original, tiny_modified, file_path="test.py").analyze_structural_drift()
         self.assertEqual(result["status"], "SAFE")
 
     def test_both_thresholds_met_is_destructive(self):
-        result = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, "").analyze_structural_drift()
+        result = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, "", file_path="test.py").analyze_structural_drift()
         self.assertEqual(result["status"], "DESTRUCTIVE")
         self.assertEqual(result["severity"], "CRITICAL")
 
     def test_syntax_error_returns_error_key(self):
-        result = StructuralPayloadAnalyzer("def foo(: pass", "valid = 1").analyze_structural_drift()
+        result = StructuralPayloadAnalyzer("def foo(: pass", "valid = 1", file_path="test.py").analyze_structural_drift()
         self.assertIn("error", result)
 
     def test_added_components_tracked(self):
-        result = StructuralPayloadAnalyzer(SIMPLE_MODIFIED, SIMPLE_ORIGINAL).analyze_structural_drift()
+        result = StructuralPayloadAnalyzer(SIMPLE_MODIFIED, SIMPLE_ORIGINAL, file_path="test.py").analyze_structural_drift()
         self.assertIn("Database", result["added_components"])
 
     def test_empty_original_no_crash(self):
-        result = StructuralPayloadAnalyzer("", SIMPLE_ORIGINAL).analyze_structural_drift()
+        result = StructuralPayloadAnalyzer("", SIMPLE_ORIGINAL, file_path="test.py").analyze_structural_drift()
         self.assertEqual(result["metrics"]["deleted_node_count"], 0)
         self.assertEqual(result["status"], "SAFE")
 
     def test_deletion_ratio_reported_in_metrics(self):
-        result = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, "").analyze_structural_drift()
+        result = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, "", file_path="test.py").analyze_structural_drift()
         self.assertIn("structural_deletion_ratio", result["metrics"])
         self.assertEqual(result["metrics"]["structural_deletion_ratio"], 100.0)
 
     def test_high_custom_threshold_suppresses_flag(self):
         result = StructuralPayloadAnalyzer(
-            SIMPLE_ORIGINAL, "", deletion_ratio_threshold=1.5
+            SIMPLE_ORIGINAL, "", file_path="test.py", deletion_ratio_threshold=1.5
         ).analyze_structural_drift()
         self.assertEqual(result["status"], "SAFE")
 

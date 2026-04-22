@@ -2,6 +2,7 @@ GitPython>=3.1.41
 PyYAML>=6.0
 PyJWT[crypto]>=2.8.0
 requests>=2.31.0
+pytest>=7.0
 
 # Tree-sitter grammar packages — Layer 4 multi-language structural analysis
 # Install all for full coverage; omit any you don't need (unsupported files are skipped)
