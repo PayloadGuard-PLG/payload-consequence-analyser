@@ -9,7 +9,11 @@ import requests
 
 
 def main():
-    app_id = os.environ["PAYLOADGUARD_APP_ID"]
+    app_id = os.environ.get("PAYLOADGUARD_APP_ID", "").strip()
+    if not app_id:
+        print("No App credentials configured — skipping Check Run")
+        return
+    app_id = app_id  # reassign for clarity below
     private_key = os.environ["PAYLOADGUARD_PRIVATE_KEY"]
     installation_id = os.environ["PAYLOADGUARD_INSTALLATION_ID"]
     head_sha = os.environ["PR_HEAD_SHA"]
