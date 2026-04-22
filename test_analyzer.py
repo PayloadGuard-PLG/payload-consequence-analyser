@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -10,18 +11,22 @@ from unittest.mock import MagicMock, patch
 import git
 
 from analyze import (
+    CRITICAL_PATH_PATTERNS,
     PayloadAnalyzer,
+    PayloadGuardConfig,
     SemanticTransparencyAnalyzer,
     StructuralPayloadAnalyzer,
     TemporalDriftAnalyzer,
+    _deep_merge,
+    load_config,
     print_report,
     save_json_report,
 )
 
 
-def _make_analyzer(branch="feature", target="main"):
+def _make_analyzer(branch="feature", target="main", config=None):
     with patch("git.Repo"):
-        return PayloadAnalyzer("/fake/repo", branch, target)
+        return PayloadAnalyzer("/fake/repo", branch, target, config=config)
 
 
 SIMPLE_ORIGINAL = """
@@ -107,6 +112,132 @@ def _make_full_report(status="SAFE", files_deleted=0, lines_deleted=0):
 
 
 # ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+
+class TestDeepMerge(unittest.TestCase):
+    def test_shallow_override(self):
+        result = _deep_merge({"a": 1, "b": 2}, {"b": 99})
+        self.assertEqual(result, {"a": 1, "b": 99})
+
+    def test_nested_merge_preserves_unspecified_keys(self):
+        base = {"x": {"a": 1, "b": 2}}
+        result = _deep_merge(base, {"x": {"b": 99}})
+        self.assertEqual(result["x"]["a"], 1)
+        self.assertEqual(result["x"]["b"], 99)
+
+    def test_does_not_mutate_base(self):
+        base = {"x": {"a": 1}}
+        _deep_merge(base, {"x": {"a": 99}})
+        self.assertEqual(base["x"]["a"], 1)
+
+    def test_new_key_in_override_is_added(self):
+        result = _deep_merge({"a": 1}, {"b": 2})
+        self.assertEqual(result["b"], 2)
+
+
+class TestPayloadGuardConfig(unittest.TestCase):
+    def test_default_thresholds(self):
+        cfg = PayloadGuardConfig()
+        self.assertEqual(cfg.thresholds["branch_age_days"], [90, 180, 365])
+        self.assertEqual(cfg.thresholds["structural"]["deletion_ratio"], 0.20)
+        self.assertEqual(cfg.thresholds["structural"]["min_deleted_nodes"], 3)
+
+    def test_default_instances_are_independent(self):
+        cfg1 = PayloadGuardConfig()
+        cfg2 = PayloadGuardConfig()
+        cfg1.thresholds["branch_age_days"][0] = 999
+        self.assertEqual(cfg2.thresholds["branch_age_days"][0], 90)
+
+    def test_default_benign_keywords_present(self):
+        cfg = PayloadGuardConfig()
+        self.assertIn("typo", cfg.semantic["benign_keywords"])
+
+
+class TestLoadConfig(unittest.TestCase):
+    def test_returns_defaults_when_no_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = load_config(d)
+        self.assertEqual(cfg.thresholds["branch_age_days"], [90, 180, 365])
+        self.assertEqual(cfg.thresholds["temporal"]["stale"], 250.0)
+
+    def test_deep_merges_partial_structural_override(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "payloadguard.yml"), "w") as f:
+                f.write("thresholds:\n  structural:\n    deletion_ratio: 0.10\n")
+            cfg = load_config(d)
+        self.assertEqual(cfg.thresholds["structural"]["deletion_ratio"], 0.10)
+        # Unspecified sibling key is preserved
+        self.assertEqual(cfg.thresholds["structural"]["min_deleted_nodes"], 3)
+
+    def test_deep_merges_partial_temporal_override(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "payloadguard.yml"), "w") as f:
+                f.write("thresholds:\n  temporal:\n    stale: 100\n")
+            cfg = load_config(d)
+        self.assertEqual(cfg.thresholds["temporal"]["stale"], 100)
+        # Unspecified sibling key is preserved
+        self.assertEqual(cfg.thresholds["temporal"]["dangerous"], 1000.0)
+
+    def test_custom_benign_keywords_replace_defaults(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "payloadguard.yml"), "w") as f:
+                f.write("semantic:\n  benign_keywords:\n    - trivial\n    - nit\n")
+            cfg = load_config(d)
+        self.assertEqual(cfg.semantic["benign_keywords"], ["trivial", "nit"])
+
+    def test_empty_yaml_returns_defaults(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "payloadguard.yml"), "w") as f:
+                f.write("")
+            cfg = load_config(d)
+        self.assertEqual(cfg.thresholds["branch_age_days"], [90, 180, 365])
+
+
+# ==============================================================================
+# CRITICAL PATH PATTERNS (Layer 2)
+# ==============================================================================
+
+class TestCriticalPathPatterns(unittest.TestCase):
+    def _matches(self, path):
+        return any(re.search(p, path) for p in CRITICAL_PATH_PATTERNS)
+
+    def test_tests_directory_is_critical(self):
+        self.assertTrue(self._matches("tests/test_core.py"))
+
+    def test_test_directory_singular_is_critical(self):
+        self.assertTrue(self._matches("test/unit/auth.py"))
+
+    def test_test_file_prefix_is_critical(self):
+        self.assertTrue(self._matches("src/test_auth.py"))
+
+    def test_github_workflows_is_critical(self):
+        self.assertTrue(self._matches(".github/workflows/ci.yml"))
+
+    def test_requirements_txt_is_critical(self):
+        self.assertTrue(self._matches("requirements.txt"))
+
+    def test_requirements_dev_txt_is_critical(self):
+        self.assertTrue(self._matches("requirements-dev.txt"))
+
+    def test_setup_py_is_critical(self):
+        self.assertTrue(self._matches("setup.py"))
+
+    def test_yaml_file_is_critical(self):
+        self.assertTrue(self._matches("deploy/config.yaml"))
+
+    # False-positive checks — the main improvement over substring matching
+    def test_protest_py_is_not_critical(self):
+        self.assertFalse(self._matches("src/protest.py"))
+
+    def test_latest_deployment_is_not_critical(self):
+        self.assertFalse(self._matches("logs/latest_deployment.py"))
+
+    def test_reconfiguration_log_is_not_critical(self):
+        self.assertFalse(self._matches("logs/reconfiguration_log.py"))
+
+
+# ==============================================================================
 # LAYER 4 — StructuralPayloadAnalyzer
 # ==============================================================================
 
@@ -130,15 +261,13 @@ class TestStructuralPayloadAnalyzer(unittest.TestCase):
         )
 
     def test_below_min_deletion_count_not_flagged(self):
-        # 2-function file losing 1 function: ratio 50% exceeds threshold but
-        # count (1) is below min_deletion_count default of 3 — should stay SAFE
+        # 2-function file losing 1: ratio 50% exceeds threshold but count (1) < 3
         tiny_original = "def foo(): pass\ndef bar(): pass"
         tiny_modified = "def foo(): pass"
         result = StructuralPayloadAnalyzer(tiny_original, tiny_modified).analyze_structural_drift()
         self.assertEqual(result["status"], "SAFE")
 
     def test_both_thresholds_met_is_destructive(self):
-        # SIMPLE_ORIGINAL has 10 nodes; deleting all → 100% ratio, 10 deletions
         result = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, "").analyze_structural_drift()
         self.assertEqual(result["status"], "DESTRUCTIVE")
         self.assertEqual(result["severity"], "CRITICAL")
@@ -162,7 +291,6 @@ class TestStructuralPayloadAnalyzer(unittest.TestCase):
         self.assertEqual(result["metrics"]["structural_deletion_ratio"], 100.0)
 
     def test_high_custom_threshold_suppresses_flag(self):
-        # Threshold > 1.0 means it can never be reached — always SAFE
         result = StructuralPayloadAnalyzer(
             SIMPLE_ORIGINAL, "", deletion_ratio_threshold=1.5
         ).analyze_structural_drift()
@@ -268,7 +396,6 @@ class TestAssessConsequenceStructural(unittest.TestCase):
         self.assertIn("Structural drift", " ".join(v["flags"]))
 
     def test_critical_structural_severity_elevates_verdict(self):
-        # CRITICAL structural severity adds 3 to score → CAUTION or DESTRUCTIVE
         v = self.a._assess_consequence(0, 0, 0, 0, structural_severity="CRITICAL")
         self.assertIn(v["status"], ("CAUTION", "DESTRUCTIVE"))
 
@@ -280,6 +407,25 @@ class TestAssessConsequenceStructural(unittest.TestCase):
     def test_default_structural_severity_is_safe(self):
         v = self.a._assess_consequence(0, 0, 0, 0)
         self.assertEqual(v["status"], "SAFE")
+
+
+class TestAssessConsequenceCustomThresholds(unittest.TestCase):
+    def test_custom_age_threshold_fires_earlier(self):
+        from analyze import PayloadGuardConfig
+        cfg = PayloadGuardConfig()
+        cfg.thresholds["branch_age_days"] = [30, 60, 90]
+        a = _make_analyzer(config=cfg)
+        # 35 days > custom threshold of 30 — would be SAFE with default (90)
+        v = a._assess_consequence(0, 0, 35, 0)
+        self.assertEqual(v["status"], "REVIEW")
+
+    def test_custom_files_threshold(self):
+        from analyze import PayloadGuardConfig
+        cfg = PayloadGuardConfig()
+        cfg.thresholds["files_deleted"] = [3, 5, 10]
+        a = _make_analyzer(config=cfg)
+        v = a._assess_consequence(4, 0, 0, 0)
+        self.assertEqual(v["status"], "REVIEW")
 
 
 # ==============================================================================
@@ -301,6 +447,18 @@ class TestPayloadAnalyzerInit(unittest.TestCase):
         with patch("git.Repo"):
             a = PayloadAnalyzer("/fake", "feature")
         self.assertEqual(a.target, "main")
+
+    def test_uses_default_config_when_none_passed(self):
+        with patch("git.Repo"):
+            a = PayloadAnalyzer("/fake", "feature")
+        self.assertEqual(a.config.thresholds["branch_age_days"], [90, 180, 365])
+
+    def test_accepts_custom_config(self):
+        cfg = PayloadGuardConfig()
+        cfg.thresholds["branch_age_days"] = [10, 20, 30]
+        with patch("git.Repo"):
+            a = PayloadAnalyzer("/fake", "feature", config=cfg)
+        self.assertEqual(a.config.thresholds["branch_age_days"], [10, 20, 30])
 
 
 class TestAnalyzeErrors(unittest.TestCase):
@@ -431,7 +589,7 @@ class TestAnalyzeSuccess(unittest.TestCase):
         result = a.analyze()
         self.assertEqual(result["lines"]["deletion_ratio_percent"], 0.0)
 
-    def test_structural_report_has_new_shape(self):
+    def test_structural_report_has_correct_shape(self):
         a = self._setup_repo([self._build_mock_diff("M")])
         result = a.analyze()
         s = result["structural"]
@@ -457,18 +615,15 @@ class TestTemporalDriftAnalyzer(unittest.TestCase):
         self.assertEqual(result["severity"], "LOW")
 
     def test_below_warning_threshold_is_current(self):
-        # 10 days * 5 commits/day = score 50 < 250
         result = TemporalDriftAnalyzer(10, 5.0).analyze_drift()
         self.assertEqual(result["status"], "CURRENT")
 
     def test_at_warning_threshold_is_stale(self):
-        # 50 * 5.0 = 250.0 == warning_threshold
         result = TemporalDriftAnalyzer(50, 5.0).analyze_drift()
         self.assertEqual(result["status"], "STALE")
         self.assertEqual(result["severity"], "WARNING")
 
     def test_above_critical_threshold_is_dangerous(self):
-        # 100 * 10.1 = 1010 > 1000
         result = TemporalDriftAnalyzer(100, 10.1).analyze_drift()
         self.assertEqual(result["status"], "DANGEROUS")
         self.assertEqual(result["severity"], "CRITICAL")
@@ -486,7 +641,6 @@ class TestTemporalDriftAnalyzer(unittest.TestCase):
         self.assertAlmostEqual(result["metrics"]["calculated_drift_score"], 120.0)
 
     def test_custom_thresholds(self):
-        # score=50 >= custom warning=50 → STALE
         result = TemporalDriftAnalyzer(
             10, 5.0, warning_threshold=50.0, critical_threshold=200.0
         ).analyze_drift()
@@ -535,7 +689,6 @@ class TestSemanticTransparencyAnalyzer(unittest.TestCase):
         self.assertEqual(result["matched_keyword"], "typo")
 
     def test_description_lowercased_before_matching(self):
-        # "Minor Fix" should still match the "minor fix" keyword
         result = SemanticTransparencyAnalyzer("Minor Fix in spacing", "CRITICAL").analyze_transparency()
         self.assertTrue(result["is_deceptive"])
 

@@ -4,20 +4,47 @@ PayloadGuard - Destructive Merge Detection
 Detects catastrophic code payloads hidden in code suggestions before merge
 
 Usage:
-    python analyze.py <repo_path> <branch> [target_branch] [--pr-description "..."] [--save-json]
+    python analyze.py <repo_path> <branch> [target] [--pr-description "..."] [--save-json [FILE]]
 
 Example:
     python analyze.py . feature-branch main
     python analyze.py . feature-branch main --pr-description "minor syntax fix" --save-json
 """
 
+import argparse
 import ast
+import copy
 import git
+import re
 import sys
 import json
+import textwrap
+import yaml
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Union
+from dataclasses import dataclass, field
+
+
+# ==============================================================================
+# CRITICAL PATH PATTERNS (Layer 2)
+# Regex patterns used to identify high-value deleted files.
+# More precise than substring matching — avoids false positives on paths like
+# "protest.py", "latest_deployment.yaml", "reconfiguration_log.py".
+# ==============================================================================
+
+CRITICAL_PATH_PATTERNS = [
+    r"(^|/)tests?(/|$)",               # test/ or tests/ directories
+    r"(^|/)test_[^/]+$",               # test_*.py files at any depth
+    r"(^|/)\.github/",                 # any .github/ content
+    r"(^|/)requirements[^/]*\.txt$",   # requirements.txt, requirements-dev.txt
+    r"(^|/)setup\.py$",
+    r"(^|/)__init__\.py$",
+    r"(^|/)core(/|$)",
+    r"(^|/)modules(/|$)",
+    r"(^|/)config(/|$)",
+    r"\.(yml|yaml)$",
+]
 
 
 # ==============================================================================
@@ -63,9 +90,6 @@ class StructuralPayloadAnalyzer:
         self.min_deletion_count = min_deletion_count
 
     def _extract_core_nodes(self, source_text: str) -> set:
-        """
-        Walks the AST to extract the names of all defined classes and functions.
-        """
         try:
             tree = ast.parse(source_text)
         except SyntaxError as e:
@@ -80,9 +104,8 @@ class StructuralPayloadAnalyzer:
 
     def analyze_structural_drift(self) -> Dict[str, Any]:
         """
-        Calculates the exact set difference between original and modified
-        architectural nodes. Flags CRITICAL only when BOTH the deletion ratio
-        AND the minimum deletion count thresholds are exceeded.
+        Flags CRITICAL only when BOTH the deletion ratio AND the minimum
+        deletion count thresholds are exceeded.
         """
         try:
             original_nodes = self._extract_core_nodes(self.original_code)
@@ -127,10 +150,6 @@ class TemporalDriftAnalyzer:
 
     Drift Score = branch_age_days * target_velocity_commits_per_day
 
-    This compound metric is more meaningful than raw age alone: a 90-day-old
-    branch on a slow repo (1 commit/day = score 90) is very different from a
-    90-day-old branch on a fast repo (20 commits/day = score 1800).
-
     Configurable thresholds:
         warning_threshold (float): Drift Score at which status becomes STALE.
             Default 250. Example: 50-day branch on a 5-commit/day repo.
@@ -152,9 +171,6 @@ class TemporalDriftAnalyzer:
         self.CRITICAL_THRESHOLD = critical_threshold
 
     def analyze_drift(self) -> Dict[str, Union[str, float, int]]:
-        """
-        Calculates the compound drift score and assigns a verdict.
-        """
         if self.branch_age_days < 0 or self.target_velocity < 0:
             raise ValueError("Age and velocity metrics must be non-negative.")
 
@@ -206,13 +222,6 @@ class SemanticTransparencyAnalyzer:
 
     Configurable:
         benign_keywords (list): Phrases that signal a claimed low-impact change.
-            Extend this list for your team's common PR vocabulary.
-
-    Example — custom keywords:
-        analyzer = SemanticTransparencyAnalyzer(
-            pr_description, actual_severity,
-            benign_keywords=["minor fix", "typo", "small tweak", "cosmetic"]
-        )
     """
 
     DEFAULT_BENIGN_KEYWORDS = [
@@ -239,10 +248,6 @@ class SemanticTransparencyAnalyzer:
         self.benign_keywords = benign_keywords if benign_keywords is not None else self.DEFAULT_BENIGN_KEYWORDS
 
     def analyze_transparency(self) -> Dict[str, Union[str, bool]]:
-        """
-        Calculates the divergence between human-readable claims and
-        machine-verified structural impact.
-        """
         if not self.pr_description:
             return {
                 "status": "UNVERIFIED",
@@ -273,6 +278,69 @@ class SemanticTransparencyAnalyzer:
 
 
 # ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+
+DEFAULT_CONFIG = {
+    "thresholds": {
+        "branch_age_days": [90, 180, 365],
+        "files_deleted":   [10, 20, 50],
+        "lines_deleted":   [5000, 10000, 50000],
+        "temporal": {
+            "stale":     250.0,
+            "dangerous": 1000.0,
+        },
+        "structural": {
+            "deletion_ratio":    0.20,
+            "min_deleted_nodes": 3,
+        },
+    },
+    "semantic": {
+        "benign_keywords": [
+            "minor fix", "minor syntax fix", "typo",
+            "formatting", "cleanup", "docs",
+            "refactor whitespace", "small tweak",
+            "cosmetic", "minor update",
+        ],
+    },
+}
+
+
+@dataclass
+class PayloadGuardConfig:
+    thresholds: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["thresholds"]))
+    semantic: dict   = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["semantic"]))
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merges override into a deep copy of base."""
+    result = copy.deepcopy(base)
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+def load_config(repo_path: str) -> PayloadGuardConfig:
+    """
+    Loads payloadguard.yml from the repo root if present, deep-merging it over
+    DEFAULT_CONFIG. Falls back to defaults silently if the file is absent.
+    """
+    config_path = Path(repo_path) / "payloadguard.yml"
+    if not config_path.exists():
+        return PayloadGuardConfig()
+    with open(config_path) as f:
+        user_cfg = yaml.safe_load(f) or {}
+    merged = _deep_merge(DEFAULT_CONFIG, user_cfg)
+    return PayloadGuardConfig(
+        thresholds=merged.get("thresholds", copy.deepcopy(DEFAULT_CONFIG["thresholds"])),
+        semantic=merged.get("semantic",   copy.deepcopy(DEFAULT_CONFIG["semantic"])),
+    )
+
+
+# ==============================================================================
 # CORE ANALYZER
 # ==============================================================================
 
@@ -281,13 +349,13 @@ class PayloadAnalyzer:
     Five-layer analysis system for detecting destructive merges.
 
     Layer 1: Surface Scan        — File/line delta extraction
-    Layer 2: Forensic Analysis   — Temporal validation, deletion ratios
+    Layer 2: Forensic Analysis   — Deletion ratios, critical path detection
     Layer 3: Consequence Model   — Severity scoring and verdict
     Layer 4: Structural Drift    — AST-based class/function deletion detection
     Layer 5: Extended Analysis   — Temporal drift score + semantic transparency
     """
 
-    def __init__(self, repo_path, branch, target_branch="main"):
+    def __init__(self, repo_path, branch, target_branch="main", config: PayloadGuardConfig = None):
         try:
             self.repo = git.Repo(repo_path)
         except Exception as e:
@@ -298,6 +366,7 @@ class PayloadAnalyzer:
         self.branch = branch
         self.target = target_branch
         self.repo_path = repo_path
+        self.config = config or PayloadGuardConfig()
 
     def _calculate_target_velocity(self) -> float:
         """
@@ -361,6 +430,7 @@ class PayloadAnalyzer:
                         pass
 
             # LAYER 4: STRUCTURAL DRIFT (Python files only)
+            structural_th = self.config.thresholds["structural"]
             structural_score = 0.0
             structural_flags = []
             overall_structural_severity = "LOW"
@@ -374,7 +444,11 @@ class PayloadAnalyzer:
                 try:
                     original = d.a_blob.data_stream.read().decode('utf-8', errors='ignore')
                     modified = d.b_blob.data_stream.read().decode('utf-8', errors='ignore')
-                    result = StructuralPayloadAnalyzer(original, modified).analyze_structural_drift()
+                    result = StructuralPayloadAnalyzer(
+                        original, modified,
+                        deletion_ratio_threshold=structural_th["deletion_ratio"],
+                        min_deletion_count=structural_th["min_deleted_nodes"],
+                    ).analyze_structural_drift()
                     if 'error' not in result and result['metrics']['deleted_node_count'] > 0:
                         ratio = result['metrics']['structural_deletion_ratio']
                         structural_score = max(structural_score, ratio)
@@ -408,27 +482,28 @@ class PayloadAnalyzer:
                 overall_structural_severity,
             )
 
+            # LAYER 2: FORENSIC — critical path detection via regex
             deleted_files = [d.a_path for d in diffs if d.change_type == 'D']
-            critical_patterns = [
-                'test', 'tests', '.github/workflows', 'requirements', 'setup.py',
-                '__init__.py', 'core', 'modules', 'config', '.yml', '.yaml'
-            ]
             critical_deletions = [
                 f for f in deleted_files
-                if any(pattern.lower() in f.lower() for pattern in critical_patterns)
+                if any(re.search(p, f) for p in CRITICAL_PATH_PATTERNS)
             ]
 
             # LAYER 5a: TEMPORAL DRIFT
+            temporal_th = self.config.thresholds["temporal"]
             target_velocity = self._calculate_target_velocity()
             temporal_drift = TemporalDriftAnalyzer(
                 branch_age_days=max(days_old, 0),
                 target_velocity_commits_per_day=target_velocity,
+                warning_threshold=temporal_th["stale"],
+                critical_threshold=temporal_th["dangerous"],
             ).analyze_drift()
 
             # LAYER 5b: SEMANTIC TRANSPARENCY
             semantic = SemanticTransparencyAnalyzer(
                 pr_description=pr_description,
                 actual_severity=verdict['severity'],
+                benign_keywords=self.config.semantic["benign_keywords"],
             ).analyze_transparency()
 
             return {
@@ -485,24 +560,29 @@ class PayloadAnalyzer:
     def _assess_consequence(self, files_deleted, lines_deleted, days_old, deletion_ratio, structural_severity="LOW"):
         flags = []
         severity_score = 0.0
+        th = self.config.thresholds
 
-        if days_old > 365:
+        age_th   = th["branch_age_days"]  # [90, 180, 365]
+        files_th = th["files_deleted"]     # [10, 20, 50]
+        lines_th = th["lines_deleted"]     # [5000, 10000, 50000]
+
+        if days_old > age_th[2]:
             flags.append(f"Branch is {days_old} days old (1+ year)")
             severity_score += 3
-        elif days_old > 180:
+        elif days_old > age_th[1]:
             flags.append(f"Branch is {days_old} days old (6+ months)")
             severity_score += 2
-        elif days_old > 90:
+        elif days_old > age_th[0]:
             flags.append(f"Branch is {days_old} days old (3+ months)")
             severity_score += 1
 
-        if files_deleted > 50:
+        if files_deleted > files_th[2]:
             flags.append(f"{files_deleted} files would be deleted (massive scope)")
             severity_score += 3
-        elif files_deleted > 20:
+        elif files_deleted > files_th[1]:
             flags.append(f"{files_deleted} files would be deleted (large scope)")
             severity_score += 2
-        elif files_deleted > 10:
+        elif files_deleted > files_th[0]:
             flags.append(f"{files_deleted} files would be deleted")
             severity_score += 1
 
@@ -520,13 +600,13 @@ class PayloadAnalyzer:
             flags.append("Structural drift CRITICAL — significant Python class/function deletions detected")
             severity_score += 3
 
-        if lines_deleted > 50000:
+        if lines_deleted > lines_th[2]:
             flags.append(f"{lines_deleted:,} lines would be deleted (massive codebase change)")
             severity_score += 3
-        elif lines_deleted > 10000:
+        elif lines_deleted > lines_th[1]:
             flags.append(f"{lines_deleted:,} lines would be deleted (large codebase change)")
             severity_score += 2
-        elif lines_deleted > 5000:
+        elif lines_deleted > lines_th[0]:
             flags.append(f"{lines_deleted:,} lines would be deleted")
             severity_score += 1
 
@@ -671,47 +751,46 @@ def save_json_report(report, filename="consequence_report.json"):
 
 
 def main():
-    if len(sys.argv) < 3:
-        print("\n" + "="*70)
-        print("PAYLOADGUARD v0.2")
-        print("="*70)
-        print("\nDetects destructive payloads hidden in code suggestions before merge")
-        print("\nUSAGE:")
-        print("  python analyze.py <repo_path> <branch> [target_branch] [--pr-description \"...\"] [--save-json]")
-        print("\nEXAMPLES:")
-        print("  python analyze.py . feature-branch main")
-        print("  python analyze.py . feature-branch main --pr-description \"minor syntax fix\"")
-        print("  python analyze.py . feature-branch main --pr-description \"minor syntax fix\" --save-json")
-        print("\n" + "="*70 + "\n")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        prog="payloadguard",
+        description="Detect destructive payloads hidden in code suggestions before merge.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            examples:
+              python analyze.py . feature-branch main
+              python analyze.py . feature-branch main --pr-description "minor syntax fix"
+              python analyze.py . feature-branch main --save-json
+              python analyze.py . feature-branch main --save-json reports/scan.json
 
-    repo_path      = sys.argv[1]
-    branch         = sys.argv[2]
-    target_branch  = "main"
-    pr_description = ""
-    save_json      = False
+            exit codes:
+              0  safe or review
+              1  analysis error
+              2  destructive — block merge in CI
+        """),
+    )
+    parser.add_argument("repo_path", help="Path to the git repository")
+    parser.add_argument("branch",    help="Feature branch to analyse")
+    parser.add_argument("target",    nargs="?", default="main",
+                        help="Target branch (default: main)")
+    parser.add_argument("--pr-description", default="", metavar="TEXT",
+                        help="PR description for semantic transparency analysis")
+    parser.add_argument("--save-json", nargs="?", const="consequence_report.json",
+                        metavar="FILE",
+                        help="Save JSON report (default filename: consequence_report.json)")
 
-    i = 3
-    while i < len(sys.argv):
-        if sys.argv[i] == "--save-json":
-            save_json = True
-        elif sys.argv[i] == "--pr-description" and i + 1 < len(sys.argv):
-            pr_description = sys.argv[i + 1]
-            i += 1
-        else:
-            target_branch = sys.argv[i]
-        i += 1
+    args = parser.parse_args()
 
-    analyzer = PayloadAnalyzer(repo_path, branch, target_branch)
-    report   = analyzer.analyze(pr_description=pr_description)
+    config   = load_config(args.repo_path)
+    analyzer = PayloadAnalyzer(args.repo_path, args.branch, args.target, config=config)
+    report   = analyzer.analyze(pr_description=args.pr_description)
     print_report(report)
 
-    if save_json:
-        save_json_report(report)
+    if args.save_json:
+        save_json_report(report, args.save_json)
 
     if "error" in report:
         sys.exit(1)
-    elif report.get('verdict', {}).get('status') == 'DESTRUCTIVE':
+    elif report.get("verdict", {}).get("status") == "DESTRUCTIVE":
         sys.exit(2)
     else:
         sys.exit(0)
