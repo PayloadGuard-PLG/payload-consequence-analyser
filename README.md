@@ -183,14 +183,114 @@ The final call. Produced by the consequence model (Layer 3) which accumulates a 
 
 ## CI
 
+Drop `.github/workflows/payloadguard.yml` into your repo:
+
 ```yaml
-- name: PayloadGuard
-  run: |
-    python analyze.py . ${{ github.head_ref }} main \
-      --pr-description "${{ github.event.pull_request.body }}"
+name: PayloadGuard
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        run: git fetch origin ${{ github.base_ref }}:${{ github.base_ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run PayloadGuard
+        id: payloadguard
+        env:
+          PYTHONUTF8: "1"
+          PR_BODY: ${{ github.event.pull_request.body }}
+          REPORT_PATH: ${{ github.workspace }}/payloadguard-report.md
+        run: |
+          set +e
+          python analyze.py . "${{ github.head_ref }}" "${{ github.base_ref }}" \
+            --pr-description "$PR_BODY" \
+            --save-markdown "$REPORT_PATH"
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          echo "report_path=$REPORT_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Post PR comment
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          REPORT_PATH: ${{ steps.payloadguard.outputs.report_path }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- payloadguard-report -->';
+            const reportPath = process.env.REPORT_PATH;
+            let body;
+            try {
+              body = marker + '\n' + fs.readFileSync(reportPath, 'utf8');
+            } catch (e) {
+              body = marker + '\n## ❌ PayloadGuard — Report not generated\n\n`' + String(e) + '`';
+            }
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+            });
+            const existing = comments.find(c => c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body,
+              });
+            }
+
+      - name: Enforce verdict
+        if: always()
+        run: |
+          code="${{ steps.payloadguard.outputs.exit_code }}"
+          if [ "$code" = "1" ]; then
+            echo "::error::PayloadGuard analysis error — check logs"
+            exit 1
+          elif [ "$code" = "2" ]; then
+            echo "::error::PayloadGuard verdict: DESTRUCTIVE — merge blocked"
+            exit 2
+          fi
 ```
 
-Exit `2` fails the job. Merge blocked. Done.
+What this does:
+
+- `fetch-depth: 0` + explicit base branch fetch — required for correct merge-base calculation; shallow clones break it
+- `PR_BODY` as env var — avoids shell backtick-substitution on inline code in PR descriptions
+- `PYTHONUTF8: "1"` — ensures emoji output works on all runners
+- `--save-markdown` — generates the formatted report file
+- `actions/github-script` posts the report as a sticky PR comment — updates on every push, never stacks duplicates
+- Exit `2` fails the Enforce step. Wire a branch protection rule to require the `scan` check and the merge button is blocked.
+
+The workflow is already in this repo if you want to copy it directly from `.github/workflows/payloadguard.yml`.
 
 ---
 
