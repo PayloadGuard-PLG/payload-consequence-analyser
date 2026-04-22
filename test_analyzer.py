@@ -9,7 +9,14 @@ from unittest.mock import MagicMock, patch
 
 import git
 
-from analyze import PayloadAnalyzer, StructuralPayloadAnalyzer, print_report, save_json_report
+from analyze import (
+    PayloadAnalyzer,
+    SemanticTransparencyAnalyzer,
+    StructuralPayloadAnalyzer,
+    TemporalDriftAnalyzer,
+    print_report,
+    save_json_report,
+)
 
 
 def _make_analyzer(branch="feature", target="main"):
@@ -72,50 +79,99 @@ def _make_full_report(status="SAFE", files_deleted=0, lines_deleted=0):
             "recommendation": "✓ Proceed with normal review process",
             "severity_score": 0,
         },
+        "structural": {
+            "overall_severity": "LOW",
+            "max_deletion_ratio_pct": 0.0,
+            "flagged_files": [],
+        },
+        "temporal_drift": {
+            "status": "CURRENT",
+            "severity": "LOW",
+            "metrics": {
+                "branch_age_days": 5,
+                "target_velocity": 0.1,
+                "calculated_drift_score": 0.5,
+                "warning_threshold": 250.0,
+                "critical_threshold": 1000.0,
+            },
+            "recommendation": "✓ SAFE. Branch context is synchronized with target.",
+        },
+        "semantic": {
+            "status": "TRANSPARENT",
+            "is_deceptive": False,
+            "matched_keyword": None,
+            "directive": "✓ SAFE. PR description aligns with verified structural impact.",
+        },
         "deleted_files": {"total": files_deleted, "critical": [], "all": []},
-        "structural": {"score": 0.0, "flagged_files": []},
     }
 
 
+# ==============================================================================
+# LAYER 4 — StructuralPayloadAnalyzer
+# ==============================================================================
+
 class TestStructuralPayloadAnalyzer(unittest.TestCase):
-    def test_no_deletions_score_is_zero(self):
+    def test_no_deletions_status_is_safe(self):
         result = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, SIMPLE_ORIGINAL).analyze_structural_drift()
-        self.assertEqual(result['score'], 0.0)
-        self.assertEqual(result['metrics']['deleted_node_count'], 0)
+        self.assertEqual(result["status"], "SAFE")
+        self.assertEqual(result["metrics"]["deleted_node_count"], 0)
 
     def test_detects_deleted_classes(self):
         result = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, SIMPLE_MODIFIED).analyze_structural_drift()
-        self.assertIn('Database', result['deleted_components'])
-        self.assertIn('Cache', result['deleted_components'])
+        self.assertIn("Database", result["deleted_components"])
+        self.assertIn("Cache", result["deleted_components"])
 
-    def test_score_scales_with_deletion_ratio(self):
-        full_delete = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, "").analyze_structural_drift()
+    def test_full_delete_has_higher_deletion_ratio_than_partial(self):
+        full = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, "").analyze_structural_drift()
         partial = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, SIMPLE_MODIFIED).analyze_structural_drift()
-        self.assertGreater(full_delete['score'], partial['score'])
+        self.assertGreater(
+            full["metrics"]["structural_deletion_ratio"],
+            partial["metrics"]["structural_deletion_ratio"],
+        )
 
-    def test_confidence_suppresses_tiny_files(self):
+    def test_below_min_deletion_count_not_flagged(self):
+        # 2-function file losing 1 function: ratio 50% exceeds threshold but
+        # count (1) is below min_deletion_count default of 3 — should stay SAFE
         tiny_original = "def foo(): pass\ndef bar(): pass"
         tiny_modified = "def foo(): pass"
         result = StructuralPayloadAnalyzer(tiny_original, tiny_modified).analyze_structural_drift()
-        self.assertLess(result['score'], 1.0)
+        self.assertEqual(result["status"], "SAFE")
 
-    def test_full_confidence_at_10_nodes(self):
+    def test_both_thresholds_met_is_destructive(self):
+        # SIMPLE_ORIGINAL has 10 nodes; deleting all → 100% ratio, 10 deletions
         result = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, "").analyze_structural_drift()
-        self.assertEqual(result['score'], 3.0)
+        self.assertEqual(result["status"], "DESTRUCTIVE")
+        self.assertEqual(result["severity"], "CRITICAL")
 
     def test_syntax_error_returns_error_key(self):
         result = StructuralPayloadAnalyzer("def foo(: pass", "valid = 1").analyze_structural_drift()
-        self.assertIn('error', result)
+        self.assertIn("error", result)
 
     def test_added_components_tracked(self):
         result = StructuralPayloadAnalyzer(SIMPLE_MODIFIED, SIMPLE_ORIGINAL).analyze_structural_drift()
-        self.assertIn('Database', result['added_components'])
+        self.assertIn("Database", result["added_components"])
 
     def test_empty_original_no_crash(self):
         result = StructuralPayloadAnalyzer("", SIMPLE_ORIGINAL).analyze_structural_drift()
-        self.assertEqual(result['metrics']['deleted_node_count'], 0)
-        self.assertEqual(result['score'], 0.0)
+        self.assertEqual(result["metrics"]["deleted_node_count"], 0)
+        self.assertEqual(result["status"], "SAFE")
 
+    def test_deletion_ratio_reported_in_metrics(self):
+        result = StructuralPayloadAnalyzer(SIMPLE_ORIGINAL, "").analyze_structural_drift()
+        self.assertIn("structural_deletion_ratio", result["metrics"])
+        self.assertEqual(result["metrics"]["structural_deletion_ratio"], 100.0)
+
+    def test_high_custom_threshold_suppresses_flag(self):
+        # Threshold > 1.0 means it can never be reached — always SAFE
+        result = StructuralPayloadAnalyzer(
+            SIMPLE_ORIGINAL, "", deletion_ratio_threshold=1.5
+        ).analyze_structural_drift()
+        self.assertEqual(result["status"], "SAFE")
+
+
+# ==============================================================================
+# LAYER 3 — _assess_consequence (severity model)
+# ==============================================================================
 
 class TestAssessConsequenceSafe(unittest.TestCase):
     def setUp(self):
@@ -203,27 +259,32 @@ class TestAssessConsequenceStructural(unittest.TestCase):
     def setUp(self):
         self.a = _make_analyzer()
 
-    def test_structural_score_below_threshold_no_flag(self):
-        v = self.a._assess_consequence(0, 0, 0, 0, structural_score=0.3)
-        self.assertNotIn('Structural drift', ' '.join(v['flags']))
+    def test_low_structural_severity_no_flag(self):
+        v = self.a._assess_consequence(0, 0, 0, 0, structural_severity="LOW")
+        self.assertNotIn("Structural drift", " ".join(v["flags"]))
 
-    def test_structural_score_above_half_adds_flag(self):
-        v = self.a._assess_consequence(0, 0, 0, 0, structural_score=0.6)
-        self.assertIn('Structural drift', ' '.join(v['flags']))
+    def test_critical_structural_severity_adds_flag(self):
+        v = self.a._assess_consequence(0, 0, 0, 0, structural_severity="CRITICAL")
+        self.assertIn("Structural drift", " ".join(v["flags"]))
 
-    def test_high_structural_score_elevates_verdict(self):
-        v = self.a._assess_consequence(0, 0, 0, 0, structural_score=3.0)
-        self.assertIn(v['status'], ('CAUTION', 'DESTRUCTIVE'))
+    def test_critical_structural_severity_elevates_verdict(self):
+        # CRITICAL structural severity adds 3 to score → CAUTION or DESTRUCTIVE
+        v = self.a._assess_consequence(0, 0, 0, 0, structural_severity="CRITICAL")
+        self.assertIn(v["status"], ("CAUTION", "DESTRUCTIVE"))
 
-    def test_structural_score_adds_to_severity(self):
-        v_without = self.a._assess_consequence(0, 0, 0, 0, structural_score=0.0)
-        v_with = self.a._assess_consequence(0, 0, 0, 0, structural_score=1.5)
-        self.assertGreater(v_with['severity_score'], v_without['severity_score'])
+    def test_critical_structural_severity_increases_score(self):
+        v_low = self.a._assess_consequence(0, 0, 0, 0, structural_severity="LOW")
+        v_critical = self.a._assess_consequence(0, 0, 0, 0, structural_severity="CRITICAL")
+        self.assertGreater(v_critical["severity_score"], v_low["severity_score"])
 
-    def test_default_structural_score_is_zero(self):
+    def test_default_structural_severity_is_safe(self):
         v = self.a._assess_consequence(0, 0, 0, 0)
-        self.assertEqual(v['status'], 'SAFE')
+        self.assertEqual(v["status"], "SAFE")
 
+
+# ==============================================================================
+# PayloadAnalyzer — init & errors
+# ==============================================================================
 
 class TestPayloadAnalyzerInit(unittest.TestCase):
     def test_bad_repo_path_exits(self):
@@ -272,6 +333,10 @@ class TestAnalyzeErrors(unittest.TestCase):
         self.assertIn("available_branches", result)
 
 
+# ==============================================================================
+# PayloadAnalyzer — successful analysis
+# ==============================================================================
+
 class TestAnalyzeSuccess(unittest.TestCase):
     def _build_mock_diff(self, change_type, content=None):
         d = MagicMock()
@@ -302,6 +367,7 @@ class TestAnalyzeSuccess(unittest.TestCase):
             return branch_commit
 
         a.repo.commit.side_effect = commit_side_effect
+        a.repo.iter_commits.return_value = []
 
         merge_base_commit = MagicMock()
         merge_base_commit.diff.return_value = diffs
@@ -313,7 +379,10 @@ class TestAnalyzeSuccess(unittest.TestCase):
         a = self._setup_repo([self._build_mock_diff("M")])
         result = a.analyze()
         self.assertNotIn("error", result)
-        for key in ("timestamp", "analysis", "files", "lines", "temporal", "verdict", "deleted_files"):
+        for key in (
+            "timestamp", "analysis", "files", "lines", "temporal",
+            "verdict", "deleted_files", "structural", "temporal_drift", "semantic",
+        ):
             self.assertIn(key, result)
 
     def test_counts_modified_files(self):
@@ -362,6 +431,134 @@ class TestAnalyzeSuccess(unittest.TestCase):
         result = a.analyze()
         self.assertEqual(result["lines"]["deletion_ratio_percent"], 0.0)
 
+    def test_structural_report_has_new_shape(self):
+        a = self._setup_repo([self._build_mock_diff("M")])
+        result = a.analyze()
+        s = result["structural"]
+        self.assertIn("overall_severity", s)
+        self.assertIn("max_deletion_ratio_pct", s)
+        self.assertIn("flagged_files", s)
+
+    def test_pr_description_flows_to_semantic_result(self):
+        a = self._setup_repo([self._build_mock_diff("M")])
+        result = a.analyze(pr_description="minor syntax fix")
+        self.assertIn("semantic", result)
+        self.assertIn("status", result["semantic"])
+
+
+# ==============================================================================
+# LAYER 5a — TemporalDriftAnalyzer
+# ==============================================================================
+
+class TestTemporalDriftAnalyzer(unittest.TestCase):
+    def test_zero_drift_is_current(self):
+        result = TemporalDriftAnalyzer(0, 0.0).analyze_drift()
+        self.assertEqual(result["status"], "CURRENT")
+        self.assertEqual(result["severity"], "LOW")
+
+    def test_below_warning_threshold_is_current(self):
+        # 10 days * 5 commits/day = score 50 < 250
+        result = TemporalDriftAnalyzer(10, 5.0).analyze_drift()
+        self.assertEqual(result["status"], "CURRENT")
+
+    def test_at_warning_threshold_is_stale(self):
+        # 50 * 5.0 = 250.0 == warning_threshold
+        result = TemporalDriftAnalyzer(50, 5.0).analyze_drift()
+        self.assertEqual(result["status"], "STALE")
+        self.assertEqual(result["severity"], "WARNING")
+
+    def test_above_critical_threshold_is_dangerous(self):
+        # 100 * 10.1 = 1010 > 1000
+        result = TemporalDriftAnalyzer(100, 10.1).analyze_drift()
+        self.assertEqual(result["status"], "DANGEROUS")
+        self.assertEqual(result["severity"], "CRITICAL")
+
+    def test_negative_age_raises(self):
+        with self.assertRaises(ValueError):
+            TemporalDriftAnalyzer(-1, 5.0).analyze_drift()
+
+    def test_negative_velocity_raises(self):
+        with self.assertRaises(ValueError):
+            TemporalDriftAnalyzer(10, -1.0).analyze_drift()
+
+    def test_drift_score_calculated_correctly(self):
+        result = TemporalDriftAnalyzer(30, 4.0).analyze_drift()
+        self.assertAlmostEqual(result["metrics"]["calculated_drift_score"], 120.0)
+
+    def test_custom_thresholds(self):
+        # score=50 >= custom warning=50 → STALE
+        result = TemporalDriftAnalyzer(
+            10, 5.0, warning_threshold=50.0, critical_threshold=200.0
+        ).analyze_drift()
+        self.assertEqual(result["status"], "STALE")
+
+    def test_recommendation_present(self):
+        result = TemporalDriftAnalyzer(0, 0.0).analyze_drift()
+        self.assertIn("recommendation", result)
+
+    def test_metrics_block_present(self):
+        result = TemporalDriftAnalyzer(5, 2.0).analyze_drift()
+        for key in ("branch_age_days", "target_velocity", "calculated_drift_score",
+                    "warning_threshold", "critical_threshold"):
+            self.assertIn(key, result["metrics"])
+
+
+# ==============================================================================
+# LAYER 5b — SemanticTransparencyAnalyzer
+# ==============================================================================
+
+class TestSemanticTransparencyAnalyzer(unittest.TestCase):
+    def test_empty_description_is_unverified(self):
+        result = SemanticTransparencyAnalyzer("", "CRITICAL").analyze_transparency()
+        self.assertEqual(result["status"], "UNVERIFIED")
+        self.assertFalse(result["is_deceptive"])
+
+    def test_benign_desc_with_critical_severity_is_deceptive(self):
+        result = SemanticTransparencyAnalyzer("minor syntax fix", "CRITICAL").analyze_transparency()
+        self.assertTrue(result["is_deceptive"])
+        self.assertEqual(result["status"], "DECEPTIVE_PAYLOAD")
+
+    def test_benign_desc_with_low_severity_is_transparent(self):
+        result = SemanticTransparencyAnalyzer("minor syntax fix", "LOW").analyze_transparency()
+        self.assertFalse(result["is_deceptive"])
+        self.assertEqual(result["status"], "TRANSPARENT")
+
+    def test_non_benign_desc_with_critical_severity_is_transparent(self):
+        result = SemanticTransparencyAnalyzer(
+            "refactored entire auth system", "CRITICAL"
+        ).analyze_transparency()
+        self.assertFalse(result["is_deceptive"])
+        self.assertEqual(result["status"], "TRANSPARENT")
+
+    def test_matched_keyword_returned(self):
+        result = SemanticTransparencyAnalyzer("just a typo fix", "CRITICAL").analyze_transparency()
+        self.assertEqual(result["matched_keyword"], "typo")
+
+    def test_description_lowercased_before_matching(self):
+        # "Minor Fix" should still match the "minor fix" keyword
+        result = SemanticTransparencyAnalyzer("Minor Fix in spacing", "CRITICAL").analyze_transparency()
+        self.assertTrue(result["is_deceptive"])
+
+    def test_custom_keywords(self):
+        result = SemanticTransparencyAnalyzer(
+            "nit pick change", "CRITICAL", benign_keywords=["nit pick"]
+        ).analyze_transparency()
+        self.assertTrue(result["is_deceptive"])
+
+    def test_directive_present(self):
+        result = SemanticTransparencyAnalyzer("minor fix", "LOW").analyze_transparency()
+        self.assertIn("directive", result)
+
+    def test_no_match_gives_none_keyword(self):
+        result = SemanticTransparencyAnalyzer(
+            "overhaul authentication layer", "CRITICAL"
+        ).analyze_transparency()
+        self.assertIsNone(result["matched_keyword"])
+
+
+# ==============================================================================
+# print_report
+# ==============================================================================
 
 class TestPrintReport(unittest.TestCase):
     def test_error_report_prints_failed(self):
@@ -402,6 +599,10 @@ class TestPrintReport(unittest.TestCase):
             print_report(_make_full_report(files_deleted=0))
         self.assertNotIn("DELETED FILES", out.getvalue())
 
+
+# ==============================================================================
+# save_json_report
+# ==============================================================================
 
 class TestSaveJsonReport(unittest.TestCase):
     def test_saves_valid_json(self):
