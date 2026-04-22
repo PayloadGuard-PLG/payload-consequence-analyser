@@ -6,13 +6,27 @@ Scans a branch before merge and tells you exactly how badly it's going to hurt.
 
 ---
 
+## Contents
+
+- [Install](#install)
+- [Run](#run)
+- [The forensic report](#the-forensic-report)
+- [Exit codes](#exit-codes)
+- [CI](#ci)
+- [GitHub App](#github-app)
+- [Configuration](#configuration)
+- [How it works](#how-it-works)
+- [The incident](#the-incident)
+
+---
+
 ## Install
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Python 3.8+, GitPython, PyYAML. That's it.
+Python 3.8+. Core deps: GitPython, PyYAML, PyJWT, requests. Layer 4 multi-language analysis requires tree-sitter grammar packages (included in `requirements.txt` — omit any you don't need, unsupported file types are skipped silently).
 
 ---
 
@@ -32,8 +46,8 @@ python analyze.py . feature-branch main --pr-description "minor syntax fix"
 # Save a JSON report
 python analyze.py . feature-branch main --save-json
 
-# Save to a specific path
-python analyze.py . feature-branch main --save-json reports/scan.json
+# Save a markdown report
+python analyze.py . feature-branch main --save-markdown reports/scan.md
 ```
 
 `python analyze.py --help` if you need it.
@@ -93,7 +107,7 @@ Parses every modified source file and computes exactly which named classes and f
 
 Flags `CRITICAL` only when both conditions are met: deletion ratio exceeds the threshold **and** enough nodes were deleted. The dual gate prevents noise from small utility files.
 
-**Supported languages:** Python · JavaScript · TypeScript · Go · Rust · Java (`.py .js .jsx .ts .tsx .go .rs .java`). Python uses stdlib AST. All others use [tree-sitter](https://tree-sitter.github.io/) grammar packages — files for grammars not installed are skipped silently.
+**Supported languages:** Python · JavaScript · TypeScript · Go · Rust · Java (`.py .js .jsx .ts .tsx .go .rs .java`). Python uses stdlib AST. All others use tree-sitter — files for grammars not installed are skipped silently.
 
 ```
 🧬 STRUCTURAL DRIFT (Layer 4)
@@ -290,9 +304,25 @@ What this does:
 - `PYTHONUTF8: "1"` — ensures emoji output works on all runners
 - `--save-markdown` — generates the formatted report file
 - `actions/github-script` posts the report as a sticky PR comment — updates on every push, never stacks duplicates
-- Exit `2` fails the Enforce step. Wire a branch protection rule to require the `scan` check and the merge button is blocked.
+- Exit `2` fails the Enforce step. Wire a branch protection rule to require the `scan` check and the merge button is blocked
 
 The workflow is already in this repo if you want to copy it directly from `.github/workflows/payloadguard.yml`.
+
+---
+
+## GitHub App
+
+For a named **PayloadGuard** check badge in the PR checks tab (beyond the sticky comment), register a GitHub App and wire it up with three repo secrets:
+
+| Secret | Value |
+|---|---|
+| `PAYLOADGUARD_APP_ID` | Your App ID |
+| `PAYLOADGUARD_PRIVATE_KEY` | Contents of the generated `.pem` private key |
+| `PAYLOADGUARD_INSTALLATION_ID` | Installation ID from `github.com/settings/installations` |
+
+With those set, the workflow calls `post_check_run.py` to post a Check Run after each scan — green for SAFE, red for DESTRUCTIVE, with the full report as the body.
+
+Without the secrets the step is a no-op; the sticky comment and merge blocking still work.
 
 ---
 
@@ -424,8 +454,7 @@ PAYLOADGUARD ANALYSIS: codex-suggestion → main
    ⚠️  Branch is 312 days old (6+ months)
    ⚠️  61 files would be deleted (massive scope)
    ⚠️  Deletion ratio: 98.2% (almost entire changeset is deletions)
-   ⚠️  Structural drift CRITICAL — significant Python class/function
-       deletions detected
+   ⚠️  Structural drift CRITICAL — significant class/function deletions detected
    ⚠️  11,967 lines would be deleted (large codebase change)
 
 ✉️  RECOMMENDATION:
