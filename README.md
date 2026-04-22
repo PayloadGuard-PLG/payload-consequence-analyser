@@ -2,8 +2,6 @@
 
 Scans a branch before merge and tells you exactly how badly it's going to hurt.
 
-Built after watching an AI suggest a *"minor syntax fix"* that would have deleted 60 files, 11,967 lines, and an entire test suite. No one noticed. That's the problem.
-
 > **dev:** [Dark^Vader](https://github.com/DarkVader-PLG)
 
 ---
@@ -42,53 +40,134 @@ python analyze.py . feature-branch main --save-json reports/scan.json
 
 ---
 
-## What you get
+## The forensic report
+
+Every scan produces the same structured report. Here's what each section tells you and what to look for.
+
+---
+
+### 📅 Temporal
+
+How old the branch is relative to the target, and which commits are being compared. A branch that's been sitting open for months while the target keeps moving is already a problem before you look at a single line.
 
 ```
-======================================================================
-PAYLOADGUARD ANALYSIS: feature-branch → main
-======================================================================
-
 📅 TEMPORAL
-   Branch age: 312 days
-
-📁 FILE CHANGES
-   Added:      2
-   Deleted:   61
-   Modified:   4
-
-📝 LINE CHANGES
-   Added:        214 lines
-   Deleted:   11,967 lines
-   Deletion ratio: 98.2%
-
-🧬 STRUCTURAL DRIFT (Layer 4)
-   Overall severity: CRITICAL
-   src/core/auth.py: 12 nodes deleted (94.0%) [CRITICAL]
-
-⏱  TEMPORAL DRIFT (Layer 5a)
-   Status: DANGEROUS  |  Drift Score: 3120.0
-
-🔎 SEMANTIC TRANSPARENCY (Layer 5b)
-   Status: DECEPTIVE_PAYLOAD
-   Matched keyword: "minor syntax fix"
-
-🔍 VERDICT: DESTRUCTIVE [CRITICAL]
-
-✉️  RECOMMENDATION:
-   ❌ DO NOT MERGE — This would catastrophically alter the codebase
+   Branch age: 14 days
+   Branch: a1b2c3d (2026-04-08)
+   Target:  e4f5g6h (2026-04-22)
 ```
 
 ---
 
-## Verdicts
+### 📁 File changes
 
-| Verdict | Meaning |
+Raw scope of the changeset — files added, deleted, modified. Deletions are the number to watch. A PR that adds 2 files and deletes 40 is not a normal PR.
+
+```
+📁 FILE CHANGES
+   Added:      3
+   Deleted:    1
+   Modified:   5
+   Total:      9
+```
+
+---
+
+### 📝 Line changes
+
+Volume and direction of change. Deletion ratio is the derived signal — what fraction of total churn is removal. Above 50% starts raising flags; above 90% means almost everything this PR touches is being taken away.
+
+```
+📝 LINE CHANGES
+   Added:        420 lines
+   Deleted:       18 lines
+   Net:          402 lines
+   Deletion ratio: 4.1%
+```
+
+---
+
+### 🧬 Structural drift — Layer 4
+
+Parses every modified Python file into an AST and computes exactly which named classes and functions disappeared. This is the layer that catches a file being "modified" when it's actually been gutted — line diffs alone won't tell you that `AuthManager` and `SessionStore` no longer exist.
+
+Flags `CRITICAL` only when both conditions are met: deletion ratio exceeds the threshold **and** enough nodes were deleted. The dual gate prevents noise from small utility files.
+
+```
+🧬 STRUCTURAL DRIFT (Layer 4)
+   Overall severity: LOW
+   Max deletion ratio: 0.0%
+```
+
+If something is actually being removed at scale:
+
+```
+🧬 STRUCTURAL DRIFT (Layer 4)
+   Overall severity: CRITICAL
+   src/core/auth.py: 8 nodes deleted (80.0%) [CRITICAL]
+      - AuthManager
+      - SessionStore
+      - TokenValidator
+```
+
+---
+
+### ⏱ Temporal drift — Layer 5a
+
+Compound score: `branch_age_days × target_commits_per_day`. Raw age alone is a weak signal — a 90-day branch on a slow repo is nothing; on a fast repo it's a serious semantic gap. The drift score accounts for both.
+
+| Status | Drift Score | Meaning |
+|---|---|---|
+| `CURRENT` | < 250 | Branch context is valid |
+| `STALE` | 250 – 999 | Moderate drift — manual diff review |
+| `DANGEROUS` | ≥ 1000 | Rebase required before this goes anywhere near main |
+
+```
+⏱  TEMPORAL DRIFT (Layer 5a)
+   Status: CURRENT [LOW]
+   Drift Score: 14.0
+   Target velocity: 1.0 commits/day
+   ✓ SAFE. Branch context is synchronized with target.
+```
+
+---
+
+### 🔎 Semantic transparency — Layer 5b
+
+Compares the PR description against the verified severity. If the description uses low-impact language ("minor fix", "typo", "cleanup") but the structural verdict is `CRITICAL`, that's a `DECEPTIVE_PAYLOAD`. Advisory signal — doesn't override the main verdict, but it shows up clearly.
+
+| Status | Meaning |
 |---|---|
-| `SAFE` | Clean |
-| `REVIEW` | Worth a look |
-| `CAUTION` | Something's off |
-| `DESTRUCTIVE` | Walk away |
+| `TRANSPARENT` | Description matches what the diff actually does |
+| `UNVERIFIED` | No description provided |
+| `DECEPTIVE_PAYLOAD` | Description claims low impact, diff says otherwise |
+
+```
+🔎 SEMANTIC TRANSPARENCY (Layer 5b)
+   Status: TRANSPARENT
+   ✓ SAFE. PR description aligns with verified structural impact.
+```
+
+---
+
+### 🔍 Verdict
+
+The final call. Produced by the consequence model (Layer 3) which accumulates a weighted score across all signals. No single threshold triggers it — it's the combination that matters.
+
+| Verdict | Severity | Score | Meaning |
+|---|---|---|---|
+| `SAFE` | LOW | 0 | Nothing notable. Proceed. |
+| `REVIEW` | MEDIUM | 1–2 | Minor flags. Worth a look but not alarming. |
+| `CAUTION` | HIGH | 3–4 | Real signals. Needs proper review before merge. |
+| `DESTRUCTIVE` | CRITICAL | ≥ 5 | Stop. Do not merge. |
+
+```
+🔍 VERDICT: SAFE [LOW]
+   ⚠️  No major red flags detected
+
+✉️  RECOMMENDATION:
+   ✓ Proceed with normal review process
+```
 
 ---
 
@@ -169,7 +248,7 @@ Five layers. Every scan, every time.
 | 2 — Forensic Analysis | Deletion ratio, critical path detection |
 | 3 — Consequence Model | Weighted score → final verdict |
 | 4 — Structural Drift | AST diff — which classes and functions actually disappeared |
-| 5a — Temporal Drift | Branch age × repo velocity. Old branch on a fast-moving repo is a different animal than old branch on a slow one |
+| 5a — Temporal Drift | Branch age × repo velocity |
 | 5b — Semantic Transparency | Does the PR description match what the diff actually does |
 
 ### Scoring (Layer 3)
@@ -186,32 +265,91 @@ Points accumulate across signals. No single threshold kills you — it's the pil
 
 `≥ 5` → DESTRUCTIVE. `3–4` → CAUTION. `1–2` → REVIEW. `0` → SAFE.
 
-### Structural drift (Layer 4)
-
-Parses modified Python files into ASTs and diffs the named nodes — classes, functions, async functions. Flags CRITICAL only when both conditions land:
-
-- Deletion ratio exceeds threshold (default 20%)
-- Deleted node count hits minimum (default 3)
-
-The dual gate stops it crying wolf over small utility files losing one helper.
-
-### Temporal drift (Layer 5a)
-
-`Drift Score = branch_age_days × target_commits_per_day`
-
-Raw age is a bad metric on its own. 90 days on a repo with 1 commit/week is nothing. 90 days on a repo shipping 20 commits/day is a different problem entirely.
-
-### Semantic transparency (Layer 5b)
-
-Checks whether the PR description matches the actual severity. If someone calls a `CRITICAL`-severity change a "minor fix" or a "typo", that's flagged `DECEPTIVE_PAYLOAD`. Layer 5 verdicts are advisory — they show up in the report but don't override the main verdict.
-
 ---
 
 ## The incident
 
-April 2026. A developer got a Codex suggestion: *"minor syntax fix"*. The branch was 10 months old. Nobody looked closely. It would have deleted 60 files, 11,967 lines, 217 tests, and the entire application architecture in one merge.
+In April 2026, a developer received a Codex suggestion described as a *"minor syntax fix"*. The branch had been open for 10 months. Nobody looked closely enough. It would have deleted 60 files, 11,967 lines, 217 tests, and the entire application architecture in a single merge. That's what this tool was built to stop.
 
-PayloadGuard catches every signal that produced: the age, the deletion ratio, the structural wipeout, and the gap between what the description claimed and what the diff actually did.
+Below is the forensic report PayloadGuard would have produced on that branch.
+
+```
+======================================================================
+PAYLOADGUARD ANALYSIS: codex-suggestion → main
+======================================================================
+
+📅 TEMPORAL
+   Branch age: 312 days
+   Branch: fa3c21d (2025-06-04)
+   Target:  b87e90a (2026-04-22)
+
+📁 FILE CHANGES
+   Added:      2
+   Deleted:   61
+   Modified:   4
+   Total:     67
+
+📝 LINE CHANGES
+   Added:        214 lines
+   Deleted:   11,967 lines
+   Net:       -11,753 lines
+   Deletion ratio: 98.2%
+
+🧬 STRUCTURAL DRIFT (Layer 4)
+   Overall severity: CRITICAL
+   Max deletion ratio: 94.0%
+   src/core/auth.py: 12 nodes deleted (94.0%) [CRITICAL]
+      - AuthManager
+      - SessionStore
+      - TokenValidator
+      - PermissionGate
+      - RoleRegistry
+
+⏱  TEMPORAL DRIFT (Layer 5a)
+   Status: DANGEROUS [CRITICAL]
+   Drift Score: 3120.0
+   Target velocity: 10.0 commits/day
+   ❌ DO NOT MERGE. Extreme semantic drift detected. Mandatory rebase
+      and manual architectural review required.
+
+🔎 SEMANTIC TRANSPARENCY (Layer 5b)
+   Status: DECEPTIVE_PAYLOAD
+   Matched keyword: "minor syntax fix"
+   ❌ DO NOT MERGE. PR description deliberately contradicts catastrophic
+      architectural changes.
+
+🔍 VERDICT: DESTRUCTIVE [CRITICAL]
+   ⚠️  Branch is 312 days old (6+ months)
+   ⚠️  61 files would be deleted (massive scope)
+   ⚠️  Deletion ratio: 98.2% (almost entire changeset is deletions)
+   ⚠️  Structural drift CRITICAL — significant Python class/function
+       deletions detected
+   ⚠️  11,967 lines would be deleted (large codebase change)
+
+✉️  RECOMMENDATION:
+   ❌ DO NOT MERGE — This would catastrophically alter the codebase
+
+🗑️  DELETED FILES (61 total)
+
+   CRITICAL DELETIONS:
+      - tests/test_auth.py
+      - tests/test_core.py
+      - tests/test_integration.py
+      - .github/workflows/ci.yml
+      - src/core/auth.py
+      - src/core/engine.py
+      - requirements.txt
+
+   OTHER DELETIONS:
+      - src/modules/session.py
+      - src/modules/permissions.py
+      - src/modules/roles.py
+      ... and 51 more files
+
+======================================================================
+```
+
+Every signal was there. The age. The deletion ratio. The structural wipeout. The gap between what the description said and what the diff actually did. Nobody saw it. Now you will.
 
 ---
 
