@@ -28,6 +28,15 @@ def main():
     head_sha        = _require_env("PR_HEAD_SHA")
     repo            = _require_env("GITHUB_REPOSITORY")
 
+    # §5.4 — Validate key format before passing to jwt so any misconfiguration
+    # surfaces as a clear message rather than a cryptic crypto library exception.
+    if "-----BEGIN" not in private_key or "PRIVATE KEY-----" not in private_key:
+        raise EnvironmentError(
+            "PAYLOADGUARD_PRIVATE_KEY does not look like a valid PEM private key. "
+            "Expected a string containing '-----BEGIN RSA PRIVATE KEY-----' or "
+            "'-----BEGIN PRIVATE KEY-----'."
+        )
+
     try:
         exit_code = int(os.environ.get("PAYLOADGUARD_EXIT_CODE", "1"))
     except ValueError:

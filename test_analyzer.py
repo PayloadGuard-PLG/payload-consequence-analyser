@@ -1076,6 +1076,21 @@ class TestPostCheckRun(unittest.TestCase):
                 printed = " ".join(str(c) for c in mock_print.call_args_list)
                 self.assertIn("skipping", printed.lower())
 
+    def test_malformed_private_key_raises_clear_error(self):
+        """§5.4 — A non-PEM private key must raise EnvironmentError before jwt is called."""
+        pcr = self._import_pcr()
+        bad_env = {
+            "PAYLOADGUARD_APP_ID": "12345",
+            "PAYLOADGUARD_PRIVATE_KEY": "not-a-pem-key",
+            "PAYLOADGUARD_INSTALLATION_ID": "99999",
+            "PR_HEAD_SHA": "abc123",
+            "GITHUB_REPOSITORY": "owner/repo",
+        }
+        with patch.dict(os.environ, bad_env, clear=False):
+            with self.assertRaises(EnvironmentError) as ctx:
+                pcr.main()
+        self.assertIn("PEM", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
