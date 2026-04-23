@@ -467,6 +467,23 @@ class PayloadAnalyzer:
             files_copied   = len([d for d in diffs if d.change_type == 'C'])
             files_typed    = len([d for d in diffs if d.change_type == 'T'])
 
+            # Permission change detection (§1.5): making a script executable without
+            # changing content is a meaningful signal and shows up as a mode change.
+            permission_changes = []
+            for d in diffs:
+                try:
+                    a_mode = getattr(d, 'a_mode', None)
+                    b_mode = getattr(d, 'b_mode', None)
+                    if a_mode and b_mode and a_mode != b_mode:
+                        permission_changes.append({
+                            "file": d.b_path or d.a_path or '',
+                            "from_mode": oct(a_mode),
+                            "to_mode": oct(b_mode),
+                            "made_executable": bool(b_mode & 0o111 and not (a_mode & 0o111)),
+                        })
+                except Exception:
+                    pass
+
             # Use git's own numstat for line counts: handles binary files correctly
             # ('-' entries) and avoids loading blobs into memory.
             lines_added = 0
@@ -624,6 +641,7 @@ class PayloadAnalyzer:
                 "temporal_drift": temporal_drift,
                 "semantic": semantic,
                 "commit_flags": commit_flags,
+                "permission_changes": permission_changes,
                 "deleted_files": {
                     "total": len(deleted_files),
                     "critical": critical_deletions[:10],
@@ -843,6 +861,13 @@ def print_report(report):
             remaining = deleted['total'] - len(deleted['all'])
             if remaining > 0:
                 print(f"      ... and {remaining} more files")
+
+    perm_changes = report.get('permission_changes', [])
+    executable_changes = [p for p in perm_changes if p.get('made_executable')]
+    if executable_changes:
+        print(f"\n🔐 PERMISSION CHANGES ({len(executable_changes)} file(s) made executable)")
+        for p in executable_changes[:5]:
+            print(f"   {p['file']}  {p['from_mode']} → {p['to_mode']}")
 
     print("\n" + "="*70 + "\n")
 

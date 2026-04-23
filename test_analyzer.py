@@ -651,6 +651,18 @@ class TestAnalyzeSuccess(unittest.TestCase):
         self.assertEqual(len(result["commit_flags"]), 1)
         self.assertEqual(result["commit_flags"][0]["sha"], "abcdef1")
 
+    def test_permission_changes_detected(self):
+        d = self._build_mock_diff("M")
+        d.a_mode = 0o100644  # regular non-executable
+        d.b_mode = 0o100755  # executable
+        d.b_path = "deploy.sh"
+        a = self._setup_repo([d])
+        result = a.analyze()
+        self.assertIn("permission_changes", result)
+        exe = [p for p in result["permission_changes"] if p.get("made_executable")]
+        self.assertEqual(len(exe), 1)
+        self.assertEqual(exe[0]["file"], "deploy.sh")
+
 
 # ==============================================================================
 # LAYER 5a — TemporalDriftAnalyzer
