@@ -1,6 +1,6 @@
 # PayloadGuard — Technical Whitepaper
 
-**Version:** 1.0 — April 2026
+**Version:** 1.1 — April 2026
 **Repository:** `darkvader-plg/payload-consequence-analyser`
 
 ---
@@ -407,7 +407,7 @@ The test harness (`darkvader-plg/payloadguard-test-harness`) maintains 18 perman
 3. The script polls GitHub Check Runs until all 18 complete
 4. PRs are closed
 5. `ingest.py` pulls the `payloadguard-results` artifact from each workflow run and writes to SQLite
-6. `dashboard.py` visualises results with a threshold simulator
+6. `dashboard.py` visualises results with a threshold simulator; the **Last Run** summary card shows a full `YYYY-MM-DD HH:MM` timestamp linked directly to the GitHub Actions workflow run that produced the data
 
 ### 6.2 Test Case Matrix
 

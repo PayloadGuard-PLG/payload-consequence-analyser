@@ -10,6 +10,7 @@ Full-day session building a local regression harness, running the analyser again
 
 ### Commits (newest first)
 
+- `2a84a35` — Show full timestamp with GitHub Actions link in Last Run card (test-harness)
 - `2844ff6` — Sync simulate_verdict with current analyze.py scoring logic
 - `a7cb6b7` — Fix pass rate metric to reflect latest run per test case
 - `d36bf88` — Raise structural CRITICAL score +3→+5; add database file to critical patterns
@@ -127,6 +128,8 @@ Result after these fixes: **17/18** passing. Only A06 (threshold-gaming) remains
 **Pass rate metric** changed from all-time historical average (63% across all regression rounds including early sessions with old code) to latest run per test case (94% = 17/18). The summary card now reflects current detection capability.
 
 **`simulate_verdict`** rewritten to match the current `analyze.py` scoring exactly: structural +5, critical files +2 flat, `_RATIO_MIN_LINES` bypass, security file +5, cross-file aggregation. The simulator was previously diverging from actual CI results, making threshold exploration misleading.
+
+**Last Run card** now shows `YYYY-MM-DD HH:MM` (full timestamp, not date only) and the value is a hyperlink to the specific GitHub Actions workflow run that produced the data. Commit `2a84a35` (test-harness PR #26).
 
 ---
 
