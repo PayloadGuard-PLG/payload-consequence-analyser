@@ -551,4 +551,49 @@ Layer 5b fires only when the PR description contains one of the configured benig
 
 ---
 
+## 9. GitHub 2026 Roadmap Alignment
+
+PayloadGuard complements GitHub's 2026 security roadmap without overlapping it. GitHub is building the execution-security layer — dependency locking, policy controls, egress firewalls, real-time monitoring. PayloadGuard is the **semantic consequence layer** that sits upstream: it analyzes what a change *means* before it merges, where execution-level controls cannot yet reach.
+
+### 9.1 Layer-to-Roadmap Mapping
+
+| PayloadGuard Layer | What it detects | 2026 Roadmap Pillar |
+|---|---|---|
+| L1 — Surface Scan | File deletions, binary files, permission changes, symlink replacements | Hardened CI/CD infrastructure |
+| L2 — Forensic | Critical path files, deletion ratios, config-only destruction | Hardened CI/CD infrastructure |
+| L3 — Consequence Model | Compound severity score across all dimensions | Policy controls — "PR must be SAFE or REVIEW to merge" |
+| L4 — Structural Drift | Named classes/functions that disappeared | Observability — "what actually changed" (not just what lines moved) |
+| L5a — Temporal | Branch staleness, semantic gap relative to target velocity | Observability — stale-context risk surfaced before execution |
+| L5b — Semantic Transparency | Deceptive descriptions, commit red-flag keywords | Policy controls — description must align with verified impact |
+
+### 9.2 Complementary, Not Overlapping
+
+```
+GitHub 2026 secures:                      PayloadGuard secures:
+┌────────────────────────────────┐         ┌────────────────────────────────┐
+│  What runs                     │         │  What changed                  │
+│  Dependency integrity          │   +     │  Structural consequence         │
+│  Runtime egress boundaries     │         │  Deceptive intent detection    │
+│  Workflow actor permissions    │         │  Cross-language drift analysis  │
+│  Policy enforcement at merge   │         │  Semantic mismatch flagging    │
+└────────────────────────────────┘         └────────────────────────────────┘
+         Execution-centric                          Change-centric
+```
+
+GitHub ensures the merge pipeline is secure. PayloadGuard ensures the thing being merged is safe. Both are required; neither replaces the other.
+
+### 9.3 Pending Integration Points (2026)
+
+Three test cases (T23–T25) are reserved in the regression harness for GitHub 2026 APIs that are not yet available:
+
+| Test | Trigger | GitHub 2026 Feature |
+|---|---|---|
+| T23 | Dependency lock file tampered in PR | Immutable workflow dependency locking |
+| T24 | Workflow redefines GITHUB_TOKEN scopes | Centralized policy controls API |
+| T25 | PR adds secret exfiltration command | Native egress firewall (upstream complement) |
+
+When these APIs land, the test branches will be created and T23–T25 will enter the active regression suite.
+
+---
+
 *PayloadGuard — because AI doesn't feel bad about what it breaks.*
