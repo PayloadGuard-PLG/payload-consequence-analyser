@@ -39,6 +39,9 @@ outputs:
   report-path:
     description: Absolute path to the generated markdown report
     value: ${{ steps.scan.outputs.report_path }}
+  json-report-path:
+    description: Absolute path to the generated JSON report
+    value: ${{ steps.scan.outputs.json_report_path }}
   verdict:
     description: "Verdict string: SAFE, REVIEW, CAUTION, or DESTRUCTIVE"
     value: ${{ steps.scan.outputs.verdict }}
@@ -66,15 +69,18 @@ runs:
         PYTHONUTF8: "1"
         PG_PR_DESCRIPTION: ${{ inputs.pr-description }}
         REPORT_PATH: ${{ github.workspace }}/${{ inputs.save-markdown }}
+        JSON_REPORT_PATH: ${{ github.workspace }}/payloadguard-report.json
       run: |
         set +e
         python "${{ github.action_path }}/analyze.py" . \
           "${{ github.head_ref }}" "${{ github.base_ref }}" \
           --pr-description "$PG_PR_DESCRIPTION" \
-          --save-markdown "$REPORT_PATH"
+          --save-markdown "$REPORT_PATH" \
+          --save-json "$JSON_REPORT_PATH"
         EXIT=$?
         echo "exit_code=$EXIT" >> "$GITHUB_OUTPUT"
         echo "report_path=$REPORT_PATH" >> "$GITHUB_OUTPUT"
+        echo "json_report_path=$JSON_REPORT_PATH" >> "$GITHUB_OUTPUT"
         case $EXIT in
           0) echo "verdict=SAFE"        >> "$GITHUB_OUTPUT" ;;
           2) echo "verdict=DESTRUCTIVE" >> "$GITHUB_OUTPUT" ;;
