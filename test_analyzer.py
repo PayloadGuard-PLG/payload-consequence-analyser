@@ -989,9 +989,9 @@ class TestCriticalPathScoring(unittest.TestCase):
         v = self.a._assess_consequence(0, 0, 0, 0, critical_file_deletions=0)
         self.assertEqual(v["status"], "SAFE")
 
-    def test_small_critical_deletions_adds_one_point(self):
+    def test_small_critical_deletions_adds_two_points(self):
         v = self.a._assess_consequence(0, 0, 0, 0, critical_file_deletions=1)
-        self.assertEqual(v["severity_score"], 1)
+        self.assertEqual(v["severity_score"], 2)
         self.assertEqual(v["status"], "REVIEW")
 
     def test_many_critical_deletions_adds_two_points(self):
