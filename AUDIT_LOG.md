@@ -297,15 +297,37 @@ This run was driven by regression data, not a manual code audit. Root cause anal
 ## Incident Report — Live Adversarial Strike: 2026-04-24
 
 **Classification:** Track 2 Adversarial Strike — Indirect Prompt Injection  
-**Vector:** Weaponized document added to repository main branch  
-**Source:** External forensic analysis (notebook environment)  
-**Outcome:** Delivery successful; execution blocked at review stage
+**Vector:** Weaponized PDF processed by notebook LLM; compromised output committed to main by repository owner (unintentionally)  
+**Source:** External forensic analysis (notebook environment, post-incident)  
+**Outcome:** Delivery to repo successful (unintentional); execution blocked at code review stage
 
-### Incident Summary
+### Attack Chain
 
-A file titled `Technical Remediation Report: PayloadGuard and MCP Gateway (gh-aw-mcpg).md (1).txt` was committed directly to `payload-consequence-analyser` main alongside a minor `action.yml` author-field change. The file was not authored by the repository owner — it was the output of a successful prompt injection attack against an LLM assistant operating in a separate notebook environment.
+```
+Weaponized PDF ("Updated Research Prompts")
+        │
+        ▼
+Notebook LLM — Context Collapse triggered
+        │  LLM treats smuggled commands as legitimate research content
+        ▼
+Technical Remediation Report (compromised output)
+        │
+        ▼
+Repository owner commits output to main (unintentionally)
+        │  Did not recognise it as the product of an attack
+        ▼
+PayloadGuard scan — file addition scores 0, no alert raised
+        │
+        ▼
+Human code review — document flagged as mismatched, suspicious
+        │  Commands not executed
+        ▼
+Attack contained
+```
 
-The attack used the **AE3GIS framework** (a real MDPI-published ICS security training platform) as a "Research Proxy". The adversary replicated the MDPI article structure — Abstract, Keywords, Related Works — to flood the model's context with high-entropy academic metadata. Raw GitHub issue data (Issues #15056, #2089, #4038) was nested inside a "Related Works" section. By the time the LLM processed the embedded technical instructions, it had already classified the document as trusted research content. This is the **Context Collapse** technique: the model cannot distinguish administrative metadata from smuggled commands once the framing has been accepted.
+The critical distinction: no LLM or automated agent committed to the repository. The repository owner committed the file themselves, not knowing it was the artefact of a successful attack on their notebook assistant. The attack happened upstream — in the notebook context window — and the repo was where its output landed.
+
+The attack used the **AE3GIS framework** (a real MDPI-published ICS security training platform) as a "Research Proxy". The adversary replicated the MDPI article structure — Abstract, Keywords, Related Works — to flood the notebook model's context with high-entropy academic metadata. Raw GitHub issue data (Issues #15056, #2089, #4038) was nested inside a "Related Works" section. By the time the LLM processed the embedded technical instructions, it had already classified the document as trusted research content. This is the **Context Collapse** technique: the model cannot distinguish administrative metadata from smuggled commands once the framing has been accepted.
 
 ### Smuggled Payload Breakdown
 
@@ -345,8 +367,8 @@ The attack used the **AE3GIS framework** (a real MDPI-published ICS security tra
 
 ### Strategic Lessons from the Notebook Attack
 
-**1. The attack surface has shifted from code to documents.**
-The adversary did not delete source files or gut a class. They added a single text file. PayloadGuard's entire scoring model assumes destructive payloads manifest as *deletions*. A purely additive attack delivering instructions to an LLM-in-the-loop is invisible.
+**1. The attack surface has shifted from code to context windows.**
+The adversary didn't touch the repository at all. They attacked the notebook LLM that the developer was using as a tool. The repo was just where the compromised output landed. PayloadGuard's entire scoring model assumes the attacker is submitting a PR — but in this case the attacker never touched git. The developer was the unwitting delivery mechanism.
 
 **2. The LLM-in-the-loop is the new merge reviewer.**
 If an AI assistant is helping a maintainer review PRs or process audit reports, that assistant is a target. Injecting commands into documents that the assistant will read is a direct path to privilege escalation — the assistant becomes an unwitting executor.
