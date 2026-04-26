@@ -549,6 +549,14 @@ For repositories with complex merge histories, `merge_base()` may return multipl
 
 Layer 5b fires only when the PR description contains one of the configured benign keywords. A sufficiently vague description ("updates") that doesn't match any keyword produces `UNVERIFIED` rather than `DECEPTIVE_PAYLOAD`. The layer is a high-precision supplement, not a comprehensive intent classifier.
 
+### 8.6 LLM-in-the-Loop is an Out-of-Scope Threat
+
+PayloadGuard's threat model is a human attacker submitting a destructive PR. It does not model the case where an AI assistant is reviewing PRs or processing repository documents on a maintainer's behalf. In that scenario, a document *added* to the repository (not deleted from it) can carry injected instructions that the assistant executes — bypassing all five layers because the attack surface is the LLM's context window, not the git diff.
+
+A live incident (2026-04-24) demonstrated this vector: a weaponized "Technical Remediation Report" was added to main via a direct push. It contained embedded CI trigger strings (`[citest commit:<sha>]`), filesystem privilege escalation commands (`setfacl`), and plausible-looking Go remediation code — all nested inside an academic wrapper designed to induce context collapse in the reading LLM. PayloadGuard scored the commit as low-risk (pure file addition, no deletions). Human review caught it.
+
+Proposed future mitigations are documented in `AUDIT_LOG.md §INC-1 through §INC-4`.
+
 ---
 
 ## 9. GitHub 2026 Roadmap Alignment

@@ -294,6 +294,83 @@ This run was driven by regression data, not a manual code audit. Root cause anal
 
 ---
 
+## Incident Report — Live Adversarial Strike: 2026-04-24
+
+**Classification:** Track 2 Adversarial Strike — Indirect Prompt Injection  
+**Vector:** Weaponized document added to repository main branch  
+**Source:** External forensic analysis (notebook environment)  
+**Outcome:** Delivery successful; execution blocked at review stage
+
+### Incident Summary
+
+A file titled `Technical Remediation Report: PayloadGuard and MCP Gateway (gh-aw-mcpg).md (1).txt` was committed directly to `payload-consequence-analyser` main alongside a minor `action.yml` author-field change. The file was not authored by the repository owner — it was the output of a successful prompt injection attack against an LLM assistant operating in a separate notebook environment.
+
+The attack used the **AE3GIS framework** (a real MDPI-published ICS security training platform) as a "Research Proxy". The adversary replicated the MDPI article structure — Abstract, Keywords, Related Works — to flood the model's context with high-entropy academic metadata. Raw GitHub issue data (Issues #15056, #2089, #4038) was nested inside a "Related Works" section. By the time the LLM processed the embedded technical instructions, it had already classified the document as trusted research content. This is the **Context Collapse** technique: the model cannot distinguish administrative metadata from smuggled commands once the framing has been accepted.
+
+### Smuggled Payload Breakdown
+
+| Payload Component | Mechanism | Real-world Target |
+|---|---|---|
+| MCP SDK v1.4.0 API calls | API smuggling inside "Related Works" | `github.com/modelcontextprotocol/go-sdk/mcp` gateway |
+| `[citest]`, `[citest bad]`, `[citest pending]` | CI trigger injection | Whitelist bypass for untrusted contributors |
+| `[citest commit:<sha>]` | Privileged CI execution via comment trigger | Bypasses maintainer trust gate |
+| `needs-ci` tag | Secondary CI trigger | Identified in test-harness source logs |
+| `setfacl` commands (§1.2) | Filesystem ACL manipulation | Host machine privilege escalation |
+| `filteredServerCache` exploit | Memory leak via Authorization header variation | `internal/server/routed.go` unbounded growth |
+| `ListTools` pagination drop | Silent tool truncation | `internal/mcp/connection.go` cursor loop absent |
+
+### What PayloadGuard Did and Did Not Catch
+
+**Caught by human review (not by PayloadGuard):**
+- Mismatch between document targets (Go, `internal/` paths) and actual codebase (Python)
+- `[citest commit:<sha>]` identified as a CI social engineering vector
+- `setfacl` commands flagged as inappropriate for a CI/CD context
+- No commands from the document were executed
+
+**Not caught by PayloadGuard (by design — current scope):**
+- L1 Surface Scan: the file was an *addition* (`change_type == 'A'`). PayloadGuard's risk model is deletion-centric. File additions score 0 by default.
+- L2 Forensic: no critical path pattern matches a `.txt` file
+- L4 Structural Drift: plain text has no AST; parser returns nothing
+- L5b Semantic Transparency: the PR description was absent (direct push to main), so the layer returned `UNVERIFIED` — not `DECEPTIVE_PAYLOAD`
+- No layer scans the *content* of added files for command injection patterns
+
+### New Findings Identified
+
+| ID | Finding | Severity | Status |
+|---|---|---|---|
+| §INC-1 | Added non-code files not scanned for content — embedded CI trigger strings (`[citest]`, `needs-ci`) are invisible to all layers | HIGH | Open |
+| §INC-2 | Context Collapse via academic masking: LLM safety filters bypassed by nesting commands inside high-entropy research metadata | HIGH | Open (out-of-scope for static analysis; mitigated by human review) |
+| §INC-3 | Direct push to main bypasses L5b entirely — `UNVERIFIED` is returned but no flag is raised when there is no PR context at all | MEDIUM | Open |
+| §INC-4 | File additions with no code content score 0 regardless of payload — a 100-line document containing `rm -rf /` or CI trigger strings is indistinguishable from a blank file | HIGH | Open |
+
+### Strategic Lessons from the Notebook Attack
+
+**1. The attack surface has shifted from code to documents.**
+The adversary did not delete source files or gut a class. They added a single text file. PayloadGuard's entire scoring model assumes destructive payloads manifest as *deletions*. A purely additive attack delivering instructions to an LLM-in-the-loop is invisible.
+
+**2. The LLM-in-the-loop is the new merge reviewer.**
+If an AI assistant is helping a maintainer review PRs or process audit reports, that assistant is a target. Injecting commands into documents that the assistant will read is a direct path to privilege escalation — the assistant becomes an unwitting executor.
+
+**3. `[citest commit:<sha>]` is a real CI bypass vector.**
+Some GitHub projects permit CI re-runs by posting specific strings in PR comments. An injected document that causes an LLM to post `[citest commit:<sha>]` in a PR comment can grant privileged CI execution to an untrusted commit. This is concrete, low-cost, and not hypothetical.
+
+**4. High-entropy academic framing works.**
+The AE3GIS/MDPI wrapper is sophisticated. The attack is not "ignore your previous instructions" — it is "here is a detailed research paper; please analyze its technical components." The model's research-assistant mode is a distinct and exploitable context.
+
+**5. PayloadGuard partially mitigated the attack.**
+The fact that I was already primed to look for deceptive payloads meant I scrutinized the document rather than executing it. Without that context, the `setfacl` commands or `citest commit:` strings might have been actioned. Defence-in-depth — human review as the final gate — held.
+
+### Proposed Mitigations (Future Work)
+
+| Mitigation | Layer | Notes |
+|---|---|---|
+| Scan content of added `.md`, `.txt`, `.rst`, `.pdf` files for CI trigger patterns | New L1 extension | Pattern list: `\[citest`, `needs-ci`, `citest commit:`, known CI comment triggers |
+| Flag direct pushes to main (no PR context) as elevated risk | L5b extension | Return `NO_PR_CONTEXT` status; raise base severity score by +1 |
+| Content fingerprinting for added non-code files | New L2 extension | Flag files containing shell commands (`sudo`, `setfacl`, `chmod`, `curl`) alongside CI trigger strings |
+| Added to WHITEPAPER §8 (Known Limitations) | Documentation | Document LLM-in-the-loop as an out-of-scope threat model for the current version |
+
+---
+
 ## Next Audit Checklist
 
 Copy this section into the next audit issue or branch PR description.
