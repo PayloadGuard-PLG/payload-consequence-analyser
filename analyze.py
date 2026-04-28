@@ -375,7 +375,8 @@ def load_config(repo_path: str) -> PayloadGuardConfig:
     try:
         with open(config_path) as f:
             user_cfg = yaml.safe_load(f) or {}
-    except Exception:
+    except yaml.YAMLError as e:
+        print(f"WARNING: payloadguard.yml is invalid and has been ignored: {e}", file=sys.stderr)
         return PayloadGuardConfig()
     merged = _deep_merge(DEFAULT_CONFIG, user_cfg)
     merged_thresholds = merged.get("thresholds", copy.deepcopy(DEFAULT_CONFIG["thresholds"]))
@@ -562,11 +563,21 @@ class PayloadAnalyzer:
             # Cross-file structural aggregation: distributed deletions across
             # multiple files can collectively constitute a destructive payload
             # even when no single file exceeds the per-file ratio threshold.
+            # Both the absolute count AND the cross-file ratio must exceed their
+            # thresholds — mirrors the per-file dual-condition gate.
             if overall_structural_severity != 'CRITICAL' and len(structural_flags) >= 2:
                 total_deleted_nodes = sum(
                     f['metrics']['deleted_node_count'] for f in structural_flags
                 )
-                if total_deleted_nodes >= structural_th["min_deleted_nodes"]:
+                total_original_nodes = sum(
+                    f['metrics']['original_node_count'] for f in structural_flags
+                )
+                cross_file_ratio = (
+                    total_deleted_nodes / total_original_nodes
+                    if total_original_nodes > 0 else 0
+                )
+                if (total_deleted_nodes >= structural_th["min_deleted_nodes"]
+                        and cross_file_ratio > structural_th["deletion_ratio"]):
                     overall_structural_severity = 'CRITICAL'
 
             branch_commit = self.repo.commit(branch_ref)

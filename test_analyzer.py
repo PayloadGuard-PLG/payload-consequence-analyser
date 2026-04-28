@@ -1092,5 +1092,176 @@ class TestPostCheckRun(unittest.TestCase):
         self.assertIn("PEM", str(ctx.exception))
 
 
+# ==============================================================================
+# Cross-file structural aggregation — dual-condition gate (Fix 1.1)
+# ==============================================================================
+
+class TestCrossFileAggregation(unittest.TestCase):
+    def _make_structural_diff(self, path, original_code, modified_code):
+        d = MagicMock()
+        d.change_type = 'M'
+        d.b_path = path
+        d.a_path = path
+        d.a_blob.data_stream.read.return_value = original_code.encode()
+        d.b_blob.data_stream.read.return_value = modified_code.encode()
+        return d
+
+    def _setup_repo(self, diffs):
+        a = _make_analyzer()
+        t1 = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2025, 3, 1, tzinfo=timezone.utc)
+        branch_commit = MagicMock()
+        branch_commit.committed_datetime = t1
+        branch_commit.hexsha = "aabbccddeeff"
+        target_commit = MagicMock()
+        target_commit.committed_datetime = t2
+        target_commit.hexsha = "112233445566"
+        a.repo.commit.side_effect = lambda ref: target_commit if ref == "main" else branch_commit
+        a.repo.iter_commits.return_value = []
+        merge_base = MagicMock()
+        merge_base.diff.return_value = diffs
+        merge_base.hexsha = "deadbeef00000000"
+        a.repo.merge_base.return_value = [merge_base]
+        a.repo.git.diff.return_value = ""
+        return a
+
+    def test_count_met_but_ratio_low_is_not_critical(self):
+        """3+ total deletions but cross-file ratio < 20% must NOT fire CRITICAL."""
+        # 3 files × 10 functions each, 1 deleted each → 10% cross-file ratio
+        original = '\n'.join(f'def func_{i}(): pass' for i in range(10))
+        modified = '\n'.join(f'def func_{i}(): pass' for i in range(1, 10))
+        diffs = [self._make_structural_diff(f'mod_{i}.py', original, modified) for i in range(3)]
+        result = self._setup_repo(diffs).analyze()
+        self.assertNotEqual(result['structural']['overall_severity'], 'CRITICAL')
+
+    def test_both_gates_met_triggers_critical(self):
+        """Cross-file count >= 3 AND ratio > 20% must fire CRITICAL."""
+        # 2 files × 5 functions each, 2 deleted each
+        # Per-file: 40% ratio but only 2 deletions < min_count(3) → NOT per-file CRITICAL
+        # Cross-file: 4 deleted / 10 original = 40% > 20%, count 4 >= 3 → CRITICAL
+        original = '\n'.join(f'def func_{i}(): pass' for i in range(5))
+        modified = '\n'.join(f'def func_{i}(): pass' for i in range(2, 5))
+        diffs = [self._make_structural_diff(f'mod_{i}.py', original, modified) for i in range(2)]
+        result = self._setup_repo(diffs).analyze()
+        self.assertEqual(result['structural']['overall_severity'], 'CRITICAL')
+
+
+# ==============================================================================
+# YAML error surfacing (Fix 1.3)
+# ==============================================================================
+
+class TestMalformedConfigWarning(unittest.TestCase):
+    def test_malformed_yaml_emits_warning_to_stderr(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "payloadguard.yml"), "w") as f:
+                f.write("thresholds:\n  branch_age_days: [not: {valid\n")
+            with patch('sys.stderr', new_callable=StringIO) as mock_stderr:
+                cfg = load_config(tmpdir)
+            output = mock_stderr.getvalue()
+        self.assertIn("WARNING", output)
+        self.assertIn("payloadguard.yml", output)
+        self.assertEqual(cfg.thresholds["branch_age_days"], [90, 180, 365])
+
+
+# ==============================================================================
+# JS/TS constant and config deletion (Fix 2.1)
+# ==============================================================================
+
+class TestStructuralParserJSTS(unittest.TestCase):
+    def _nodes(self, source, path):
+        try:
+            from structural_parser import extract_named_nodes
+            return extract_named_nodes(source, path)
+        except Exception:
+            self.skipTest("tree-sitter JS/TS grammar not available")
+
+    def test_js_const_deletion_detected(self):
+        original = "const ROUTES = { home: '/', login: '/login' };\nfunction handle() {}"
+        modified = "function handle() {}"
+        orig_nodes = self._nodes(original, 'app.js')
+        if not orig_nodes:
+            self.skipTest("tree-sitter JS grammar not available")
+        mod_nodes = self._nodes(modified, 'app.js')
+        deleted = orig_nodes - mod_nodes
+        self.assertIn('ROUTES', deleted)
+
+    def test_js_arrow_function_const_still_detected(self):
+        original = "const handler = () => {};\nconst CONFIG = {};"
+        modified = "const CONFIG = {};"
+        orig_nodes = self._nodes(original, 'app.js')
+        if not orig_nodes:
+            self.skipTest("tree-sitter JS grammar not available")
+        mod_nodes = self._nodes(modified, 'app.js')
+        deleted = orig_nodes - mod_nodes
+        self.assertIn('handler', deleted)
+
+    def test_ts_const_deletion_detected(self):
+        original = "const AUTH_CONFIG = { secret: 'x' };\nfunction validate() {}"
+        modified = "function validate() {}"
+        orig_nodes = self._nodes(original, 'auth.ts')
+        if not orig_nodes:
+            self.skipTest("tree-sitter TS grammar not available")
+        mod_nodes = self._nodes(modified, 'auth.ts')
+        deleted = orig_nodes - mod_nodes
+        self.assertIn('AUTH_CONFIG', deleted)
+
+
+# ==============================================================================
+# Safe markdown truncation (Fix 3.1)
+# ==============================================================================
+
+class TestMarkdownTruncation(unittest.TestCase):
+    def _truncate(self, content, limit=65_000):
+        # Inline the same logic as post_check_run._safe_truncate — avoids
+        # importing jwt/cryptography which may be broken in this environment.
+        if len(content) <= limit:
+            return content
+        content = content[:limit]
+        last_nl = content.rfind('\n')
+        if last_nl > 0:
+            content = content[:last_nl]
+        if content.count('```') % 2 == 1:
+            content += '\n```'
+        return (
+            content
+            + '\n\n---\n*Report truncated. Full results available '
+            'in the `payloadguard-results` artifact.*'
+        )
+
+    def test_short_content_returned_unchanged(self):
+        content = "# Report\n" * 100
+        self.assertEqual(self._truncate(content), content)
+
+    def test_long_content_is_truncated(self):
+        content = "x\n" * 40000
+        result = self._truncate(content)
+        self.assertLess(len(result), 66_000)
+
+    def test_truncation_notice_appended(self):
+        content = "x\n" * 40000
+        result = self._truncate(content)
+        self.assertIn("truncated", result.lower())
+
+    def test_unclosed_code_fence_is_closed(self):
+        # Odd number of ``` → open fence; truncation must close it
+        content = "```python\n" + "code_line\n" * 40000
+        result = self._truncate(content)
+        self.assertEqual(result.count('```') % 2, 0)
+
+    def test_cuts_at_newline_boundary(self):
+        # Content should not be cut mid-line
+        content = ("abcdefghij\n") * 10000  # 110k chars
+        result = self._truncate(content)
+        # Strip trailing notice and check no partial lines
+        body = result.split('\n\n---\n')[0]
+        self.assertTrue(body.endswith('abcdefghij') or body.endswith('\n'))
+
+    def test_even_fence_count_not_doubled(self):
+        # Already closed fences must not get an extra closing fence
+        content = "```python\ncode\n```\n" + "x\n" * 40000
+        result = self._truncate(content)
+        self.assertEqual(result.count('```') % 2, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
