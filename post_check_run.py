@@ -5,9 +5,39 @@ import stat
 import sys
 import time
 
+try:
+    import cryptography  # noqa: F401 — required by PyJWT for RS256
+except ImportError:
+    print(
+        "ERROR: The 'cryptography' package is required for RS256 JWT signing.\n"
+        "Install it with: pip install cryptography",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 import jwt
 import requests
 from requests.adapters import HTTPAdapter, Retry
+
+
+_GITHUB_LIMIT = 65_000  # leave headroom for truncation notice and closure
+
+
+def _safe_truncate(content: str, limit: int = _GITHUB_LIMIT) -> str:
+    """Truncate markdown to GitHub's Check Run character limit without corrupting structure."""
+    if len(content) <= limit:
+        return content
+    content = content[:limit]
+    last_nl = content.rfind('\n')
+    if last_nl > 0:
+        content = content[:last_nl]
+    if content.count('```') % 2 == 1:
+        content += '\n```'
+    return (
+        content
+        + '\n\n---\n*Report truncated. Full results available '
+        'in the `payloadguard-results` artifact.*'
+    )
 
 
 def _require_env(name: str) -> str:
@@ -28,8 +58,6 @@ def main():
     head_sha        = _require_env("PR_HEAD_SHA")
     repo            = _require_env("GITHUB_REPOSITORY")
 
-    # §5.4 — Validate key format before passing to jwt so any misconfiguration
-    # surfaces as a clear message rather than a cryptic crypto library exception.
     if "-----BEGIN" not in private_key or "PRIVATE KEY-----" not in private_key:
         raise EnvironmentError(
             "PAYLOADGUARD_PRIVATE_KEY does not look like a valid PEM private key. "
@@ -82,7 +110,7 @@ def main():
             st = os.stat(report_path)
             if stat.S_ISREG(st.st_mode):
                 with open(report_path, encoding="utf-8") as f:
-                    summary = f.read()[:65535]
+                    summary = _safe_truncate(f.read())
         except OSError:
             pass
 
