@@ -12,6 +12,7 @@ Example:
 """
 
 import argparse
+import ast
 import copy
 import git
 import re
@@ -24,6 +25,8 @@ from pathlib import Path
 from typing import Any, Dict, Union
 from dataclasses import dataclass, field
 import structural_parser
+
+__version__ = "1.1.0"
 
 
 # ==============================================================================
@@ -95,6 +98,79 @@ _COMMIT_RED_FLAG_PATTERNS = [
     r"\bremove\s+(auth|security|authentication|authorization)\b",
 ]
 
+# ==============================================================================
+# SCA — DEPENDENCY MANIFEST PATTERNS (Layer 2b)
+# Opt-in: only runs when allowlist.yml is present in the repo root.
+# ==============================================================================
+
+_MANIFEST_PATTERNS = {
+    r"(^|/)requirements[^/]*\.txt$": "pip",
+    r"(^|/)package\.json$":          "npm",
+    r"(^|/)go\.mod$":                "go",
+    r"(^|/)Cargo\.toml$":            "cargo",
+    r"(^|/)pyproject\.toml$":        "pyproject",
+}
+
+_MANIFEST_ALLOWLIST_KEY = {
+    "pip": "python", "pyproject": "python",
+    "npm": "npm", "go": "go", "cargo": "rust",
+}
+
+_TOML_SKIP_KEYS = {"name", "version", "edition", "authors", "description", "license", "readme", "build"}
+_JSON_SKIP_KEYS = {
+    "version", "description", "name", "main", "scripts", "keywords",
+    "author", "license", "private", "type", "homepage", "repository", "bugs",
+}
+
+
+def _parse_added_packages(diff_text: str, manifest_type: str) -> list:
+    """Extract newly added package names from a unified diff of a manifest file."""
+    packages = []
+    for line in diff_text.splitlines():
+        if not line.startswith('+') or line.startswith('+++'):
+            continue
+        content = line[1:].strip()
+        if manifest_type in ("pip",):
+            m = re.match(r'^([A-Za-z0-9][A-Za-z0-9._-]*)', content)
+            if m:
+                packages.append(m.group(1).lower())
+        elif manifest_type == "pyproject":
+            m = re.match(r'^["\']?([A-Za-z0-9][A-Za-z0-9._-]*)', content)
+            if m:
+                pkg = m.group(1).lower()
+                if pkg not in _TOML_SKIP_KEYS:
+                    packages.append(pkg)
+        elif manifest_type == "npm":
+            m = re.match(r'^"([^"]+)"\s*:', content)
+            if m:
+                pkg = m.group(1)
+                if pkg not in _JSON_SKIP_KEYS:
+                    packages.append(pkg)
+        elif manifest_type == "go":
+            m = re.match(r'^(?:require\s+)?([a-z][a-z0-9./\-]+)\s+v', content)
+            if m:
+                packages.append(m.group(1))
+        elif manifest_type == "cargo":
+            m = re.match(r'^([a-zA-Z][a-zA-Z0-9_-]*)\s*[=\[]', content)
+            if m:
+                pkg = m.group(1).lower()
+                if pkg not in _TOML_SKIP_KEYS:
+                    packages.append(pkg)
+    return packages
+
+
+def _load_allowlist(repo_path: str):
+    """Load allowlist.yml from repo root. Returns None if absent (SCA opt-out)."""
+    p = Path(repo_path) / "allowlist.yml"
+    if not p.exists():
+        return None
+    try:
+        with open(p) as f:
+            data = yaml.safe_load(f) or {}
+        return {k: set(str(v).lower() for v in lst) for k, lst in data.items() if isinstance(lst, list)}
+    except Exception:
+        return None
+
 
 # ==============================================================================
 # LAYER 4: STRUCTURAL DRIFT DETECTION
@@ -133,12 +209,14 @@ class StructuralPayloadAnalyzer:
         file_path: str = "",
         deletion_ratio_threshold: float = 0.20,
         min_deletion_count: int = 3,
+        complexity_threshold: int = 15,
     ):
         self.original_code = original_code
         self.modified_code = modified_code
         self.file_path = file_path
         self.deletion_ratio_threshold = deletion_ratio_threshold
         self.min_deletion_count = min_deletion_count
+        self.complexity_threshold = complexity_threshold
 
     def _extract_core_nodes(self, source_text: str) -> set:
         return structural_parser.extract_named_nodes(source_text, self.file_path)
@@ -165,6 +243,29 @@ class StructuralPayloadAnalyzer:
             and len(deleted_nodes) >= self.min_deletion_count
         )
 
+        # Feature B: McCabe complexity advisory for newly added Python functions
+        complexity_advisory = []
+        if self.file_path.endswith('.py') and added_nodes:
+            try:
+                tree = ast.parse(self.modified_code)
+                for node in ast.walk(tree):
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        if node.name in added_nodes:
+                            complexity = 1
+                            for child in ast.walk(node):
+                                if isinstance(child, (ast.If, ast.For, ast.While, ast.ExceptHandler)):
+                                    complexity += 1
+                                elif isinstance(child, ast.BoolOp):
+                                    complexity += len(child.values) - 1
+                            if complexity > self.complexity_threshold:
+                                complexity_advisory.append({
+                                    "name": node.name,
+                                    "complexity": complexity,
+                                    "threshold": self.complexity_threshold,
+                                })
+            except SyntaxError:
+                pass
+
         return {
             "status": "DESTRUCTIVE" if is_destructive else "SAFE",
             "severity": "CRITICAL" if is_destructive else "LOW",
@@ -177,6 +278,7 @@ class StructuralPayloadAnalyzer:
             },
             "deleted_components": sorted(deleted_nodes),
             "added_components": sorted(added_nodes),
+            "complexity_advisory": complexity_advisory,
         }
 
 
@@ -332,8 +434,9 @@ DEFAULT_CONFIG = {
             "dangerous": 1000.0,
         },
         "structural": {
-            "deletion_ratio":    0.20,
-            "min_deleted_nodes": 3,
+            "deletion_ratio":       0.20,
+            "min_deleted_nodes":    3,
+            "complexity_threshold": 15,
         },
     },
     "semantic": {
@@ -344,6 +447,9 @@ DEFAULT_CONFIG = {
             "cosmetic", "minor update",
         ],
     },
+    "sca": {
+        "fail_on_unknown": True,
+    },
 }
 
 
@@ -351,6 +457,7 @@ DEFAULT_CONFIG = {
 class PayloadGuardConfig:
     thresholds: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["thresholds"]))
     semantic: dict   = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["semantic"]))
+    sca: dict        = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["sca"]))
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -386,10 +493,10 @@ def load_config(repo_path: str) -> PayloadGuardConfig:
             merged_thresholds[_key] = sorted(_val)
     return PayloadGuardConfig(
         thresholds=merged_thresholds,
-        semantic=merged.get("semantic",   copy.deepcopy(DEFAULT_CONFIG["semantic"])),
+        semantic=merged.get("semantic", copy.deepcopy(DEFAULT_CONFIG["semantic"])),
+        sca=merged.get("sca",           copy.deepcopy(DEFAULT_CONFIG["sca"])),
     )
-
-
+    
 # ==============================================================================
 # CORE ANALYZER
 # ==============================================================================
@@ -529,6 +636,7 @@ class PayloadAnalyzer:
             structural_score = 0.0
             structural_flags = []
             overall_structural_severity = "LOW"
+            complexity_advisory_all: list = []
 
             for d in diffs:
                 if d.change_type not in ('M', 'R'):
@@ -544,19 +652,23 @@ class PayloadAnalyzer:
                         file_path=path,
                         deletion_ratio_threshold=structural_th["deletion_ratio"],
                         min_deletion_count=structural_th["min_deleted_nodes"],
+                        complexity_threshold=structural_th.get("complexity_threshold", 15),
                     ).analyze_structural_drift()
-                    if 'error' not in result and result['metrics']['deleted_node_count'] > 0:
-                        ratio = result['metrics']['structural_deletion_ratio']
-                        structural_score = max(structural_score, ratio)
-                        structural_flags.append({
-                            'file': path,
-                            'status': result['status'],
-                            'severity': result['severity'],
-                            'metrics': result['metrics'],
-                            'deleted_components': result['deleted_components'],
-                        })
-                        if result['severity'] == 'CRITICAL':
-                            overall_structural_severity = 'CRITICAL'
+                    if 'error' not in result:
+                        for ca in result.get('complexity_advisory', []):
+                            complexity_advisory_all.append({'file': path, **ca})
+                        if result['metrics']['deleted_node_count'] > 0:
+                            ratio = result['metrics']['structural_deletion_ratio']
+                            structural_score = max(structural_score, ratio)
+                            structural_flags.append({
+                                'file': path,
+                                'status': result['status'],
+                                'severity': result['severity'],
+                                'metrics': result['metrics'],
+                                'deleted_components': result['deleted_components'],
+                            })
+                            if result['severity'] == 'CRITICAL':
+                                overall_structural_severity = 'CRITICAL'
                 except Exception:
                     pass
 
@@ -601,7 +713,48 @@ class PayloadAnalyzer:
                 if any(re.search(p, f) for p in _SECURITY_CRITICAL_PATTERNS)
             ]
 
+            # LAYER 2b: SCA — dependency manifest scanning (opt-in via allowlist.yml)
+            allowlist = _load_allowlist(self.repo_path)
+            sca_flags: list = []
+            sca_manifests_scanned: list = []
+            if allowlist is not None:
+                for d in diffs:
+                    if d.change_type not in ('A', 'M'):
+                        continue
+                    path = d.b_path or d.a_path or ''
+                    manifest_type = next(
+                        (mt for pat, mt in _MANIFEST_PATTERNS.items() if re.search(pat, path)),
+                        None,
+                    )
+                    if manifest_type is None:
+                        continue
+                    sca_manifests_scanned.append(path)
+                    allowlist_key = _MANIFEST_ALLOWLIST_KEY.get(manifest_type, manifest_type)
+                    allowed = allowlist.get(allowlist_key, set())
+                    try:
+                        diff_text = self.repo.git.diff(merge_base[0].hexsha, branch_ref, '--', path)
+                        added_pkgs = _parse_added_packages(diff_text, manifest_type)
+                        seen = set()
+                        for pkg in added_pkgs:
+                            if pkg not in allowed and pkg not in seen:
+                                seen.add(pkg)
+                                sca_flags.append({
+                                    "package": pkg,
+                                    "manifest": path,
+                                    "manifest_type": manifest_type,
+                                })
+                    except Exception:
+                        pass
+
+            sca_result = {
+                "status": "FLAGGED" if sca_flags else "CLEAN",
+                "unverified_packages": sca_flags[:20],
+                "manifest_files_scanned": sca_manifests_scanned,
+                "allowlist_active": allowlist is not None,
+            }
+
             # LAYER 3: CONSEQUENCE VERDICT
+            unverified_dep_count = len(sca_flags) if self.config.sca.get("fail_on_unknown", True) else 0
             verdict = self._assess_consequence(
                 files_deleted,
                 lines_deleted,
@@ -610,6 +763,7 @@ class PayloadAnalyzer:
                 overall_structural_severity,
                 critical_file_deletions=len(critical_deletions),
                 security_file_deletions=len(security_deletions),
+                unverified_dependencies=unverified_dep_count,
             )
 
             # LAYER 5a: TEMPORAL DRIFT
@@ -684,6 +838,8 @@ class PayloadAnalyzer:
                     "max_deletion_ratio_pct": round(structural_score, 2),
                     "flagged_files": structural_flags[:10],
                 },
+                "complexity_advisory": complexity_advisory_all[:20],
+                "sca": sca_result,
                 "temporal_drift": temporal_drift,
                 "semantic": semantic,
                 "commit_flags": commit_flags,
@@ -702,7 +858,7 @@ class PayloadAnalyzer:
                 "error_type": type(e).__name__,
             }
 
-    def _assess_consequence(self, files_deleted, lines_deleted, days_old, deletion_ratio, structural_severity="LOW", critical_file_deletions=0, security_file_deletions=0):
+    def _assess_consequence(self, files_deleted, lines_deleted, days_old, deletion_ratio, structural_severity="LOW", critical_file_deletions=0, security_file_deletions=0, unverified_dependencies=0):
         flags = []
         severity_score = 0.0
         th = self.config.thresholds
@@ -780,6 +936,10 @@ class PayloadAnalyzer:
         if security_file_deletions > 0:
             flags.append(f"{security_file_deletions} security-critical file(s) deleted (auth/security/permission)")
             severity_score += 5
+
+        if unverified_dependencies > 0:
+            flags.append(f"{unverified_dependencies} unverified package(s) added — not in allowlist.yml")
+            severity_score += 3
 
         if severity_score >= 5:
             return {
@@ -870,6 +1030,22 @@ def print_report(report):
             print(f"   {f['file']}: {m['deleted_node_count']} nodes deleted ({m['structural_deletion_ratio']}%) [{f['severity']}]")
             for comp in f['deleted_components'][:5]:
                 print(f"      - {comp}")
+
+    complexity_advisory = report.get('complexity_advisory', [])
+    if complexity_advisory:
+        print(f"\n📐 COMPLEXITY ADVISORY ({len(complexity_advisory)} function(s) above threshold)")
+        for ca in complexity_advisory[:10]:
+            print(f"   {ca['file']}: {ca['name']}() — V(G)={ca['complexity']} (threshold: {ca['threshold']})")
+
+    sca = report.get('sca', {})
+    if sca.get('allowlist_active'):
+        print(f"\n📦 SCA — DEPENDENCY SCAN: {sca['status']}")
+        if sca['manifest_files_scanned']:
+            print(f"   Manifests scanned: {', '.join(sca['manifest_files_scanned'])}")
+        if sca['unverified_packages']:
+            print(f"   Unverified packages ({len(sca['unverified_packages'])}):")
+            for pkg in sca['unverified_packages'][:10]:
+                print(f"      - {pkg['package']} ({pkg['manifest']})")
 
     if 'temporal_drift' in report:
         td = report['temporal_drift']
@@ -1085,6 +1261,36 @@ def format_markdown_report(report: dict) -> str:
         out.append(f"_{struct_note}_")
         out.append("")
 
+    # ── Complexity Advisory ───────────────────────────────────────────────────
+    complexity_advisory = report.get('complexity_advisory', [])
+    if complexity_advisory:
+        out.append("### 📐 Complexity Advisory")
+        out.append("_Newly added Python functions with McCabe cyclomatic complexity above the configured threshold (default V(G) > 15). Advisory only — no score impact. High complexity functions are harder to test and maintain._")
+        out.append("")
+        out.append("| File | Function | V(G) | Threshold |")
+        out.append("|---|---|---|---|")
+        for ca in complexity_advisory[:10]:
+            out.append(f"| `{_md_escape(ca['file'])}` | `{ca['name']}` | {ca['complexity']} | {ca['threshold']} |")
+        out.append("")
+
+    # ── SCA ───────────────────────────────────────────────────────────────────
+    sca = report.get('sca', {})
+    if sca.get('allowlist_active'):
+        sca_emoji = "🚨" if sca['status'] == 'FLAGGED' else "✅"
+        out.append("### 📦 SCA — Dependency Scan (Layer 2b)")
+        out.append("_Scans manifest file changes (requirements.txt, package.json, go.mod, Cargo.toml, pyproject.toml) for packages not in `allowlist.yml`. Only active when `allowlist.yml` is present in the repo root._")
+        out.append("")
+        out.append(f"**Status:** {sca_emoji} `{sca['status']}`")
+        if sca['manifest_files_scanned']:
+            out.append(f"  \n**Manifests scanned:** {', '.join(f'`{_md_escape(m)}`' for m in sca['manifest_files_scanned'])}")
+        if sca['unverified_packages']:
+            out.append("")
+            out.append("| Package | Manifest | Type |")
+            out.append("|---|---|---|")
+            for pkg in sca['unverified_packages'][:20]:
+                out.append(f"| `{_md_escape(pkg['package'])}` | `{_md_escape(pkg['manifest'])}` | {pkg['manifest_type']} |")
+        out.append("")
+
     # ── Temporal Drift ────────────────────────────────────────────────────────
     if 'temporal_drift' in report:
         td = report['temporal_drift']
@@ -1231,3 +1437,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
