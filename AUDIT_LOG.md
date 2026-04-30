@@ -294,6 +294,117 @@ This run was driven by regression data, not a manual code audit. Root cause anal
 
 ---
 
+## Incident Report — AI Research Tool Context Pollution: 2026-04-24
+
+**Classification:** AI Research Tool Context Pollution — Accidental Source Contamination  
+**Vector:** NotebookLM research session mixing PayloadGuard repo with unrelated external sources; hallucinated output committed to main by repository owner (unintentionally)  
+**Source:** Post-incident analysis by repository owner and code reviewer  
+**Outcome:** Corrupted document landed in main; no commands executed; caught at human review stage
+
+### What Actually Happened
+
+NotebookLM was conducting legitimate research on the PayloadGuard repository. During that session it pulled in external web sources — including the real AE3GIS framework (an MDPI-published ICS security testbed paper), GitHub issue threads, and MCP gateway documentation unrelated to this project. Unable to segregate these sources, it suffered **source contamination**: it began attributing AE3GIS's architecture (Purdue Model, GNS3, SCADA, OpenPLC) to PayloadGuard, producing a report that described this system as if it were an industrial control system testbed.
+
+The repository owner committed one of these corrupted outputs to main, not recognising it as hallucinated content — it was authoritative in tone and plausible in structure. There was no external attacker. The "Track 2 Adversarial Strike" framing in NotebookLM's own post-incident analysis was itself a hallucination — the model rationalised its source contamination error as an external threat rather than its own failure.
+
+### Contamination Chain
+
+```
+NotebookLM research session
+        │  Sources: PayloadGuard repo + AE3GIS paper + GitHub issues
+        │           + MCP gateway docs (unrelated)
+        ▼
+Source contamination — model cannot segregate contexts
+        │  High-entropy academic metadata (Purdue Model, GNS3, SCADA)
+        │  floods context alongside real PayloadGuard details
+        ▼
+Identity hallucination
+        │  PayloadGuard described as ICS testbed with Levels 0–5,
+        │  OpenPLC, ScadaBR, Docker orchestration, physics engine
+        ▼
+Corrupted report produced
+        │  Plausible tone, authoritative structure, wrong system
+        ▼
+Repository owner commits output to main (unintentionally)
+        │  Output appeared legitimate; contamination not yet visible
+        ▼
+PayloadGuard scan — file addition scores 0, no alert raised
+        │
+        ▼
+Human code review — architecture mismatch flagged
+        │  Go codebase, ICS components: none of this exists in PLG
+        ▼
+Contained — no commands executed
+```
+
+### Observable Contamination Artefacts
+
+The corrupted report contained elements from multiple colliding sources:
+
+| Element in corrupted report | Actual origin |
+|---|---|
+| Purdue Model Levels 0–5 | AE3GIS framework paper (MDPI) |
+| GNS3, Docker, OpenPLC, ScadaBR | AE3GIS implementation details |
+| `[citest]`, `needs-ci` triggers | GitHub issue threads pulled into context |
+| `setfacl` permission commands | MCP gateway deployment documentation |
+| `filteredServerCache` memory leak | Real MCP Go SDK GitHub issue (#4038) |
+| Hardware performance table (Mac Studio, MacBook Air) | AE3GIS scalability benchmarks |
+| PayloadGuard test case references | Actual PLG repo content (correctly sourced) |
+
+The contamination was not uniform — real PayloadGuard content (test cases, exit codes, scoring) was mixed with entirely fabricated architecture from other systems.
+
+### What PayloadGuard Did and Did Not Catch
+
+**Caught by human review (not by PayloadGuard):**
+- Architecture mismatch: Go files, `internal/` paths, ICS components — none exist in this Python codebase
+- `[citest commit:<sha>]` pattern identified as a known CI trigger mechanism
+- `setfacl` commands recognised as inappropriate for this system
+- No commands from the document were executed
+
+**Not caught by PayloadGuard (by design — current scope):**
+- L1 Surface Scan: the file was an *addition* (`change_type == 'A'`). PayloadGuard's risk model is deletion-centric. File additions score 0 by default.
+- L2 Forensic: no critical path pattern matches a `.txt` file
+- L4 Structural Drift: plain text has no AST; parser returns nothing
+- L5b Semantic Transparency: direct push to main — no PR context, layer returned `UNVERIFIED`, no flag raised
+- No layer scans the *content* of added files for command injection patterns
+
+### New Findings Identified
+
+| ID | Finding | Severity | Status |
+|---|---|---|---|
+| §INC-1 | Added non-code files not scanned for content — embedded CI trigger strings (`[citest]`, `needs-ci`) are invisible to all layers | HIGH | Open |
+| §INC-2 | AI research tool source contamination produces outputs functionally identical to deliberate injection — the mechanism is the same regardless of intent | HIGH | Open (out-of-scope for static analysis; mitigated by human review) |
+| §INC-3 | Direct push to main bypasses L5b entirely — `UNVERIFIED` is returned but no flag is raised when there is no PR context at all | MEDIUM | Open |
+| §INC-4 | File additions with no code content score 0 regardless of payload — a 100-line document containing `rm -rf /` or CI trigger strings is indistinguishable from a blank file | HIGH | Open |
+
+### Strategic Lessons
+
+**1. AI research tools can hallucinate plausible system identities.**
+NotebookLM didn't produce wrong facts — it produced a wrong *system*. The corrupted report described a coherent, technically detailed ICS testbed that does not exist. The output was authoritative enough that it wasn't immediately rejected. This is a different failure mode from simple factual errors.
+
+**2. The mechanism is functionally identical to deliberate injection — intent is irrelevant to the outcome.**
+Whether a corrupted document enters a repo because an adversary crafted it or because an AI research tool mixed sources, the result is the same: plausible-looking content that doesn't describe reality lands in version control. Defence must treat both cases equivalently.
+
+**3. NotebookLM's post-hoc "attack" classification was itself a hallucination.**
+After the user identified the contamination, NotebookLM reframed its own source contamination error as a deliberate "Track 2 Adversarial Strike." This is significant: AI systems rationalising their own errors as external threats can produce misleading forensic narratives. Incident analysis should not be delegated to the system that caused the incident.
+
+**4. The human review gap is the same in both cases.**
+The output was committed before anyone verified it matched reality. Whether the cause is malicious or accidental, the defence is the same: verify AI-generated content against the actual codebase before committing.
+
+**5. PayloadGuard's structural gaps remain real regardless of cause.**
+§INC-1 through §INC-4 are valid findings whether the origin is a deliberate injection or an accidental hallucination. The tool cannot currently detect dangerous content in added non-code files, and direct pushes to main produce no signal.
+
+### Proposed Mitigations (Future Work)
+
+| Mitigation | Layer | Notes |
+|---|---|---|
+| Scan content of added `.md`, `.txt`, `.rst`, `.pdf` files for CI trigger patterns | New L1 extension | Pattern list: `\[citest`, `needs-ci`, `citest commit:`, known CI comment triggers |
+| Flag direct pushes to main (no PR context) as elevated risk | L5b extension | Return `NO_PR_CONTEXT` status; raise base severity score by +1 |
+| Content fingerprinting for added non-code files | New L2 extension | Flag files containing shell commands (`sudo`, `setfacl`, `chmod`, `curl`) alongside CI trigger strings |
+| Added to WHITEPAPER §8 (Known Limitations) | Documentation | Document LLM-in-the-loop as an out-of-scope threat model for the current version |
+
+---
+
 ## Next Audit Checklist
 
 Copy this section into the next audit issue or branch PR description.

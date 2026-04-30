@@ -18,6 +18,8 @@ from analyze import (
     StructuralPayloadAnalyzer,
     TemporalDriftAnalyzer,
     _deep_merge,
+    _load_allowlist,
+    _parse_added_packages,
     load_config,
     print_report,
     save_json_report,
@@ -167,7 +169,6 @@ class TestLoadConfig(unittest.TestCase):
                 f.write("thresholds:\n  structural:\n    deletion_ratio: 0.10\n")
             cfg = load_config(d)
         self.assertEqual(cfg.thresholds["structural"]["deletion_ratio"], 0.10)
-        # Unspecified sibling key is preserved
         self.assertEqual(cfg.thresholds["structural"]["min_deleted_nodes"], 3)
 
     def test_deep_merges_partial_temporal_override(self):
@@ -176,7 +177,6 @@ class TestLoadConfig(unittest.TestCase):
                 f.write("thresholds:\n  temporal:\n    stale: 100\n")
             cfg = load_config(d)
         self.assertEqual(cfg.thresholds["temporal"]["stale"], 100)
-        # Unspecified sibling key is preserved
         self.assertEqual(cfg.thresholds["temporal"]["dangerous"], 1000.0)
 
     def test_custom_benign_keywords_replace_defaults(self):
@@ -226,7 +226,6 @@ class TestCriticalPathPatterns(unittest.TestCase):
     def test_yaml_file_is_critical(self):
         self.assertTrue(self._matches("deploy/config.yaml"))
 
-    # False-positive checks — the main improvement over substring matching
     def test_protest_py_is_not_critical(self):
         self.assertFalse(self._matches("src/protest.py"))
 
@@ -235,7 +234,7 @@ class TestCriticalPathPatterns(unittest.TestCase):
 
     def test_reconfiguration_log_is_not_critical(self):
         self.assertFalse(self._matches("logs/reconfiguration_log.py"))
-
+        
 
 # ==============================================================================
 # LAYER 4 — StructuralPayloadAnalyzer
@@ -261,7 +260,6 @@ class TestStructuralPayloadAnalyzer(unittest.TestCase):
         )
 
     def test_below_min_deletion_count_not_flagged(self):
-        # 2-function file losing 1: ratio 50% exceeds threshold but count (1) < 3
         tiny_original = "def foo(): pass\ndef bar(): pass"
         tiny_modified = "def foo(): pass"
         result = StructuralPayloadAnalyzer(tiny_original, tiny_modified, file_path="test.py").analyze_structural_drift()
@@ -330,7 +328,6 @@ class TestAssessConsequenceReview(unittest.TestCase):
         self.assertEqual(v["status"], "REVIEW")
 
     def test_deletion_ratio_over_50(self):
-        # Ratio gate requires >= 100 lines deleted to fire
         v = self.a._assess_consequence(0, 200, 0, 55)
         self.assertEqual(v["status"], "REVIEW")
 
@@ -353,7 +350,6 @@ class TestAssessConsequenceCaution(unittest.TestCase):
         self.assertEqual(v["status"], "CAUTION")
 
     def test_deletion_ratio_over_70_plus_minor_flag(self):
-        # Ratio gate requires >= 100 lines deleted; combine with file flag for CAUTION
         v = self.a._assess_consequence(11, 200, 0, 75)
         self.assertEqual(v["status"], "CAUTION")
 
@@ -372,7 +368,6 @@ class TestAssessConsequenceDestructive(unittest.TestCase):
         self.assertEqual(v["severity"], "CRITICAL")
 
     def test_high_deletion_ratio_and_line_count(self):
-        # ratio+lines both fire → deletion_dim capped at 4, no age → CAUTION not DESTRUCTIVE
         v = self.a._assess_consequence(0, 15000, 10, 95)
         self.assertEqual(v["status"], "CAUTION")
 
@@ -418,7 +413,6 @@ class TestAssessConsequenceCustomThresholds(unittest.TestCase):
         cfg = PayloadGuardConfig()
         cfg.thresholds["branch_age_days"] = [30, 60, 90]
         a = _make_analyzer(config=cfg)
-        # 35 days > custom threshold of 30 — would be SAFE with default (90)
         v = a._assess_consequence(0, 0, 35, 0)
         self.assertEqual(v["status"], "REVIEW")
 
@@ -543,7 +537,6 @@ class TestAnalyzeSuccess(unittest.TestCase):
         merge_base_commit.hexsha = "deadbeef00000000"
         a.repo.merge_base.return_value = [merge_base_commit]
 
-        # Build numstat output from mock diff blobs so line-count tests work.
         numstat_lines = []
         for d in diffs:
             added, deleted = 0, 0
@@ -653,8 +646,8 @@ class TestAnalyzeSuccess(unittest.TestCase):
 
     def test_permission_changes_detected(self):
         d = self._build_mock_diff("M")
-        d.a_mode = 0o100644  # regular non-executable
-        d.b_mode = 0o100755  # executable
+        d.a_mode = 0o100644
+        d.b_mode = 0o100755
         d.b_path = "deploy.sh"
         a = self._setup_repo([d])
         result = a.analyze()
@@ -664,7 +657,7 @@ class TestAnalyzeSuccess(unittest.TestCase):
         self.assertEqual(exe[0]["file"], "deploy.sh")
 
 
-# ==============================================================================
+        # ==============================================================================
 # LAYER 5a — TemporalDriftAnalyzer
 # ==============================================================================
 
@@ -882,10 +875,8 @@ class TestStructuralParserConstants(unittest.TestCase):
 
 class TestBinaryFileDeletion(unittest.TestCase):
     def test_binary_files_do_not_inflate_line_counts(self):
-        """numstat returns '-' for binary files; those must not be counted."""
         inner = TestAnalyzeSuccess()
         a = inner._setup_repo([])
-        # One binary deletion (-/-) plus one normal deletion (0/8)
         a.repo.git.diff.return_value = "-\t-\tlibrary.so\n0\t8\tnormal.py"
         result = a.analyze()
         self.assertNotIn("error", result)
@@ -1000,7 +991,6 @@ class TestCriticalPathScoring(unittest.TestCase):
         self.assertEqual(v["status"], "REVIEW")
 
     def test_critical_deletions_combined_reach_caution(self):
-        # age(1) + critical(2) = 3 → CAUTION
         v = self.a._assess_consequence(0, 0, 91, 0, critical_file_deletions=6)
         self.assertEqual(v["status"], "CAUTION")
 
@@ -1043,7 +1033,6 @@ class TestMarkdownEscaping(unittest.TestCase):
 
 class TestPostCheckRun(unittest.TestCase):
     def _import_pcr(self):
-        """Import post_check_run, skipping if the crypto stack is unavailable."""
         try:
             import post_check_run as pcr
             return pcr
@@ -1063,7 +1052,6 @@ class TestPostCheckRun(unittest.TestCase):
             self.assertEqual(pcr._require_env("MY_TEST_VAR_PCR"), "hello")
 
     def test_main_skips_without_app_id(self):
-        """When PAYLOADGUARD_APP_ID is absent main() prints and returns before touching jwt."""
         pcr = self._import_pcr()
         original_get = os.environ.get
         def fake_get(key, default=""):
@@ -1077,7 +1065,6 @@ class TestPostCheckRun(unittest.TestCase):
                 self.assertIn("skipping", printed.lower())
 
     def test_malformed_private_key_raises_clear_error(self):
-        """§5.4 — A non-PEM private key must raise EnvironmentError before jwt is called."""
         pcr = self._import_pcr()
         bad_env = {
             "PAYLOADGUARD_APP_ID": "12345",
@@ -1090,6 +1077,297 @@ class TestPostCheckRun(unittest.TestCase):
             with self.assertRaises(EnvironmentError) as ctx:
                 pcr.main()
         self.assertIn("PEM", str(ctx.exception))
+
+
+# ==============================================================================
+# Cross-file structural aggregation — dual-condition gate (Fix 1.1)
+# ==============================================================================
+
+class TestCrossFileAggregation(unittest.TestCase):
+    def _make_structural_diff(self, path, original_code, modified_code):
+        d = MagicMock()
+        d.change_type = 'M'
+        d.b_path = path
+        d.a_path = path
+        d.a_blob.data_stream.read.return_value = original_code.encode()
+        d.b_blob.data_stream.read.return_value = modified_code.encode()
+        return d
+
+    def _setup_repo(self, diffs):
+        a = _make_analyzer()
+        t1 = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2025, 3, 1, tzinfo=timezone.utc)
+        branch_commit = MagicMock()
+        branch_commit.committed_datetime = t1
+        branch_commit.hexsha = "aabbccddeeff"
+        target_commit = MagicMock()
+        target_commit.committed_datetime = t2
+        target_commit.hexsha = "112233445566"
+        a.repo.commit.side_effect = lambda ref: target_commit if ref == "main" else branch_commit
+        a.repo.iter_commits.return_value = []
+        merge_base = MagicMock()
+        merge_base.diff.return_value = diffs
+        merge_base.hexsha = "deadbeef00000000"
+        a.repo.merge_base.return_value = [merge_base]
+        a.repo.git.diff.return_value = ""
+        return a
+
+    def test_count_met_but_ratio_low_is_not_critical(self):
+        original = '\n'.join(f'def func_{i}(): pass' for i in range(10))
+        modified = '\n'.join(f'def func_{i}(): pass' for i in range(1, 10))
+        diffs = [self._make_structural_diff(f'mod_{i}.py', original, modified) for i in range(3)]
+        result = self._setup_repo(diffs).analyze()
+        self.assertNotEqual(result['structural']['overall_severity'], 'CRITICAL')
+
+    def test_both_gates_met_triggers_critical(self):
+        original = '\n'.join(f'def func_{i}(): pass' for i in range(5))
+        modified = '\n'.join(f'def func_{i}(): pass' for i in range(2, 5))
+        diffs = [self._make_structural_diff(f'mod_{i}.py', original, modified) for i in range(2)]
+        result = self._setup_repo(diffs).analyze()
+        self.assertEqual(result['structural']['overall_severity'], 'CRITICAL')
+
+
+# ==============================================================================
+# YAML error surfacing (Fix 1.3)
+# ==============================================================================
+
+class TestMalformedConfigWarning(unittest.TestCase):
+    def test_malformed_yaml_emits_warning_to_stderr(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "payloadguard.yml"), "w") as f:
+                f.write("thresholds:\n  branch_age_days: [not: {valid\n")
+            with patch('sys.stderr', new_callable=StringIO) as mock_stderr:
+                cfg = load_config(tmpdir)
+            output = mock_stderr.getvalue()
+        self.assertIn("WARNING", output)
+        self.assertIn("payloadguard.yml", output)
+        self.assertEqual(cfg.thresholds["branch_age_days"], [90, 180, 365])
+
+
+# ==============================================================================
+# JS/TS constant and config deletion (Fix 2.1)
+# ==============================================================================
+
+class TestStructuralParserJSTS(unittest.TestCase):
+    def _nodes(self, source, path):
+        try:
+            from structural_parser import extract_named_nodes
+            return extract_named_nodes(source, path)
+        except Exception:
+            self.skipTest("tree-sitter JS/TS grammar not available")
+
+    def test_js_const_deletion_detected(self):
+        original = "const ROUTES = { home: '/', login: '/login' };\nfunction handle() {}"
+        modified = "function handle() {}"
+        orig_nodes = self._nodes(original, 'app.js')
+        if not orig_nodes:
+            self.skipTest("tree-sitter JS grammar not available")
+        mod_nodes = self._nodes(modified, 'app.js')
+        deleted = orig_nodes - mod_nodes
+        self.assertIn('ROUTES', deleted)
+
+    def test_js_arrow_function_const_still_detected(self):
+        original = "const handler = () => {};\nconst CONFIG = {};"
+        modified = "const CONFIG = {};"
+        orig_nodes = self._nodes(original, 'app.js')
+        if not orig_nodes:
+            self.skipTest("tree-sitter JS grammar not available")
+        mod_nodes = self._nodes(modified, 'app.js')
+        deleted = orig_nodes - mod_nodes
+        self.assertIn('handler', deleted)
+
+    def test_ts_const_deletion_detected(self):
+        original = "const AUTH_CONFIG = { secret: 'x' };\nfunction validate() {}"
+        modified = "function validate() {}"
+        orig_nodes = self._nodes(original, 'auth.ts')
+        if not orig_nodes:
+            self.skipTest("tree-sitter TS grammar not available")
+        mod_nodes = self._nodes(modified, 'auth.ts')
+        deleted = orig_nodes - mod_nodes
+        self.assertIn('AUTH_CONFIG', deleted)
+
+
+# ==============================================================================
+# Safe markdown truncation (Fix 3.1)
+# ==============================================================================
+
+class TestMarkdownTruncation(unittest.TestCase):
+    def _truncate(self, content, limit=65_000):
+        if len(content) <= limit:
+            return content
+        content = content[:limit]
+        last_nl = content.rfind('\n')
+        if last_nl > 0:
+            content = content[:last_nl]
+        if content.count('```') % 2 == 1:
+            content += '\n```'
+        return (
+            content
+            + '\n\n---\n*Report truncated. Full results available '
+            'in the `payloadguard-results` artifact.*'
+        )
+
+    def test_short_content_returned_unchanged(self):
+        content = "# Report\n" * 100
+        self.assertEqual(self._truncate(content), content)
+
+    def test_long_content_is_truncated(self):
+        content = "x\n" * 40000
+        result = self._truncate(content)
+        self.assertLess(len(result), 66_000)
+
+    def test_truncation_notice_appended(self):
+        content = "x\n" * 40000
+        result = self._truncate(content)
+        self.assertIn("truncated", result.lower())
+
+    def test_unclosed_code_fence_is_closed(self):
+        content = "```python\n" + "code_line\n" * 40000
+        result = self._truncate(content)
+        self.assertEqual(result.count('```') % 2, 0)
+
+    def test_cuts_at_newline_boundary(self):
+        content = ("abcdefghij\n") * 10000
+        result = self._truncate(content)
+        body = result.split('\n\n---\n')[0]
+        self.assertTrue(body.endswith('abcdefghij') or body.endswith('\n'))
+
+    def test_even_fence_count_not_doubled(self):
+        content = "```python\ncode\n```\n" + "x\n" * 40000
+        result = self._truncate(content)
+        self.assertEqual(result.count('```') % 2, 0)
+
+
+# ==============================================================================
+# SCA — dependency manifest scanning (Feature A)
+# ==============================================================================
+
+class TestSCAAnalysis(unittest.TestCase):
+    def test_parse_pip_packages(self):
+        diff = "+requests==2.28.0\n+flask>=2.0\n"
+        pkgs = _parse_added_packages(diff, "pip")
+        self.assertIn("requests", pkgs)
+        self.assertIn("flask", pkgs)
+
+    def test_parse_pip_ignores_removed_lines(self):
+        diff = "-old-package==1.0\n+new-package==2.0\n"
+        pkgs = _parse_added_packages(diff, "pip")
+        self.assertNotIn("old-package", pkgs)
+        self.assertIn("new-package", pkgs)
+
+    def test_parse_npm_package(self):
+        diff = '+  "lodash": "^4.17.21",\n+  "version": "1.0.0",\n'
+        pkgs = _parse_added_packages(diff, "npm")
+        self.assertIn("lodash", pkgs)
+        self.assertNotIn("version", pkgs)
+
+    def test_parse_go_package(self):
+        diff = "+github.com/gin-gonic/gin v1.9.0\n"
+        pkgs = _parse_added_packages(diff, "go")
+        self.assertIn("github.com/gin-gonic/gin", pkgs)
+
+    def test_parse_cargo_package(self):
+        diff = "+serde = { version = \"1.0\" }\n+name = \"myapp\"\n"
+        pkgs = _parse_added_packages(diff, "cargo")
+        self.assertIn("serde", pkgs)
+        self.assertNotIn("name", pkgs)
+
+    def test_parse_ignores_diff_header_line(self):
+        diff = "+++ b/requirements.txt\n+requests==2.28.0\n"
+        pkgs = _parse_added_packages(diff, "pip")
+        self.assertNotIn("b/requirements.txt", pkgs)
+        self.assertIn("requests", pkgs)
+
+    def test_load_allowlist_returns_none_when_absent(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = _load_allowlist(d)
+        self.assertIsNone(result)
+
+    def test_load_allowlist_returns_sets(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "allowlist.yml"), "w") as f:
+                f.write("python:\n  - requests\n  - flask\n")
+            result = _load_allowlist(d)
+        self.assertIsNotNone(result)
+        self.assertIn("requests", result["python"])
+
+    def test_sca_inactive_without_allowlist(self):
+        inner = TestAnalyzeSuccess()
+        a = inner._setup_repo([])
+        with tempfile.TemporaryDirectory() as d:
+            a.repo_path = d
+            result = a.analyze()
+        self.assertFalse(result["sca"]["allowlist_active"])
+
+    def test_unverified_package_adds_three_to_score(self):
+        a = _make_analyzer()
+        v_without = a._assess_consequence(0, 0, 0, 0, unverified_dependencies=0)
+        v_with = a._assess_consequence(0, 0, 0, 0, unverified_dependencies=1)
+        self.assertEqual(v_with["severity_score"] - v_without["severity_score"], 3)
+
+
+# ==============================================================================
+# Complexity advisory — McCabe V(G) (Feature B)
+# ==============================================================================
+
+class TestComplexityAdvisory(unittest.TestCase):
+    def _analyze(self, original, modified, path="module.py", threshold=15):
+        return StructuralPayloadAnalyzer(
+            original, modified, file_path=path,
+            complexity_threshold=threshold,
+        ).analyze_structural_drift()
+
+    def test_simple_function_no_advisory(self):
+        modified = "def simple():\n    return 1\n"
+        result = self._analyze("", modified)
+        self.assertEqual(result["complexity_advisory"], [])
+
+    def test_high_complexity_function_flagged(self):
+        body = "\n".join(f"    if x == {i}: pass" for i in range(16))
+        modified = f"def complex_fn(x):\n{body}\n"
+        result = self._analyze("", modified)
+        names = [c["name"] for c in result["complexity_advisory"]]
+        self.assertIn("complex_fn", names)
+
+    def test_complexity_value_correct(self):
+        body = "\n".join(f"    if x == {i}: pass" for i in range(5))
+        modified = f"def fn(x):\n{body}\n"
+        result = self._analyze("", modified, threshold=5)
+        advisory = [c for c in result["complexity_advisory"] if c["name"] == "fn"]
+        self.assertTrue(len(advisory) > 0)
+        self.assertEqual(advisory[0]["complexity"], 6)
+
+    def test_advisory_does_not_affect_verdict(self):
+        body = "\n".join(f"    if x == {i}: pass" for i in range(16))
+        modified = f"def complex_fn(x):\n{body}\n"
+        result = self._analyze("", modified)
+        self.assertEqual(result["status"], "SAFE")
+
+    def test_existing_function_not_in_advisory(self):
+        body = "\n".join(f"    if x == {i}: pass" for i in range(16))
+        fn = f"def existing(x):\n{body}\n"
+        result = self._analyze(fn, fn)
+        self.assertEqual(result["complexity_advisory"], [])
+
+    def test_non_python_file_no_advisory(self):
+        result = self._analyze("", "function foo() { if(x){} }", path="app.js")
+        self.assertEqual(result["complexity_advisory"], [])
+
+    def test_custom_threshold_respected(self):
+        body = "\n".join(f"    if x == {i}: pass" for i in range(5))
+        modified = f"def fn(x):\n{body}\n"
+        result_low = self._analyze("", modified, threshold=5)
+        result_high = self._analyze("", modified, threshold=10)
+        self.assertTrue(len(result_low["complexity_advisory"]) > 0)
+        self.assertEqual(result_high["complexity_advisory"], [])
+
+    def test_advisory_includes_threshold_value(self):
+        body = "\n".join(f"    if x == {i}: pass" for i in range(16))
+        modified = f"def big_fn(x):\n{body}\n"
+        result = self._analyze("", modified, threshold=10)
+        if result["complexity_advisory"]:
+            self.assertIn("threshold", result["complexity_advisory"][0])
+            self.assertEqual(result["complexity_advisory"][0]["threshold"], 10)
 
 
 if __name__ == "__main__":

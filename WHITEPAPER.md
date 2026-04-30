@@ -549,6 +549,18 @@ For repositories with complex merge histories, `merge_base()` may return multipl
 
 Layer 5b fires only when the PR description contains one of the configured benign keywords. A sufficiently vague description ("updates") that doesn't match any keyword produces `UNVERIFIED` rather than `DECEPTIVE_PAYLOAD`. The layer is a high-precision supplement, not a comprehensive intent classifier.
 
+### 8.6 AI Research Tool Context Pollution is an Out-of-Scope Threat
+
+PayloadGuard's threat model is a human submitting a destructive PR. It does not model the case where an AI assistant — an LLM research tool, notebook, or deep-research agent — is processing repository documents on a maintainer's behalf. In that scenario, a document *added* to the repository (not deleted from it) can contain plausible-looking but hallucinated content that lands in version control, bypassing all five layers because the problem is the LLM's context window, not the git diff.
+
+A live incident (2026-04-24) demonstrated this vector — not through deliberate attack, but through accidental AI source contamination. NotebookLM was conducting legitimate research on this repository. During that session it pulled in external web sources — including the real AE3GIS framework (an MDPI-published ICS security testbed paper), GitHub issue threads, and unrelated MCP gateway documentation. Unable to segregate these sources, it suffered **context collapse**: it attributed AE3GIS's architecture (Purdue Model, GNS3, SCADA, OpenPLC) to PayloadGuard and produced a "Technical Remediation Report" describing this system as if it were an industrial control system testbed. The repository owner committed this output to main unintentionally — it was authoritative in tone and plausible in structure. The report contained embedded CI trigger strings (`[citest commit:<sha>]`), filesystem privilege escalation commands (`setfacl`), and plausible-looking Go remediation code. PayloadGuard scored the commit as low-risk (pure file addition, no deletions). Human code review caught the mismatch.
+
+There was no external attacker. NotebookLM's own post-incident analysis framed the contamination as a "Track 2 Adversarial Strike" — which was itself a secondary hallucination: the model rationalised its source-segregation failure as an external threat.
+
+**The operationally relevant point:** whether a corrupted document enters a repo because a deliberate adversary crafted it or because an AI research tool mixed sources, the outcome is identical — plausible-looking content that doesn't describe reality lands in version control. The mechanism (high-entropy external sources overwhelming source segregation) is functionally equivalent to a deliberate injection attack. Defence must treat both cases the same.
+
+Proposed future mitigations are documented in `AUDIT_LOG.md §INC-1 through §INC-4`.
+
 ---
 
 ## 9. GitHub 2026 Roadmap Alignment

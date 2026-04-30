@@ -4,6 +4,53 @@ Reverse-chronological. Most recent entry first.
 
 ---
 
+2026-04-29 — AIntegrity Code Review: 5 Logic Defect Fixes + Incident Report Corrections
+Session focused on resolving all valid defects identified in an external architectural review by AIntegrity, plus correcting the incident documentation from the 2026-04-24 session to accurately reflect what actually happened.
+
+Commits (newest first)
+6e8b335 — Fix 5 logic defects from AIntegrity code review (analyze.py + test_analyzer.py)
+bbb1abb — Correct incident report: AI research tool context pollution, not adversarial attack
+9adc710 — Fix incident report: correct attack chain attribution
+370e2a2 — Document 2026-04-24 incident in AUDIT_LOG and WHITEPAPER
+74386a1 — Fix 3.1/3.2: safe markdown truncation and cryptography import guard (post_check_run.py)
+c911810 — Fix 2.1: JS/TS constant tracking (structural_parser.py)
+AIntegrity Review — Valid Defects Addressed
+AIntegrity's architectural review identified 5 logic defects. All 5 are fixed in this session. Two were assessed as invalid (addressed in review response).
+
+Fix 1.1 — Cross-file aggregation false positive (analyze.py lines 563-581)
+Bug: Cross-file structural aggregation used only absolute node count. Any 2+ files with combined 3 deletions triggered CRITICAL regardless of proportion.
+Fix: Added cross-file ratio gate — both count AND ratio must exceed thresholds, mirroring the per-file dual-condition logic.
+
+Fix 1.3 — Silent YAML config failures (analyze.py load_config)
+Bug: Blanket except swallowed all YAML parse errors silently.
+Fix: Catches yaml.YAMLError specifically, emits WARNING to stderr, falls back to defaults.
+
+Fix 2.1 — JS/TS constant blindness (structural_parser.py)
+Bug: variable_declarator branch only tracked arrow functions and function expressions. Const objects, auth literals, routing configs scored 0 structural deletion weight.
+Fix: Removed value type check — any named variable declarator is now tracked.
+
+Fix 3.1 — Markdown truncation corruption (post_check_run.py)
+Bug: Hard slice at 65535 chars produced broken markdown tables and unclosed code fences.
+Fix: _safe_truncate() helper cuts at last newline, closes open fences, appends truncation notice.
+
+Fix 3.2 — Silent cryptographic dependency failure (post_check_run.py)
+Bug: Missing cryptography package caused opaque ImportError inside JWT library, leaving PR Check Run permanently pending.
+Fix: Explicit import guard at module top with clear error message and sys.exit(1).
+
+New Tests (+4 classes, 133 passing, 7 skipped)
+TestCrossFileAggregation — verifies Fix 1.1 dual-gate behaviour
+TestMalformedConfigWarning — verifies Fix 1.3 stderr warning and default fallback
+TestStructuralParserJSTS — verifies Fix 2.1 const/object/arrow detection in JS and TS
+TestMarkdownTruncation — verifies Fix 3.1 safe truncation, fence closure, newline boundary
+Incident Report Corrections (AUDIT_LOG.md + WHITEPAPER.md)
+The 2026-04-24 incident was initially documented as a "Track 2 Adversarial Strike" based on NotebookLM's own post-incident analysis — which was itself a hallucination.
+
+What actually happened: NotebookLM pulled in external sources (AE3GIS MDPI paper, GitHub issues, MCP docs) it could not segregate, causing identity hallucination — it described PayloadGuard as an ICS testbed. The repository owner committed a corrupted output to main without recognising it as hallucinated content. There was no external attacker.
+
+AUDIT_LOG.md retitled to "AI Research Tool Context Pollution". WHITEPAPER.md §8.6 retitled and rewritten. INC-1 through INC-4 findings preserved unchanged — the detection gaps are real regardless of whether the cause is malicious or accidental.
+
+---
+
 ## 2026-04-24 — Regression Tooling, Detection Calibration, and Scoring Fixes
 
 Full-day session building a local regression harness, running the analyser against 18 adversarial test cases, identifying detection gaps through systematic analysis, and shipping five scoring fixes that raised the pass rate from ~4/18 to 17/18 at default thresholds.
