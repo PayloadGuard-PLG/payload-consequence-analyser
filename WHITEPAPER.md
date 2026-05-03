@@ -1,7 +1,8 @@
 # PayloadGuard — Technical Whitepaper
 
-**Version:** 1.1 — April 2026
-**Repository:** `darkvader-plg/payload-consequence-analyser`
+**Version:** 1.1.0 — May 2026
+**Repository:** `PayloadGuard-PLG/payload-consequence-analyser`
+**Status:** Live on main (`d843549`)
 
 ---
 
@@ -18,11 +19,15 @@
 
 ---
 
-## 1. Abstract
-
 PayloadGuard is a five-layer static analysis system that runs on every pull request before merge. It detects destructive code payloads — mass deletions, structural gutting, deceptive descriptions — that bypass normal code review because they are either too large for a human reviewer to fully parse or deliberately disguised as low-impact changes.
 
 The system assigns a severity score across independent signal dimensions and produces one of four verdicts: **SAFE**, **REVIEW**, **CAUTION**, or **DESTRUCTIVE**. A DESTRUCTIVE verdict sets exit code 2; wired to a GitHub branch protection rule, this blocks the merge button automatically.
+
+**v1.1.0 production release** includes:
+- All AIntegrity audit fixes (5 logic defects resolved)
+- SCA dependency hallucination defense (opt-in via allowlist.yml)
+- McCabe complexity advisory for new functions (informational, no score impact)
+- GitHub Actions infrastructure hardening (all actions SHA-pinned)
 
 Against an 18-case adversarial test suite covering safe baselines, canonical destructive payloads, boundary conditions, and purpose-built evasion techniques, PayloadGuard achieves **17/18 detection (94%)** at default thresholds with zero false positives on safe baselines.
 
