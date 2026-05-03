@@ -1,0 +1,534 @@
+From 22c0079b48463c5cb7d0716714891e19e1a4964d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 29 Apr 2026 18:01:54 +0000
+Subject: [PATCH] Add Feature A (SCA dependency scan) + Feature B (complexity
+ advisory); bump to v1.1.0
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+Feature A - SCA Dependency Hallucination Defense (Layer 2b):
+- Opt-in via allowlist.yml in repo root (absent = skip)
+- Scans manifest diffs (requirements.txt, package.json, go.mod, Cargo.toml,
+  pyproject.toml) for packages not on the per-language allowlist
+- Unverified packages add +3 to verdict score (CAUTION floor), controlled by
+  sca.fail_on_unknown config key
+- Report: sca.{status, unverified_packages, manifest_files_scanned, allowlist_active}
+Feature B - Cyclomatic Complexity Advisory (advisory, no score impact):
+- Newly added Python functions with V(G) > threshold (default 15) appear in
+  complexity_advisory list in both JSON and markdown reports
+- V(G) = 1 + sum(If, For, While, ExceptHandler) + sum(BoolOp.values - 1)
+- Only added functions are checked
+Infrastructure:
+- __version__ = "1.1.0" added to analyze.py
+- import ast added (stdlib, no new dependency)
+- DEFAULT_CONFIG extended: structural.complexity_threshold, sca section
+- PayloadGuardConfig extended: sca field
+- _assess_consequence() extended: unverified_dependencies param
+Tests: 151 pass, 7 skipped (crypto/tree-sitter env limitations).
+https://claude.ai/code/session_01Y4R4BfNhVqAGAzhrGRkQNH
+---
+ analyze.py       | 239 +++++++++++++++++++++++++++++++++++++++++++----
+ test_analyzer.py | 208 +++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 431 insertions(+), 16 deletions(-)
+diff --git a/analyze.py b/analyze.py
+index af94643..b6d8c0e 100644
+--- a/analyze.py
++++ b/analyze.py
+@@ -1,13 +1,15 @@
+ #!/usr/bin/env python3
+ """
+ PayloadGuard - Destructive Merge Detection
+ Detects catastrophic code payloads hidden in code suggestions before merge
+ 
+ Usage:
+     python analyze.py <repo_path> <branch> [target] [--pr-description "..."] [--save-json [FILE]]
+ 
+ Example:
+     python analyze.py . feature-branch main
+     python analyze.py . feature-branch main --pr-description "minor syntax fix" --save-json
+ """
+ 
+ import argparse
++import ast
+ import copy
+ import git
+ import re
+@@ -24,6 +26,8 @@ from pathlib import Path
+ from typing import Any, Dict, Union
+ from dataclasses import dataclass, field
+ import structural_parser
++
++__version__ = "1.1.0"
+ 
+ 
+ # ==============================================================================
+@@ -95,6 +99,73 @@ _COMMIT_RED_FLAG_PATTERNS = [
+     r"\bremove\s+(auth|security|authentication|authorization)\b",
+ ]
+ 
++# ==============================================================================
++# SCA - DEPENDENCY MANIFEST PATTERNS (Layer 2b)
++# Opt-in: only runs when allowlist.yml is present in the repo root.
++# ==============================================================================
++
++_MANIFEST_PATTERNS = {
++    r"(^|/)requirements[^/]*\.txt$": "pip",
++    r"(^|/)package\.json$":          "npm",
++    r"(^|/)go\.mod$":                "go",
++    r"(^|/)Cargo\.toml$":            "cargo",
++    r"(^|/)pyproject\.toml$":        "pyproject",
++}
++
++_MANIFEST_ALLOWLIST_KEY = {
++    "pip": "python", "pyproject": "python",
++    "npm": "npm", "go": "go", "cargo": "rust",
++}
++
++_TOML_SKIP_KEYS = {"name", "version", "edition", "authors", "description", "license", "readme", "build"}
++_JSON_SKIP_KEYS = {
++    "version", "description", "name", "main", "scripts", "keywords",
++    "author", "license", "private", "type", "homepage", "repository", "bugs",
++}
++
++
++def _parse_added_packages(diff_text: str, manifest_type: str) -> list:
++    """Extract newly added package names from a unified diff of a manifest file."""
++    packages = []
++    for line in diff_text.splitlines():
++        if not line.startswith('+') or line.startswith('+++'):
++            continue
++        content = line[1:].strip()
++        if manifest_type in ("pip",):
++            m = re.match(r'^([A-Za-z0-9][A-Za-z0-9._-]*)', content)
++            if m:
++                packages.append(m.group(1).lower())
++        elif manifest_type == "pyproject":
++            m = re.match(r'^["\']?([A-Za-z0-9][A-Za-z0-9._-]*)', content)
++            if m:
++                pkg = m.group(1).lower()
++                if pkg not in _TOML_SKIP_KEYS:
++                    packages.append(pkg)
++        elif manifest_type == "npm":
++            m = re.match(r'^"([^"]+)"\s*:', content)
++            if m:
++                pkg = m.group(1)
++                if pkg not in _JSON_SKIP_KEYS:
++                    packages.append(pkg)
++        elif manifest_type == "go":
++            m = re.match(r'^(?:require\s+)?([a-z][a-z0-9./\-]+)\s+v', content)
++            if m:
++                packages.append(m.group(1))
++        elif manifest_type == "cargo":
++            m = re.match(r'^([a-zA-Z][a-zA-Z0-9_-]*)\s*[=\[]', content)
++            if m:
++                pkg = m.group(1).lower()
++                if pkg not in _TOML_SKIP_KEYS:
++                    packages.append(pkg)
++    return packages
++
++
++def _load_allowlist(repo_path: str):
++    """Load allowlist.yml from repo root. Returns None if absent (SCA opt-out)."""
++    p = Path(repo_path) / "allowlist.yml"
++    if not p.exists():
++        return None
++    try:
++        with open(p) as f:
++            data = yaml.safe_load(f) or {}
++        return {k: set(str(v).lower() for v in lst) for k, lst in data.items() if isinstance(lst, list)}
++    except Exception:
++        return None
++
+ 
+ # ==============================================================================
+ # LAYER 4: STRUCTURAL DRIFT DETECTION
+@@ -155,7 +228,8 @@ class StructuralPayloadAnalyzer:
+         file_path: str = "",
+         deletion_ratio_threshold: float = 0.20,
+         min_deletion_count: int = 3,
++        complexity_threshold: int = 15,
+     ):
+         self.original_code = original_code
+         self.modified_code = modified_code
+@@ -163,6 +237,7 @@ class StructuralPayloadAnalyzer:
+         self.file_path = file_path
+         self.deletion_ratio_threshold = deletion_ratio_threshold
+         self.min_deletion_count = min_deletion_count
++        self.complexity_threshold = complexity_threshold
+ 
+     def _extract_core_nodes(self, source_text: str) -> set:
+         return structural_parser.extract_named_nodes(source_text, self.file_path)
+@@ -192,12 +267,38 @@ class StructuralPayloadAnalyzer:
+             and len(deleted_nodes) >= self.min_deletion_count
+         )
+ 
++        # Feature B: McCabe complexity advisory for newly added Python functions
++        complexity_advisory = []
++        if self.file_path.endswith('.py') and added_nodes:
++            try:
++                tree = ast.parse(self.modified_code)
++                for node in ast.walk(tree):
++                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
++                        if node.name in added_nodes:
++                            complexity = 1
++                            for child in ast.walk(node):
++                                if isinstance(child, (ast.If, ast.For, ast.While, ast.ExceptHandler)):
++                                    complexity += 1
++                                elif isinstance(child, ast.BoolOp):
++                                    complexity += len(child.values) - 1
++                            if complexity > self.complexity_threshold:
++                                complexity_advisory.append({
++                                    "name": node.name,
++                                    "complexity": complexity,
++                                    "threshold": self.complexity_threshold,
++                                })
++            except SyntaxError:
++                pass
++
+         return {
+             "status": "DESTRUCTIVE" if is_destructive else "SAFE",
+             "severity": "CRITICAL" if is_destructive else "LOW",
+             "metrics": {
+                 "original_node_count": len(original_nodes),
+                 "deleted_node_count": len(deleted_nodes),+                            if pkg not in allowed and pkg not in seen:
++                                seen.add(pkg)
++                                sca_flags.append({
++                                    "package": pkg,
++                                    "manifest": path,
++                                    "manifest_type": manifest_type,
++                                })
++                    except Exception:
++                        pass
++
++            sca_result = {
++                "status": "FLAGGED" if sca_flags else "CLEAN",
++                "unverified_packages": sca_flags[:20],
++                "manifest_files_scanned": sca_manifests_scanned,
++                "allowlist_active": allowlist is not None,
++            }
++
+             # LAYER 3: CONSEQUENCE VERDICT
++            unverified_dep_count = len(sca_flags) if self.config.sca.get("fail_on_unknown", True) else 0
+             verdict = self._assess_consequence(
+                 files_deleted,
+                 lines_deleted,
+@@ -610,6 +764,7 @@ class PayloadAnalyzer:
+                 overall_structural_severity,
+                 critical_file_deletions=len(critical_deletions),
+                 security_file_deletions=len(security_deletions),
++                unverified_dependencies=unverified_dep_count,
+             )
+ 
+             # LAYER 5a: TEMPORAL DRIFT
+@@ -684,6 +839,8 @@ class PayloadAnalyzer:
+                     "max_deletion_ratio_pct": round(structural_score, 2),
+                     "flagged_files": structural_flags[:10],
+                 },
++                "complexity_advisory": complexity_advisory_all[:20],
++                "sca": sca_result,
+                 "temporal_drift": temporal_drift,
+                 "semantic": semantic,
+                 "commit_flags": commit_flags,
+@@ -702,7 +859,7 @@ class PayloadAnalyzer:
+                 "error_type": type(e).__name__,
+             }
+ 
+-    def _assess_consequence(self, files_deleted, lines_deleted, days_old, deletion_ratio, structural_severity="LOW", critical_file_deletions=0, security_file_deletions=0):
++    def _assess_consequence(self, files_deleted, lines_deleted, days_old, deletion_ratio, structural_severity="LOW", critical_file_deletions=0, security_file_deletions=0, unverified_dependencies=0):
+         flags = []
+         severity_score = 0.0
+         th = self.config.thresholds
+@@ -781,6 +938,10 @@ class PayloadAnalyzer:
+             flags.append(f"{security_file_deletions} security-critical file(s) deleted (auth/security/permission)")
+             severity_score += 5
+ 
++        if unverified_dependencies > 0:
++            flags.append(f"{unverified_dependencies} unverified package(s) added — not in allowlist.yml")
++            severity_score += 3
++
+         if severity_score >= 5:
+             return {
+                 "status": "DESTRUCTIVE",
+@@ -871,6 +1032,22 @@ def print_report(report):
+             for comp in f['deleted_components'][:5]:
+                 print(f"      - {comp}")
+ 
++    complexity_advisory = report.get('complexity_advisory', [])
++    if complexity_advisory:
++        print(f"\n📐 COMPLEXITY ADVISORY ({len(complexity_advisory)} function(s) above threshold)")
++        for ca in complexity_advisory[:10]:
++            print(f"   {ca['file']}: {ca['name']}() — V(G)={ca['complexity']} (threshold: {ca['threshold']})")
++
++    sca = report.get('sca', {})
++    if sca.get('allowlist_active'):
++        print(f"\n📦 SCA — DEPENDENCY SCAN: {sca['status']}")
++        if sca['manifest_files_scanned']:
++            print(f"   Manifests scanned: {', '.join(sca['manifest_files_scanned'])}")
++        if sca['unverified_packages']:
++            print(f"   Unverified packages ({len(sca['unverified_packages'])}):")
++            for pkg in sca['unverified_packages'][:10]:
++                print(f"      - {pkg['package']} ({pkg['manifest']})")
++
+     if 'temporal_drift' in report:
+         td = report['temporal_drift']
+         print(f"\n⏱  TEMPORAL DRIFT (Layer 5a)")
+@@ -1085,6 +1262,36 @@ def format_markdown_report(report: dict) -> str:
+         out.append(f"_{struct_note}_")
+         out.append("")
+ 
++    # ── Complexity Advisory ───────────────────────────────────────────────────
++    complexity_advisory = report.get('complexity_advisory', [])
++    if complexity_advisory:
++        out.append("### 📐 Complexity Advisory")
++        out.append("_Newly added Python functions with McCabe cyclomatic complexity above the configured threshold (default V(G) > 15). Advisory only — no score impact. High complexity functions are harder to test and maintain._")
++        out.append("")
++        out.append("| File | Function | V(G) | Threshold |")
++        out.append("|---|---|---|---|")
++        for ca in complexity_advisory[:10]:
++            out.append(f"| `{_md_escape(ca['file'])}` | `{ca['name']}` | {ca['complexity']} | {ca['threshold']} |")
++        out.append("")
++
++    # ── SCA ───────────────────────────────────────────────────────────────────
++    sca = report.get('sca', {})
++    if sca.get('allowlist_active'):
++        sca_emoji = "🚨" if sca['status'] == 'FLAGGED' else "✅"
++        out.append("### 📦 SCA — Dependency Scan (Layer 2b)")
++        out.append("_Scans manifest file changes (requirements.txt, package.json, go.mod, Cargo.toml, pyproject.toml) for packages not in `allowlist.yml`. Only active when `allowlist.yml` is present in the repo root._")
++        out.append("")
++        out.append(f"**Status:** {sca_emoji} `{sca['status']}`")
++        if sca['manifest_files_scanned']:
++            out.append(f"  \n**Manifests scanned:** {', '.join(f'`{_md_escape(m)}`' for m in sca['manifest_files_scanned'])}")
++        if sca['unverified_packages']:
++            out.append("")
++            out.append("| Package | Manifest | Type |")
++            out.append("|---|---|---|")
++            for pkg in sca['unverified_packages'][:20]:
++                out.append(f"| `{_md_escape(pkg['package'])}` | `{_md_escape(pkg['manifest'])}` | {pkg['manifest_type']} |")
++        out.append("")
++
+     # ── Temporal Drift ────────────────────────────────────────────────────────
+     if 'temporal_drift' in report:
+         td = report['temporal_drift']
+diff --git a/test_analyzer.py b/test_analyzer.py
+index 10d08d2..82de69e 100644
+--- a/test_analyzer.py
++++ b/test_analyzer.py
+@@ -18,6 +18,8 @@ from analyze import (
+     StructuralPayloadAnalyzer,
+     TemporalDriftAnalyzer,
+     _deep_merge,
++    _load_allowlist,
++    _parse_added_packages,
+     load_config,
+     print_report,
+     save_json_report,
+@@ -1263,5 +1265,211 @@ class TestMarkdownTruncation(unittest.TestCase):
+         self.assertEqual(result.count('`' + '`' + '`') % 2, 0)
++# ==============================================================================
++# SCA — dependency hallucination defense (Feature A)
++# ==============================================================================
++
++class TestSCAAnalysis(unittest.TestCase):
++    def _make_diff(self, path, original_code, modified_code):
++        d = MagicMock()
++        d.change_type = 'M'
++        d.b_path = path
++        d.a_path = path
++        d.a_blob.data_stream.read.return_value = original_code.encode()
++        d.b_blob.data_stream.read.return_value = modified_code.encode()
++        return d
++
++    def _setup_repo(self, diffs, repo_path):
++        a = _make_analyzer()
++        a.repo_path = repo_path
++        t1 = datetime(2025, 1, 1, tzinfo=timezone.utc)
++        t2 = datetime(2025, 3, 1, tzinfo=timezone.utc)
++        branch_commit = MagicMock()
++        branch_commit.committed_datetime = t1
++        branch_commit.hexsha = "aabbccddeeff"
++        target_commit = MagicMock()
++        target_commit.committed_datetime = t2
++        target_commit.hexsha = "112233445566"
++        a.repo.commit.side_effect = lambda ref: target_commit if ref == "main" else branch_commit
++        a.repo.iter_commits.return_value = []
++        merge_base = MagicMock()
++        merge_base.diff.return_value = diffs
++        merge_base.hexsha = "deadbeef00000000"
++        a.repo.merge_base.return_value = [merge_base]
++        a.repo.git.diff.return_value = ""
++        a.repo.git.numstat = ""
++        return a
++
++    def test_no_allowlist_sca_inactive(self):
++        with tempfile.TemporaryDirectory() as tmpdir:
++            a = self._setup_repo([], tmpdir)
++            result = a.analyze()
++        self.assertFalse(result.get('sca', {}).get('allowlist_active', True))
++
++    def test_allowlist_present_clean_when_no_manifest_changes(self):
++        with tempfile.TemporaryDirectory() as tmpdir:
++            with open(os.path.join(tmpdir, "allowlist.yml"), "w") as f:
++                f.write("python: [requests]\n")
++            diffs = [self._make_diff("app.py", "def foo(): pass", "def foo(): pass\ndef bar(): pass")]
++            a = self._setup_repo(diffs, tmpdir)
++            result = a.analyze()
++        self.assertTrue(result['sca']['allowlist_active'])
++        self.assertEqual(result['sca']['status'], 'CLEAN')
++
++    def test_known_package_is_clean(self):
++        diff_text = "+requests==2.31.0\n"
++        pkgs = _parse_added_packages(diff_text, "pip")
++        self.assertIn("requests", pkgs)
++
++    def test_allowlist_marks_unknown_package_flagged(self):
++        with tempfile.TemporaryDirectory() as tmpdir:
++            with open(os.path.join(tmpdir, "allowlist.yml"), "w") as f:
++                f.write("python: [requests]\n")
++            reqs_diff = "+evilpackage==1.0\n"
++            diffs = [self._make_diff("requirements.txt", "", "evilpackage==1.0")]
++            a = self._setup_repo(diffs, tmpdir)
++            a.repo.git.diff.return_value = reqs_diff
++            result = a.analyze()
++        self.assertTrue(result['sca']['allowlist_active'])
++        self.assertEqual(result['sca']['status'], 'FLAGGED')
++        pkg_names = [p['package'] for p in result['sca']['unverified_packages']]
++        self.assertIn('evilpackage', pkg_names)
++
++    def test_parse_added_packages_pip(self):
++        diff = "+requests==2.28\n+flask>=2.0\n-old-pkg==1.0\n+# comment\n"
++        pkgs = _parse_added_packages(diff, "pip")
++        self.assertIn("requests", pkgs)
++        self.assertIn("flask", pkgs)
++        self.assertNotIn("old-pkg", pkgs)
++
++    def test_parse_added_packages_npm(self):
++        diff = '+    "axios": "^1.0.0",\n+    "version": "1.2.3",\n'
++        pkgs = _parse_added_packages(diff, "npm")
++        self.assertIn("axios", pkgs)
++        self.assertNotIn("version", pkgs)
++
++    def test_parse_added_packages_go(self):
++        diff = "+\tgithub.com/gin-gonic/gin v1.9.0\n"
++        pkgs = _parse_added_packages(diff, "go")
++        self.assertIn("github.com/gin-gonic/gin", pkgs)
++
++    def test_sca_score_adds_to_verdict(self):
++        with tempfile.TemporaryDirectory() as tmpdir:
++            with open(os.path.join(tmpdir, "allowlist.yml"), "w") as f:
++                f.write("python: []\n")
++            reqs_diff = "+badpkg==1.0\n"
++            diffs = [self._make_diff("requirements.txt", "", "badpkg==1.0")]
++            a = self._setup_repo(diffs, tmpdir)
++            a.repo.git.diff.return_value = reqs_diff
++            result = a.analyze()
++        # +3 for unverified dependency should push to CAUTION (score 3) minimum
++        self.assertGreaterEqual(result['verdict']['severity_score'], 3)
++
++    def test_load_allowlist_returns_none_when_absent(self):
++        with tempfile.TemporaryDirectory() as tmpdir:
++            self.assertIsNone(_load_allowlist(tmpdir))
++
++    def test_load_allowlist_returns_sets(self):
++        with tempfile.TemporaryDirectory() as tmpdir:
++            with open(os.path.join(tmpdir, "allowlist.yml"), "w") as f:
++                f.write("python: [requests, flask]\n")
++            al = _load_allowlist(tmpdir)
++        self.assertIsNotNone(al)
++        self.assertIn("requests", al["python"])
++
++
++# ==============================================================================
++# Cyclomatic complexity advisory (Feature B)
++# ==============================================================================
++
++class TestComplexityAdvisory(unittest.TestCase):
++    def _run_structural(self, original, modified, path="mod.py", threshold=15):
++        return StructuralPayloadAnalyzer(
++            original, modified,
++            file_path=path,
++            complexity_threshold=threshold,
++        ).analyze_structural_drift()
++
++    def test_simple_function_below_threshold(self):
++        code = "def simple(x):\n    return x + 1\n"
++        result = self._run_structural("", code, threshold=15)
++        self.assertEqual(result['complexity_advisory'], [])
++
++    def test_complex_function_above_threshold(self):
++        # Manually construct a function with V(G) = 16
++        branches = "\n".join(f"    if x == {i}: pass" for i in range(15))
++        code = f"def complex_fn(x):\n{branches}\n    return x\n"
++        result = self._run_structural("", code, threshold=15)
++        names = [ca['name'] for ca in result['complexity_advisory']]
++        self.assertIn('complex_fn', names)
++
++    def test_complexity_value_correct(self):
++        # 5 if-statements → V(G) = 6
++        branches = "\n".join(f"    if x == {i}: pass" for i in range(5))
++        code = f"def fn(x):\n{branches}\n    return x\n"
++        result = self._run_structural("", code, threshold=5)
++        match = next((ca for ca in result['complexity_advisory'] if ca['name'] == 'fn'), None)
++        self.assertIsNotNone(match)
++        self.assertEqual(match['complexity'], 6)
++
++    def test_only_added_functions_checked(self):
++        original = "def existing(x):\n" + "\n".join(f"    if x == {i}: pass" for i in range(20)) + "\n    return x\n"
++        modified = original + "\ndef new_simple(x):\n    return x\n"
++        result = self._run_structural(original, modified, threshold=5)
++        names = [ca['name'] for ca in result['complexity_advisory']]
++        # existing() has high complexity but was not added — must not appear
++        self.assertNotIn('existing', names)
++
++    def test_non_python_file_no_advisory(self):
++        code = "function fn(x) { if (x) return 1; return 0; }"
++        result = self._run_structural("", code, path="app.js", threshold=1)
++        self.assertEqual(result['complexity_advisory'], [])
++
++    def test_no_score_impact(self):
++        branches = "\n".join(f"    if x == {i}: pass" for i in range(20))
++        code = f"def huge(x):\n{branches}\n    return x\n"
++        result_complex = self._run_structural("", code, threshold=5)
++        result_simple = self._run_structural("", "def simple(): pass\n", threshold=5)
++        # complexity_advisory fires but severity stays the same
++        self.assertGreater(len(result_complex['complexity_advisory']), 0)
++        self.assertEqual(result_complex['severity'], result_simple['severity'])
++
++    def test_boolop_increases_complexity(self):
++        # and/or each count as branches: `a and b and c` → +2
++        code = "def fn(x, y, z):\n    if x and y and z:\n        return 1\n    return 0\n"
++        result = self._run_structural("", code, threshold=2)
++        match = next((ca for ca in result['complexity_advisory'] if ca['name'] == 'fn'), None)
++        self.assertIsNotNone(match)
++        # 1 (base) + 1 (if) + 2 (and: 3 values → 2 extra) = 4
++        self.assertEqual(match['complexity'], 4)
++
++    def test_complexity_advisory_in_report(self):
++        """End-to-end: complex function added in a PR appears in the top-level report."""
++        branches = "\n".join(f"    if x == {i}: pass" for i in range(16))
++        new_fn = f"def massive(x):\n{branches}\n    return x\n"
++        a = _make_analyzer()
++        t1 = datetime(2025, 1, 1, tzinfo=timezone.utc)
++        t2 = datetime(2025, 3, 1, tzinfo=timezone.utc)
++        bc = MagicMock(); bc.committed_datetime = t1; bc.hexsha = "aabbccdd"
++        tc = MagicMock(); tc.committed_datetime = t2; tc.hexsha = "11223344"
++        a.repo.commit.side_effect = lambda ref: tc if ref == "main" else bc
++        a.repo.iter_commits.return_value = []
++        d = MagicMock()
++        d.change_type = 'M'
++        d.b_path = 'mod.py'
++        d.a_path = 'mod.py'
++        d.a_blob.data_stream.read.return_value = b"def existing(): pass\n"
++        d.b_blob.data_stream.read.return_value = (b"def existing(): pass\n" + new_fn.encode())
++        merge_base = MagicMock()
++        merge_base.diff.return_value = [d]
++        merge_base.hexsha = "deadbeef"
++        a.repo.merge_base.return_value = [merge_base]
++        a.repo.git.diff.return_value = ""
++        result = a.analyze()
++        advisory = result.get('complexity_advisory', [])
++        names = [ca['name'] for ca in advisory]
++        self.assertIn('massive', names)
+ if __name__ == "__main__":
+     unittest.main()
+-- 
+2.43.0

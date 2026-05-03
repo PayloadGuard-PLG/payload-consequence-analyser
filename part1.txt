@@ -1,0 +1,199 @@
+From 22c0079b48463c5cb7d0716714891e19e1a4964d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 29 Apr 2026 18:01:54 +0000
+Subject: [PATCH] Add Feature A (SCA dependency scan) + Feature B (complexity
+ advisory); bump to v1.1.0
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Feature A - SCA Dependency Hallucination Defense (Layer 2b):
+- Opt-in via allowlist.yml in repo root (absent = skip)
+- Scans manifest diffs (requirements.txt, package.json, go.mod, Cargo.toml,
+  pyproject.toml) for packages not on the per-language allowlist
+- Unverified packages add +3 to verdict score (CAUTION floor), controlled by
+  sca.fail_on_unknown config key
+- Report: sca.{status, unverified_packages, manifest_files_scanned, allowlist_active}
+
+Feature B - Cyclomatic Complexity Advisory (advisory, no score impact):
+- Newly added Python functions with V(G) > threshold (default 15) appear in
+  complexity_advisory list in both JSON and markdown reports
+- V(G) = 1 + sum(If, For, While, ExceptHandler) + sum(BoolOp.values - 1)
+- Only added functions are checked
+
+Infrastructure:
+- __version__ = "1.1.0" added to analyze.py
+- import ast added (stdlib, no new dependency)
+- DEFAULT_CONFIG extended: structural.complexity_threshold, sca section
+- PayloadGuardConfig extended: sca field
+- _assess_consequence() extended: unverified_dependencies param
+
+Tests: 151 pass, 7 skipped (crypto/tree-sitter env limitations).
+
+https://claude.ai/code/session_01Y4R4BfNhVqAGAzhrGRkQNH
+---
+ analyze.py       | 239 +++++++++++++++++++++++++++++++++++++++++++----
+ test_analyzer.py | 208 +++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 431 insertions(+), 16 deletions(-)
+
+diff --git a/analyze.py b/analyze.py
+index af94643..b6d8c0e 100644
+--- a/analyze.py
++++ b/analyze.py
+@@ -1,13 +1,15 @@
+ #!/usr/bin/env python3
+ """
+ PayloadGuard - Destructive Merge Detection
+ Detects catastrophic code payloads hidden in code suggestions before merge
+ 
+ Usage:
+     python analyze.py <repo_path> <branch> [target] [--pr-description "..."] [--save-json [FILE]]
+ 
+ Example:
+     python analyze.py . feature-branch main
+     python analyze.py . feature-branch main --pr-description "minor syntax fix" --save-json
+ """
+ 
+ import argparse
++import ast
+ import copy
+ import git
+ import re
+@@ -24,6 +26,8 @@ from pathlib import Path
+ from typing import Any, Dict, Union
+ from dataclasses import dataclass, field
+ import structural_parser
++
++__version__ = "1.1.0"
+ 
+ 
+ # ==============================================================================
+@@ -95,6 +99,73 @@ _COMMIT_RED_FLAG_PATTERNS = [
+     r"\bremove\s+(auth|security|authentication|authorization)\b",
+ ]
+ 
++# ==============================================================================
++# SCA - DEPENDENCY MANIFEST PATTERNS (Layer 2b)
++# Opt-in: only runs when allowlist.yml is present in the repo root.
++# ==============================================================================
++
++_MANIFEST_PATTERNS = {
++    r"(^|/)requirements[^/]*\.txt$": "pip",
++    r"(^|/)package\.json$":          "npm",
++    r"(^|/)go\.mod$":                "go",
++    r"(^|/)Cargo\.toml$":            "cargo",
++    r"(^|/)pyproject\.toml$":        "pyproject",
++}
++
++_MANIFEST_ALLOWLIST_KEY = {
++    "pip": "python", "pyproject": "python",
++    "npm": "npm", "go": "go", "cargo": "rust",
++}
++
++_TOML_SKIP_KEYS = {"name", "version", "edition", "authors", "description", "license", "readme", "build"}
++_JSON_SKIP_KEYS = {
++    "version", "description", "name", "main", "scripts", "keywords",
++    "author", "license", "private", "type", "homepage", "repository", "bugs",
++}
++
++
++def _parse_added_packages(diff_text: str, manifest_type: str) -> list:
++    """Extract newly added package names from a unified diff of a manifest file."""
++    packages = []
++    for line in diff_text.splitlines():
++        if not line.startswith('+') or line.startswith('+++'):
++            continue
++        content = line[1:].strip()
++        if manifest_type in ("pip",):
++            m = re.match(r'^([A-Za-z0-9][A-Za-z0-9._-]*)', content)
++            if m:
++                packages.append(m.group(1).lower())
++        elif manifest_type == "pyproject":
++            m = re.match(r'^["\']?([A-Za-z0-9][A-Za-z0-9._-]*)', content)
++            if m:
++                pkg = m.group(1).lower()
++                if pkg not in _TOML_SKIP_KEYS:
++                    packages.append(pkg)
++        elif manifest_type == "npm":
++            m = re.match(r'^"([^"]+)"\s*:', content)
++            if m:
++                pkg = m.group(1)
++                if pkg not in _JSON_SKIP_KEYS:
++                    packages.append(pkg)
++        elif manifest_type == "go":
++            m = re.match(r'^(?:require\s+)?([a-z][a-z0-9./\-]+)\s+v', content)
++            if m:
++                packages.append(m.group(1))
++        elif manifest_type == "cargo":
++            m = re.match(r'^([a-zA-Z][a-zA-Z0-9_-]*)\s*[=\[]', content)
++            if m:
++                pkg = m.group(1).lower()
++                if pkg not in _TOML_SKIP_KEYS:
++                    packages.append(pkg)
++    return packages
++
++
++def _load_allowlist(repo_path: str):
++    """Load allowlist.yml from repo root. Returns None if absent (SCA opt-out)."""
++    p = Path(repo_path) / "allowlist.yml"
++    if not p.exists():
++        return None
++    try:
++        with open(p) as f:
++            data = yaml.safe_load(f) or {}
++        return {k: set(str(v).lower() for v in lst) for k, lst in data.items() if isinstance(lst, list)}
++    except Exception:
++        return None
++
+ 
+ # ==============================================================================
+ # LAYER 4: STRUCTURAL DRIFT DETECTION
+@@ -155,7 +228,8 @@ class StructuralPayloadAnalyzer:
+         file_path: str = "",
+         deletion_ratio_threshold: float = 0.20,
+         min_deletion_count: int = 3,
++        complexity_threshold: int = 15,
+     ):
+         self.original_code = original_code
+         self.modified_code = modified_code
+@@ -163,6 +237,7 @@ class StructuralPayloadAnalyzer:
+         self.file_path = file_path
+         self.deletion_ratio_threshold = deletion_ratio_threshold
+         self.min_deletion_count = min_deletion_count
++        self.complexity_threshold = complexity_threshold
+ 
+     def _extract_core_nodes(self, source_text: str) -> set:
+         return structural_parser.extract_named_nodes(source_text, self.file_path)
+@@ -192,12 +267,38 @@ class StructuralPayloadAnalyzer:
+             and len(deleted_nodes) >= self.min_deletion_count
+         )
+ 
++        # Feature B: McCabe complexity advisory for newly added Python functions
++        complexity_advisory = []
++        if self.file_path.endswith('.py') and added_nodes:
++            try:
++                tree = ast.parse(self.modified_code)
++                for node in ast.walk(tree):
++                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
++                        if node.name in added_nodes:
++                            complexity = 1
++                            for child in ast.walk(node):
++                                if isinstance(child, (ast.If, ast.For, ast.While, ast.ExceptHandler)):
++                                    complexity += 1
++                                elif isinstance(child, ast.BoolOp):
++                                    complexity += len(child.values) - 1
++                            if complexity > self.complexity_threshold:
++                                complexity_advisory.append({
++                                    "name": node.name,
++                                    "complexity": complexity,
++                                    "threshold": self.complexity_threshold,
++                                })
++            except SyntaxError:
++                pass
++
+         return {
+             "status": "DESTRUCTIVE" if is_destructive else "SAFE",
+             "severity": "CRITICAL" if is_destructive else "LOW",
+             "metrics": {
+                 "original_node_count": len(original_nodes),
+                 "deleted_node_count": len(deleted_nodes),
