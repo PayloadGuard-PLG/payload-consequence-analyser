@@ -2,6 +2,29 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-05-03 — GitHub Actions Infrastructure Fix + v1.1.0 Release
+
+Session focused on resolving CI startup failures caused by non-existent action version tags (@v6, @v9) and establishing v1.1.0 as the live release on main.
+
+### Commits
+
+- `d843549` — Update action.yml with specific version references (v5, v7 SHA pins)
+- `a4b98bc` — Update actions versions in publish.yml workflow (v4, v5 SHA pins)
+- `b138b92` — Update actions versions in payloadguard.yml workflow (v4, v5, v7 SHA pins)
+- `29c5869` — Update handover: CI fix complete (SHA-pinned actions), main at d843549
+
+### Issue: Non-existent Action Versions
+
+The CI workflow files referenced action versions that do not exist:
+- `actions/checkout@v6` (real latest: v4)
+- `actions/setup-python@v6` (real latest: v5)
+- `actions/github-script@v9` (real latest: v7)
+
+This caused GitHub Actions startup to fail with "Action not found" errors on every PR.
+
+### Fix: SHA-pinned Action Versions
+
+All 7 action references across 3 files (payloadguard.yml, publish.yml, action.yml) replaced with full commit SHAs per `PayloadGuard-PLG` org policy:
 ---
 
 2026-04-29 — AIntegrity Code Review: 5 Logic Defect Fixes + Incident Report Corrections
