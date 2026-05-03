@@ -18,7 +18,7 @@ Each scan produces a verdict: **SAFE**, **REVIEW**, **CAUTION**, or **DESTRUCTIV
 | 5a — Temporal Drift | Branch age × repo velocity — how stale is the context |
 | 5b — Semantic Transparency | Does the PR description match what the diff actually does |
 
-> **dev:** [Dark^Vader](https://github.com/DarkVader-PLG)
+> **dev:** [Dark^Vader](https://github.com/PayloadGuard-PLG)
 
 ---
 ---
@@ -262,7 +262,7 @@ jobs:
 
       - name: PayloadGuard
         id: payloadguard
-        uses: DarkVader-PLG/payload-consequence-analyser@main
+        uses: PayloadGuard-PLG/payload-consequence-analyser@main
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           pr-description: ${{ github.event.pull_request.body }}
@@ -280,7 +280,7 @@ With [GitHub App](#github-app) secrets wired up, pass them too:
 
 ```yaml
       - name: PayloadGuard
-        uses: DarkVader-PLG/payload-consequence-analyser@main
+        uses: PayloadGuard-PLG/payload-consequence-analyser@main
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           pr-description: ${{ github.event.pull_request.body }}

@@ -405,7 +405,7 @@ Auth, security, permission, or authorization files (`.py/.js/.ts`) deleted outri
 
 ### 6.1 Test Harness Architecture
 
-The test harness (`darkvader-plg/payloadguard-test-harness`) maintains 18 permanent branches, each representing a specific adversarial scenario. Each branch has a closed PR against main. Running a regression:
+The test harness (`payloadguard-plg/payloadguard-test-harness`) maintains 18 permanent branches, each representing a specific adversarial scenario. Each branch has a closed PR against main. Running a regression:
 
 1. `run_regression.py` reopens all 18 PRs
 2. GitHub Actions triggers a PayloadGuard scan on each

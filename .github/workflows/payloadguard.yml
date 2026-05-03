@@ -89,6 +89,7 @@ jobs:
 
       - name: Post Check Run
         if: always()
+        continue-on-error: true
         env:
           PAYLOADGUARD_APP_ID: ${{ secrets.PAYLOADGUARD_APP_ID }}
           PAYLOADGUARD_PRIVATE_KEY: ${{ secrets.PAYLOADGUARD_PRIVATE_KEY }}

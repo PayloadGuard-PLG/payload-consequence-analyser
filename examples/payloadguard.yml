@@ -19,7 +19,7 @@ jobs:
 
       - name: PayloadGuard Scan
         id: payloadguard
-        uses: darkvader-plg/payload-consequence-analyser@main
+        uses: payloadguard-plg/payload-consequence-analyser@main
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           pr-description: ${{ github.event.pull_request.body }}
