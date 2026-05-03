@@ -1,5 +1,8 @@
 # PayloadGuard
 
+**Status:** v1.1.0 production release — May 2026  
+**Live on:** `PayloadGuard-PLG/payload-consequence-analyser@main` (`d843549`)
+
 **PayloadGuard** is a 5-layer branch analysis tool that scans a pull request before it merges and produces a forensic verdict on the risk of the changeset. It was built to stop the class of attack where a destructive diff is hidden behind a harmless-sounding description — and to catch it before a human reviewer has to.
 
 Each scan produces a verdict: **SAFE**, **REVIEW**, **CAUTION**, or **DESTRUCTIVE**. In CI it posts a GitHub Check Run with a full contextual report. Wire the exit code to a branch protection rule and DESTRUCTIVE verdicts block the merge button automatically.
@@ -7,14 +10,17 @@ Each scan produces a verdict: **SAFE**, **REVIEW**, **CAUTION**, or **DESTRUCTIV
 | Layer | What it checks |
 |---|---|
 | 1 — Surface Scan | Files and lines changed, deletion ratios, binary file handling |
-| 2 — Forensic Analysis | Critical-path file detection, deletion ratios, file permission changes, symlink/submodule detection |
+| 2 — Forensic Analysis | Critical-path file detection, deletion ratios, file permission changes, symlink/submodule detection, added file content scanning |
+| 2b — SCA Analysis | Package manifest diff scanning, hallucination defense via allowlist (opt-in) |
 | 3 — Consequence Model | Weighted scoring across all signals → final verdict |
 | 4 — Structural Drift | AST diff — which named classes, functions, and constants actually disappeared |
+| 4b — Complexity Advisory | McCabe V(G) for newly added functions (informational) |
 | 5a — Temporal Drift | Branch age × repo velocity — how stale is the context |
 | 5b — Semantic Transparency | Does the PR description match what the diff actually does |
 
 > **dev:** [Dark^Vader](https://github.com/DarkVader-PLG)
 
+---
 ---
 
 ## Contents
