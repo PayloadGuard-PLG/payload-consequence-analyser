@@ -137,3 +137,11 @@ sca:
 5. Begin work
 
 **Update the Handover block before ending every session.**
+
+- **Status:** v1.1.0 live on main (`d843549`). All AIntegrity fixes + Feature A (SCA) + Feature B (McCabe complexity advisory) + CI fix (SHA-pinned actions) merged.
+- **Next priority:** INC-1/INC-4 — new branch off main, implement `_scan_added_file_content()` in `analyze.py`. See sketch below.
+- **Warning:** Many other Claude session branches exist on remote — do NOT merge without review: `claude/audit-hardening`, `claude/fix-tests-and-ci`, `claude/pypi-and-action`, `claude/cleanup-readme`, `claude/docs-update`, `claude/fix-5-4-pem-validation`, etc.
+- **Open findings:** §INC-1 (HIGH), §INC-3 (MEDIUM), §INC-4 (HIGH) — see AUDIT_LOG.md
+- **Test suite:** `python -m pytest test_analyzer.py -v` → 151 pass, 7 skip (crypto/tree-sitter env)
+- **CI:** Fixed — all action versions SHA-pinned (checkout@v4, setup-python@v5, github-script@v7). Startup error resolved.
+- **Previous blockers:** Proxy 503 issue resolved (was blocking git push from Claude machine).
