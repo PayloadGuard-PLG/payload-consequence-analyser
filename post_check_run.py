@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Post a GitHub Check Run using GitHub App credentials."""
 import os
+import re
 import stat
 import sys
 import time
@@ -58,12 +59,22 @@ def main():
     head_sha        = _require_env("PR_HEAD_SHA")
     repo            = _require_env("GITHUB_REPOSITORY")
 
-    if "-----BEGIN" not in private_key or "PRIVATE KEY-----" not in private_key:
+    _PEM_RE = re.compile(
+        r"-----BEGIN [A-Z ]+-----\r?\n"
+        r"[A-Za-z0-9+/=\r\n]+"
+        r"-----END [A-Z ]+-----"
+    )
+    if not _PEM_RE.search(private_key.strip()):
         raise EnvironmentError(
             "PAYLOADGUARD_PRIVATE_KEY does not look like a valid PEM private key. "
             "Expected a string containing '-----BEGIN RSA PRIVATE KEY-----' or "
             "'-----BEGIN PRIVATE KEY-----'."
         )
+
+    if not re.fullmatch(r"[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+", repo):
+        raise EnvironmentError(f"GITHUB_REPOSITORY has an unexpected format: {repo!r}")
+    if not re.fullmatch(r"\d+", installation_id):
+        raise EnvironmentError(f"PAYLOADGUARD_INSTALLATION_ID must be numeric, got: {installation_id!r}")
 
     try:
         exit_code = int(os.environ.get("PAYLOADGUARD_EXIT_CODE", "1"))
@@ -137,5 +148,8 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"::error::Check Run failed: {e}", file=sys.stderr)
+        msg = str(e)
+        if any(kw in msg for kw in ("BEGIN", "PRIVATE", "KEY", "-----")):
+            msg = "[redacted — possible key material in exception message]"
+        print(f"::error::Check Run failed: {msg}", file=sys.stderr)
         sys.exit(1)

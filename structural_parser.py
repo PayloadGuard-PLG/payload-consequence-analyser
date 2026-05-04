@@ -129,6 +129,8 @@ def extract_named_nodes(source: str, path: str) -> set[str]:
             tree = ast.parse(source)
         except SyntaxError as e:
             raise ValueError(f"SyntaxError: {e}") from e
+        except (RecursionError, MemoryError):
+            return set()
         names = {
             node.name
             for node in ast.walk(tree)

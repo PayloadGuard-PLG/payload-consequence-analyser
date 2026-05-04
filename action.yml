@@ -54,13 +54,24 @@ runs:
       with:
         python-version: "3.11"
 
+    - name: Mask secrets
+      shell: bash
+      run: |
+        if [ -n "$PAYLOADGUARD_PRIVATE_KEY" ]; then
+          echo "::add-mask::$PAYLOADGUARD_PRIVATE_KEY"
+        fi
+      env:
+        PAYLOADGUARD_PRIVATE_KEY: ${{ inputs.private-key }}
+
     - name: Install dependencies
       shell: bash
       run: pip install -r "${{ github.action_path }}/requirements.txt"
 
     - name: Fetch base branch
       shell: bash
-      run: git fetch origin ${{ github.base_ref }}:${{ github.base_ref }}
+      env:
+        BASE_REF: ${{ github.base_ref }}
+      run: git fetch origin "$BASE_REF:$BASE_REF"
 
     - name: Run PayloadGuard
       id: scan
@@ -70,10 +81,12 @@ runs:
         PG_PR_DESCRIPTION: ${{ inputs.pr-description }}
         REPORT_PATH: ${{ github.workspace }}/${{ inputs.save-markdown }}
         JSON_REPORT_PATH: ${{ github.workspace }}/payloadguard-report.json
+        HEAD_REF: ${{ github.head_ref }}
+        BASE_REF: ${{ github.base_ref }}
       run: |
         set +e
         python "${{ github.action_path }}/analyze.py" . \
-          "${{ github.head_ref }}" "${{ github.base_ref }}" \
+          "$HEAD_REF" "$BASE_REF" \
           --pr-description "$PG_PR_DESCRIPTION" \
           --save-markdown "$REPORT_PATH" \
           --save-json "$JSON_REPORT_PATH"

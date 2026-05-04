@@ -15,6 +15,7 @@ import argparse
 import ast
 import copy
 import git
+import os
 import re
 import sys
 import json
@@ -27,6 +28,9 @@ from dataclasses import dataclass, field
 import structural_parser
 
 __version__ = "1.1.0"
+
+# Hard cap on bytes read from any single git blob — prevents OOM on large files.
+_MAX_BLOB_BYTES = 1_048_576  # 1 MB
 
 
 # ==============================================================================
@@ -134,8 +138,8 @@ _CONTENT_SHELL_PATTERNS = [
     r'\bsudo\s+\S',
     r'\bsetfacl\s+',
     r'\bchmod\s+[0-9a-osx+\-]',
-    r'curl\b[^\n]*\|\s*(ba)?sh',
-    r'wget\b[^\n]*\|\s*(ba)?sh',
+    r'curl\b.{0,200}\|\s*(?:ba)?sh',
+    r'wget\b.{0,200}\|\s*(?:ba)?sh',
     r'\brm\s+-[rf]',
 ]
 
@@ -526,12 +530,25 @@ def load_config(repo_path: str) -> PayloadGuardConfig:
     except yaml.YAMLError as e:
         print(f"WARNING: payloadguard.yml is invalid and has been ignored: {e}", file=sys.stderr)
         return PayloadGuardConfig()
+    if not isinstance(user_cfg, dict):
+        print("WARNING: payloadguard.yml must be a YAML mapping — ignored", file=sys.stderr)
+        return PayloadGuardConfig()
+
     merged = _deep_merge(DEFAULT_CONFIG, user_cfg)
     merged_thresholds = merged.get("thresholds", copy.deepcopy(DEFAULT_CONFIG["thresholds"]))
     for _key in ("branch_age_days", "files_deleted", "lines_deleted"):
         _val = merged_thresholds.get(_key)
-        if isinstance(_val, list) and len(_val) == 3:
+        if not isinstance(_val, list) or len(_val) != 3 or not all(isinstance(v, (int, float)) for v in _val):
+            print(f"WARNING: payloadguard.yml thresholds.{_key} must be a list of 3 numbers — using default", file=sys.stderr)
+            merged_thresholds[_key] = copy.deepcopy(DEFAULT_CONFIG["thresholds"][_key])
+        else:
             merged_thresholds[_key] = sorted(_val)
+    struct_th = merged_thresholds.get("structural", {})
+    default_struct = DEFAULT_CONFIG["thresholds"]["structural"]
+    for _key, _type in (("deletion_ratio", float), ("min_deleted_nodes", int), ("complexity_threshold", int)):
+        _val = struct_th.get(_key)
+        if not isinstance(_val, (int, float)):
+            struct_th[_key] = default_struct[_key]
     return PayloadGuardConfig(
         thresholds=merged_thresholds,
         semantic=merged.get("semantic", copy.deepcopy(DEFAULT_CONFIG["semantic"])),
@@ -686,8 +703,8 @@ class PayloadAnalyzer:
                 if structural_parser.language_for_path(path) is None:
                     continue
                 try:
-                    original = d.a_blob.data_stream.read().decode('utf-8', errors='ignore')
-                    modified = d.b_blob.data_stream.read().decode('utf-8', errors='ignore')
+                    original = d.a_blob.data_stream.read(_MAX_BLOB_BYTES).decode('utf-8', errors='ignore')
+                    modified = d.b_blob.data_stream.read(_MAX_BLOB_BYTES).decode('utf-8', errors='ignore')
                     result = StructuralPayloadAnalyzer(
                         original, modified,
                         file_path=path,
@@ -1039,7 +1056,7 @@ class PayloadAnalyzer:
             if ext in _CONTENT_SCAN_CODE_EXTENSIONS or ext in _CONTENT_BINARY_EXTENSIONS:
                 continue
             try:
-                content = d.b_blob.data_stream.read().decode('utf-8', errors='replace')
+                content = d.b_blob.data_stream.read(_MAX_BLOB_BYTES).decode('utf-8', errors='replace')
             except Exception:
                 continue
             ci_matches = [p for p in _CONTENT_CI_TRIGGER_PATTERNS
@@ -1209,7 +1226,7 @@ def format_markdown_report(report: dict) -> str:
 
     out = []
     out.append(f"## {verdict_emoji} PayloadGuard — `{verdict['status']}` [{verdict['severity']}]")
-    out.append(f"\n> `{analysis['branch']}` → `{analysis['target']}`")
+    out.append(f"\n> `{_md_escape(analysis['branch'])}` → `{_md_escape(analysis['target'])}`")
     out.append(f"\n**{verdict['recommendation']}**")
     out.append("")
 
@@ -1336,7 +1353,7 @@ def format_markdown_report(report: dict) -> str:
                 if ff['severity'] == 'CRITICAL' and ff['deleted_components']:
                     out.append(f"\n**Deleted from `{_md_escape(ff['file'])}`:**")
                     for comp in ff['deleted_components'][:10]:
-                        out.append(f"- `{comp}`")
+                        out.append(f"- `{_md_escape(comp)}`")
             out.append("")
         out.append(f"_{struct_note}_")
         out.append("")
@@ -1509,6 +1526,8 @@ def main():
                         help="Save GitHub-flavoured markdown report (default: payloadguard-report.md)")
 
     args = parser.parse_args()
+
+    args.repo_path = os.path.realpath(os.path.abspath(args.repo_path))
 
     config   = load_config(args.repo_path)
     analyzer = PayloadAnalyzer(args.repo_path, args.branch, args.target, config=config)
