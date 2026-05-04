@@ -2,14 +2,14 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** `claude/check-mcp-connection-OUqlz` — use this for INC-1/INC-4
-- **Status:** v1.1.0 live on main. All org references migrated from `darkvader-plg`/`DarkVader-PLG` → `payloadguard-plg`/`PayloadGuard-PLG` across both repos. PRs #29, #30, #33 merged to main in harness; analyser CI updated too.
-- **Next priority:** INC-1/INC-4 — new branch off main, implement `_scan_added_file_content()` in `analyze.py`. See sketch in Open Findings below.
-- **Open findings:** §INC-1 (HIGH), §INC-3 (MEDIUM), §INC-4 (HIGH) — see AUDIT_LOG.md
-- **Test suite:** `python -m pytest test_analyzer.py -v` → 151 pass, 7 skip (crypto/tree-sitter env)
+- **Branch for next work:** new branch off main — INC-3 is the only remaining open finding
+- **Status:** v1.1.0 live on main. INC-1 and INC-4 closed (PR #34). All org refs migrated. Harness CI operational with temporal group separation (PR #31).
+- **Next priority:** INC-3 (MEDIUM) — direct push to main → L5b returns UNVERIFIED but raises no flag. Low urgency.
+- **Open findings:** §INC-3 (MEDIUM) only — see AUDIT_LOG.md. INC-1 and INC-4 closed.
+- **Test suite:** `python -m pytest test_analyzer.py -v` → 163 pass, 7 skip (crypto/tree-sitter env)
 - **GitHub App credentials:** STALE after org migration. `post_check_run.py` will fail until App is re-installed under `PayloadGuard-PLG`. Workaround in place: `continue-on-error: true` on the "Post Check Run" step (analyser CI) and "PayloadGuard Scan" step (harness CI). Check Run badge will not appear until App is reconfigured.
-- **Harness CI:** Now operational for new PRs — workflow is SHA-pinned and org-corrected. To run full regression cycle use `python tools/run_regression.py --token "$GITHUB_TOKEN" --ingest` from PC with a valid user PAT. Old test PRs (#5–#22) do not trigger scans when reopened via MCP API (GitHub security behavior — user-triggered reopen required or use run_regression.py).
-- **Blockers:** None. MCP git push works. PC push is fine too.
+- **Harness CI:** Operational. Temporal groups implemented — `--mode stable` (default, 16 cases strict pass/fail), `--mode temporal` (4 aging cases, observational), `--mode full` (all). Run from PC: `python tools/run_regression.py --token "$GITHUB_TOKEN" --ingest`
+- **Blockers:** None.
 
 ---
 
@@ -141,9 +141,9 @@ sca:
 
 **Update the Handover block before ending every session.**
 
-- **Status:** v1.1.0 live on main (`d843549`). Org migration complete — all `darkvader-plg` / `DarkVader-PLG` references replaced with `payloadguard-plg` / `PayloadGuard-PLG` across both repos. CI operational. GitHub App credentials stale (continue-on-error workaround applied).
-- **Next priority:** INC-1/INC-4 — new branch off main, implement `_scan_added_file_content()` in `analyze.py`. See sketch in Open Findings.
+- **Status:** v1.1.0 live on main. INC-1 and INC-4 closed — `_scan_added_file_content()` implemented, 163 tests passing. Only INC-3 (MEDIUM) remains open.
+- **Next priority:** INC-3 — direct push to main raises no flag despite L5b returning UNVERIFIED. Low urgency.
 - **Warning:** Many other Claude session branches exist on remote — do NOT merge without review: `claude/audit-hardening`, `claude/fix-tests-and-ci`, `claude/pypi-and-action`, `claude/cleanup-readme`, `claude/docs-update`, `claude/fix-5-4-pem-validation`, etc.
-- **Open findings:** §INC-1 (HIGH), §INC-3 (MEDIUM), §INC-4 (HIGH) — see AUDIT_LOG.md
-- **Test suite:** `python -m pytest test_analyzer.py -v` → 151 pass, 7 skip (crypto/tree-sitter env)
+- **Open findings:** §INC-3 (MEDIUM) only — see AUDIT_LOG.md
+- **Test suite:** `python -m pytest test_analyzer.py -v` → 163 pass, 7 skip (crypto/tree-sitter env)
 - **CI:** SHA-pinned and org-corrected in both repos. Harness fires on new PRs. App Check Run badge disabled pending App re-install under PayloadGuard-PLG.
