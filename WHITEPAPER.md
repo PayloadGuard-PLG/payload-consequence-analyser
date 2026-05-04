@@ -28,8 +28,10 @@ The system assigns a severity score across independent signal dimensions and pro
 - SCA dependency hallucination defense (opt-in via allowlist.yml)
 - McCabe complexity advisory for new functions (informational, no score impact)
 - GitHub Actions infrastructure hardening (all actions SHA-pinned)
+- Added file content scanning — CI trigger strings and shell execution patterns in non-code files (INC-1, INC-4)
+- UNVERIFIED semantic flag surfaces on non-trivial changesets with no PR description (INC-3)
 
-Against an 18-case adversarial test suite covering safe baselines, canonical destructive payloads, boundary conditions, and purpose-built evasion techniques, PayloadGuard achieves **17/18 detection (94%)** at default thresholds with zero false positives on safe baselines.
+Against an 18-case adversarial test suite covering safe baselines, canonical destructive payloads, boundary conditions, and purpose-built evasion techniques, PayloadGuard achieves **17/18 detection (94%)** at default thresholds with zero false positives on safe baselines. Test suite: 166 passing.
 
 ---
 
@@ -554,6 +556,8 @@ For repositories with complex merge histories, `merge_base()` may return multipl
 
 Layer 5b fires only when the PR description contains one of the configured benign keywords. A sufficiently vague description ("updates") that doesn't match any keyword produces `UNVERIFIED` rather than `DECEPTIVE_PAYLOAD`. The layer is a high-precision supplement, not a comprehensive intent classifier.
 
+When no PR description is provided at all and the changeset is non-trivial (verdict ≠ SAFE), `UNVERIFIED` is now surfaced as an explicit flag in the verdict flags list. This covers the direct-push-to-main case where no PR context exists.
+
 ### 8.6 AI Research Tool Context Pollution is an Out-of-Scope Threat
 
 PayloadGuard's threat model is a human submitting a destructive PR. It does not model the case where an AI assistant — an LLM research tool, notebook, or deep-research agent — is processing repository documents on a maintainer's behalf. In that scenario, a document *added* to the repository (not deleted from it) can contain plausible-looking but hallucinated content that lands in version control, bypassing all five layers because the problem is the LLM's context window, not the git diff.
@@ -564,7 +568,7 @@ There was no external attacker. NotebookLM's own post-incident analysis framed t
 
 **The operationally relevant point:** whether a corrupted document enters a repo because a deliberate adversary crafted it or because an AI research tool mixed sources, the outcome is identical — plausible-looking content that doesn't describe reality lands in version control. The mechanism (high-entropy external sources overwhelming source segregation) is functionally equivalent to a deliberate injection attack. Defence must treat both cases the same.
 
-Proposed future mitigations are documented in `AUDIT_LOG.md §INC-1 through §INC-4`.
+**Mitigations implemented (2026-05-04):** INC-1 and INC-4 are closed — `_scan_added_file_content()` now scans added non-code files for CI trigger strings (`[citest`, `needs-ci`) and shell execution patterns (`curl|bash`, `sudo`, `chmod`, `rm -rf`). INC-3 is closed — UNVERIFIED surfaces as a verdict flag on non-trivial changesets. INC-2 (AI research tool context pollution) remains out of scope for static analysis; mitigated by human review.
 
 ---
 

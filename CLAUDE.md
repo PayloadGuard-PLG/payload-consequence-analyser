@@ -4,9 +4,9 @@
 
 - **Branch for next work:** new branch off main — INC-3 is the only remaining open finding
 - **Status:** v1.1.0 live on main. INC-1 and INC-4 closed (PR #34). All org refs migrated. Harness CI operational with temporal group separation (PR #31).
-- **Next priority:** INC-3 (MEDIUM) — direct push to main → L5b returns UNVERIFIED but raises no flag. Low urgency.
-- **Open findings:** §INC-3 (MEDIUM) only — see AUDIT_LOG.md. INC-1 and INC-4 closed.
-- **Test suite:** `python -m pytest test_analyzer.py -v` → 163 pass, 7 skip (crypto/tree-sitter env)
+- **Next priority:** No outstanding findings. Next sprint at user's discretion — candidates: A06 compound threshold gaming (known miss, §8.1), grammar coverage expansion (Ruby/PHP), or new test cases.
+- **Open findings:** None. All INC findings closed. INC-2 classified out-of-scope.
+- **Test suite:** `python -m pytest test_analyzer.py -v` → 166 pass, 7 skip (crypto/tree-sitter env)
 - **GitHub App credentials:** STALE after org migration. `post_check_run.py` will fail until App is re-installed under `PayloadGuard-PLG`. Workaround in place: `continue-on-error: true` on the "Post Check Run" step (analyser CI) and "PayloadGuard Scan" step (harness CI). Check Run badge will not appear until App is reconfigured.
 - **Harness CI:** Operational. Temporal groups implemented — `--mode stable` (default, 16 cases strict pass/fail), `--mode temporal` (4 aging cases, observational), `--mode full` (all). Run from PC: `python tools/run_regression.py --token "$GITHUB_TOKEN" --ingest`
 - **Blockers:** None.
@@ -144,6 +144,6 @@ sca:
 - **Status:** v1.1.0 live on main. INC-1 and INC-4 closed — `_scan_added_file_content()` implemented, 163 tests passing. Only INC-3 (MEDIUM) remains open.
 - **Next priority:** INC-3 — direct push to main raises no flag despite L5b returning UNVERIFIED. Low urgency.
 - **Warning:** Many other Claude session branches exist on remote — do NOT merge without review: `claude/audit-hardening`, `claude/fix-tests-and-ci`, `claude/pypi-and-action`, `claude/cleanup-readme`, `claude/docs-update`, `claude/fix-5-4-pem-validation`, etc.
-- **Open findings:** §INC-3 (MEDIUM) only — see AUDIT_LOG.md
-- **Test suite:** `python -m pytest test_analyzer.py -v` → 163 pass, 7 skip (crypto/tree-sitter env)
+- **Open findings:** None — all INC findings resolved
+- **Test suite:** `python -m pytest test_analyzer.py -v` → 166 pass, 7 skip (crypto/tree-sitter env)
 - **CI:** SHA-pinned and org-corrected in both repos. Harness fires on new PRs. App Check Run badge disabled pending App re-install under PayloadGuard-PLG.

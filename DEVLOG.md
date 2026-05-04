@@ -2,6 +2,36 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-05-04 — Org Migration, Harness Hardening, INC-1/INC-3/INC-4 Closed
+
+### Org migration: darkvader-plg → payloadguard-plg
+
+All references to `DarkVader-PLG` / `darkvader-plg` replaced across both repos after account loss required full org migration. The most critical fix was the test harness workflow (`uses:` reference) — GitHub Actions doesn't redirect after an org rename, silently preventing new workflow runs. PRs #29 and #33 cleared all stale references from harness and analyser respectively.
+
+### GitHub Actions SHA-pinning (harness)
+
+The `PayloadGuard-PLG` org policy requires all actions to be pinned to full commit SHAs. The harness workflow was using `@v6`, `@v7`, and `@main` — causing GitHub to silently reject new workflow runs without queuing them. All three action references SHA-pinned (PR #30). Added `continue-on-error: true` to the PayloadGuard Scan step to tolerate stale GitHub App credentials after org migration.
+
+### Temporal group separation in regression runner (harness PR #31)
+
+The 4 SAFE-expected test cases (T01/T02/T12/A10) will drift from SAFE → REVIEW after ~90 days due to branch age scoring. Added `temporal_group` field to `test_cases.json` (`aging` vs `stable`) and `--mode stable|temporal|full` to `run_regression.py`. Default mode runs 16 stable cases with strict pass/fail; temporal mode runs the 4 aging cases as longitudinal observation. `ingest.py` and `HARNESS.md` updated to match.
+
+### INC-1 and INC-4 closed (PR #34)
+
+Implemented `_scan_added_file_content()` in `analyze.py`. Scans added non-code files for CI trigger strings (`[citest`, `needs-ci`, `citest commit:`) and shell execution patterns (`curl|bash`, `sudo`, `chmod`, `rm -rf`, `setfacl`). Code and binary extensions skipped. Each flagged file contributes +2 to severity score (capped at +4). Report includes `content_flags` key and `🔬 Added File Content Scan` markdown section. 12 new tests, suite 151 → 163.
+
+### INC-3 closed (PR #35)
+
+When no PR description is provided and the changeset is non-trivial (verdict ≠ SAFE), `"No PR description — semantic transparency unverified"` is now injected into `verdict["flags"]`. Previously UNVERIFIED was silently swallowed. 3 new tests, suite 163 → 166.
+
+### Commits (analyser)
+- `92fc69e` — ci: continue-on-error for Post Check Run step
+- `63df0ac` — Fix org references: darkvader-plg/DarkVader-PLG → payloadguard-plg/PayloadGuard-PLG
+- `948a3b9` — feat: added file content scanning (INC-1, INC-4)
+- `13cc624` — fix: surface UNVERIFIED semantic flag on non-trivial changesets (INC-3)
+
+---
+
 ## 2026-05-03 — GitHub Actions Infrastructure Fix + v1.1.0 Release
 
 Session focused on resolving CI startup failures caused by non-existent action version tags (@v6, @v9) and establishing v1.1.0 as the live release on main.

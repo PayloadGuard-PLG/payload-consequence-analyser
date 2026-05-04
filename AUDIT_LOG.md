@@ -372,10 +372,10 @@ The contamination was not uniform — real PayloadGuard content (test cases, exi
 
 | ID | Finding | Severity | Status |
 |---|---|---|---|
-| §INC-1 | Added non-code files not scanned for content — embedded CI trigger strings (`[citest]`, `needs-ci`) are invisible to all layers | HIGH | Open |
-| §INC-2 | AI research tool source contamination produces outputs functionally identical to deliberate injection — the mechanism is the same regardless of intent | HIGH | Open (out-of-scope for static analysis; mitigated by human review) |
-| §INC-3 | Direct push to main bypasses L5b entirely — `UNVERIFIED` is returned but no flag is raised when there is no PR context at all | MEDIUM | Open |
-| §INC-4 | File additions with no code content score 0 regardless of payload — a 100-line document containing `rm -rf /` or CI trigger strings is indistinguishable from a blank file | HIGH | Open |
+| §INC-1 | Added non-code files not scanned for content — embedded CI trigger strings (`[citest]`, `needs-ci`) are invisible to all layers | HIGH | **Closed** — PR #34, 2026-05-04 |
+| §INC-2 | AI research tool source contamination produces outputs functionally identical to deliberate injection — the mechanism is the same regardless of intent | HIGH | Out-of-scope for static analysis; mitigated by human review |
+| §INC-3 | Direct push to main bypasses L5b entirely — `UNVERIFIED` is returned but no flag is raised when there is no PR context at all | MEDIUM | **Closed** — PR #35, 2026-05-04 |
+| §INC-4 | File additions with no code content score 0 regardless of payload — a 100-line document containing `rm -rf /` or CI trigger strings is indistinguishable from a blank file | HIGH | **Closed** — PR #34, 2026-05-04 |
 
 ### Strategic Lessons
 
@@ -404,6 +404,33 @@ The output was committed before anyone verified it matched reality. Whether the 
 | Added to WHITEPAPER §8 (Known Limitations) | Documentation | Document LLM-in-the-loop as an out-of-scope threat model for the current version |
 
 ---
+
+## Resolved Issues — Full Checklist
+
+All findings from the April 2026 audit are now resolved or classified.
+
+```
+[x] §INC-1 — Added non-code file content scanning
+    Implementation: _scan_added_file_content() in analyze.py
+    Patterns: [citest, needs-ci, citest commit:, [needs-ci]
+    Closed: PR #34, 2026-05-04. 12 new tests.
+
+[x] §INC-3 — UNVERIFIED flag on non-trivial changesets
+    Implementation: post-semantic flag injection in analyze()
+    Condition: semantic.status == UNVERIFIED and verdict != SAFE
+    Closed: PR #35, 2026-05-04. 3 new tests.
+
+[x] §INC-4 — Shell execution patterns in added non-code files
+    Implementation: _CONTENT_SHELL_PATTERNS in analyze.py
+    Patterns: curl|bash, wget|bash, sudo, chmod, setfacl, rm -rf
+    Closed: PR #34, 2026-05-04 (same PR as INC-1).
+
+[-] §INC-2 — AI research tool context pollution
+    Classification: Out-of-scope for static diff analysis.
+    A static tool cannot inspect the LLM's context window.
+    Mitigation: human review of AI-generated content before commit.
+    No code change. Not a gap in PayloadGuard's threat model.
+```
 
 ## Next Audit Checklist
 
