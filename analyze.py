@@ -99,6 +99,47 @@ _COMMIT_RED_FLAG_PATTERNS = [
 ]
 
 # ==============================================================================
+# ADDED FILE CONTENT SCANNING (Layer 1 extension — INC-1, INC-4)
+# Scans added non-code files for CI trigger strings and shell execution patterns.
+# Code extensions are skipped (handled by structural analysis, Layer 4).
+# Known binary extensions are skipped (undecodable content).
+# ==============================================================================
+
+_CONTENT_SCAN_CODE_EXTENSIONS = frozenset({
+    '.py', '.js', '.jsx', '.ts', '.tsx', '.go', '.rs', '.java',
+    '.rb', '.c', '.cpp', '.h', '.hpp', '.cs', '.swift', '.kt',
+})
+
+_CONTENT_BINARY_EXTENSIONS = frozenset({
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico',
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    '.zip', '.tar', '.gz', '.bz2', '.7z', '.rar',
+    '.exe', '.dll', '.so', '.dylib', '.bin', '.wasm',
+    '.mp3', '.mp4', '.avi', '.mov', '.wav',
+    '.ttf', '.woff', '.woff2', '.eot',
+    '.pyc', '.pyo', '.class', '.o', '.a',
+    '.db', '.sqlite', '.sqlite3',
+})
+
+# Strings embedded in non-code files (README, docs, config) to force CI reruns.
+_CONTENT_CI_TRIGGER_PATTERNS = [
+    r'\[citest',
+    r'\bneeds-ci\b',
+    r'citest\s+commit:',
+    r'\[needs-ci\]',
+]
+
+# Shell execution patterns — a non-code file containing these has runnable intent.
+_CONTENT_SHELL_PATTERNS = [
+    r'\bsudo\s+\S',
+    r'\bsetfacl\s+',
+    r'\bchmod\s+[0-9a-osx+\-]',
+    r'curl\b[^\n]*\|\s*(ba)?sh',
+    r'wget\b[^\n]*\|\s*(ba)?sh',
+    r'\brm\s+-[rf]',
+]
+
+# ==============================================================================
 # SCA — DEPENDENCY MANIFEST PATTERNS (Layer 2b)
 # Opt-in: only runs when allowlist.yml is present in the repo root.
 # ==============================================================================
@@ -753,6 +794,9 @@ class PayloadAnalyzer:
                 "allowlist_active": allowlist is not None,
             }
 
+            # LAYER 1 (extension): Added non-code file content scanning (INC-1, INC-4)
+            added_file_flags = self._scan_added_file_content(diffs)
+
             # LAYER 3: CONSEQUENCE VERDICT
             unverified_dep_count = len(sca_flags) if self.config.sca.get("fail_on_unknown", True) else 0
             verdict = self._assess_consequence(
@@ -764,6 +808,7 @@ class PayloadAnalyzer:
                 critical_file_deletions=len(critical_deletions),
                 security_file_deletions=len(security_deletions),
                 unverified_dependencies=unverified_dep_count,
+                content_flags=len(added_file_flags),
             )
 
             # LAYER 5a: TEMPORAL DRIFT
@@ -843,6 +888,7 @@ class PayloadAnalyzer:
                 "temporal_drift": temporal_drift,
                 "semantic": semantic,
                 "commit_flags": commit_flags,
+                "content_flags": added_file_flags,
                 "permission_changes": permission_changes,
                 "special_files": special_files,
                 "deleted_files": {
@@ -858,7 +904,7 @@ class PayloadAnalyzer:
                 "error_type": type(e).__name__,
             }
 
-    def _assess_consequence(self, files_deleted, lines_deleted, days_old, deletion_ratio, structural_severity="LOW", critical_file_deletions=0, security_file_deletions=0, unverified_dependencies=0):
+    def _assess_consequence(self, files_deleted, lines_deleted, days_old, deletion_ratio, structural_severity="LOW", critical_file_deletions=0, security_file_deletions=0, unverified_dependencies=0, content_flags=0):
         flags = []
         severity_score = 0.0
         th = self.config.thresholds
@@ -941,6 +987,10 @@ class PayloadAnalyzer:
             flags.append(f"{unverified_dependencies} unverified package(s) added — not in allowlist.yml")
             severity_score += 3
 
+        if content_flags > 0:
+            flags.append(f"{content_flags} added file(s) contain CI trigger strings or shell execution patterns")
+            severity_score += min(4, content_flags * 2)
+
         if severity_score >= 5:
             return {
                 "status": "DESTRUCTIVE",
@@ -973,6 +1023,32 @@ class PayloadAnalyzer:
                 "recommendation": "✓ Proceed with normal review process",
                 "severity_score": severity_score,
             }
+
+    def _scan_added_file_content(self, diffs):
+        """Scan added non-code files for CI trigger strings and shell execution patterns."""
+        flags = []
+        for d in diffs:
+            if d.change_type != 'A':
+                continue
+            path = d.b_path or ''
+            ext = Path(path).suffix.lower()
+            if ext in _CONTENT_SCAN_CODE_EXTENSIONS or ext in _CONTENT_BINARY_EXTENSIONS:
+                continue
+            try:
+                content = d.b_blob.data_stream.read().decode('utf-8', errors='replace')
+            except Exception:
+                continue
+            ci_matches = [p for p in _CONTENT_CI_TRIGGER_PATTERNS
+                          if re.search(p, content, re.IGNORECASE | re.MULTILINE)]
+            shell_matches = [p for p in _CONTENT_SHELL_PATTERNS
+                             if re.search(p, content, re.IGNORECASE | re.MULTILINE)]
+            if ci_matches or shell_matches:
+                flags.append({
+                    'file': path,
+                    'ci_triggers': ci_matches,
+                    'shell_patterns': shell_matches,
+                })
+        return flags
 
 
 # ==============================================================================
@@ -1334,6 +1410,20 @@ def format_markdown_report(report: dict) -> str:
         out.append("|---|---|")
         for cf in commit_flags[:10]:
             out.append(f"| `{cf['sha']}` | {_md_escape(cf['message'])} |")
+        out.append("")
+
+    # ── Added File Content Flags ──────────────────────────────────────────────
+    content_flags = report.get('content_flags', [])
+    if content_flags:
+        out.append("### 🔬 Added File Content Scan")
+        out.append("_Added non-code files scanned for CI trigger strings and shell execution patterns._")
+        out.append("")
+        out.append("| File | CI Triggers | Shell Patterns |")
+        out.append("|---|---|---|")
+        for cf in content_flags:
+            ci_cell = f"{len(cf['ci_triggers'])} match(es)" if cf['ci_triggers'] else "—"
+            sh_cell = f"{len(cf['shell_patterns'])} match(es)" if cf['shell_patterns'] else "—"
+            out.append(f"| `{_md_escape(cf['file'])}` | {ci_cell} | {sh_cell} |")
         out.append("")
 
     # ── Deleted Files ─────────────────────────────────────────────────────────

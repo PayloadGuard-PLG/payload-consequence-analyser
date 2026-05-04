@@ -2,11 +2,14 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch:** `claude/initial-setup-WO53R` — Feature A (SCA) + Feature B (complexity advisory) committed locally as `3fe55b6`, push pending (proxy 503 in last session — PC push required)
-- **Next priority:** Push `3fe55b6` from PC → then open PR for `claude/initial-setup-WO53R` → then begin INC-1/INC-4 mitigation (content scan for added non-code files)
+- **Branch for next work:** `claude/check-mcp-connection-OUqlz` — use this for INC-1/INC-4
+- **Status:** v1.1.0 live on main. All org references migrated from `darkvader-plg`/`DarkVader-PLG` → `payloadguard-plg`/`PayloadGuard-PLG` across both repos. PRs #29, #30, #33 merged to main in harness; analyser CI updated too.
+- **Next priority:** INC-1/INC-4 — new branch off main, implement `_scan_added_file_content()` in `analyze.py`. See sketch in Open Findings below.
 - **Open findings:** §INC-1 (HIGH), §INC-3 (MEDIUM), §INC-4 (HIGH) — see AUDIT_LOG.md
 - **Test suite:** `python -m pytest test_analyzer.py -v` → 151 pass, 7 skip (crypto/tree-sitter env)
-- **Blockers:** None. MCP `push_files` has been 503-timing-out all session — use PC git push only
+- **GitHub App credentials:** STALE after org migration. `post_check_run.py` will fail until App is re-installed under `PayloadGuard-PLG`. Workaround in place: `continue-on-error: true` on the "Post Check Run" step (analyser CI) and "PayloadGuard Scan" step (harness CI). Check Run badge will not appear until App is reconfigured.
+- **Harness CI:** Now operational for new PRs — workflow is SHA-pinned and org-corrected. To run full regression cycle use `python tools/run_regression.py --token "$GITHUB_TOKEN" --ingest` from PC with a valid user PAT. Old test PRs (#5–#22) do not trigger scans when reopened via MCP API (GitHub security behavior — user-triggered reopen required or use run_regression.py).
+- **Blockers:** None. MCP git push works. PC push is fine too.
 
 ---
 
@@ -110,8 +113,8 @@ sca:
 
 ## Development Rules
 
-- **Push:** Always from PC -- MCP `push_files` has been unreliable (503s). Use `git push -u origin <branch>`
-- **Branch:** All work on `claude/initial-setup-WO53R` until PR merged
+- **Push:** `git push -u origin <branch>` — MCP push works now but PC push is equally fine
+- **Branch:** Next sprint work on `claude/check-mcp-connection-OUqlz` (INC-1/INC-4)
 - **Tests:** Run `python -m pytest test_analyzer.py -v` before every commit -- must stay green
 - **No MCP push_files:** Confirmed broken in multiple sessions. Don't retry.
 - **Commit style:** Imperative, specific, with test count in body. See git log for examples.
@@ -138,10 +141,9 @@ sca:
 
 **Update the Handover block before ending every session.**
 
-- **Status:** v1.1.0 live on main (`d843549`). All AIntegrity fixes + Feature A (SCA) + Feature B (McCabe complexity advisory) + CI fix (SHA-pinned actions) merged.
-- **Next priority:** INC-1/INC-4 — new branch off main, implement `_scan_added_file_content()` in `analyze.py`. See sketch below.
+- **Status:** v1.1.0 live on main (`d843549`). Org migration complete — all `darkvader-plg` / `DarkVader-PLG` references replaced with `payloadguard-plg` / `PayloadGuard-PLG` across both repos. CI operational. GitHub App credentials stale (continue-on-error workaround applied).
+- **Next priority:** INC-1/INC-4 — new branch off main, implement `_scan_added_file_content()` in `analyze.py`. See sketch in Open Findings.
 - **Warning:** Many other Claude session branches exist on remote — do NOT merge without review: `claude/audit-hardening`, `claude/fix-tests-and-ci`, `claude/pypi-and-action`, `claude/cleanup-readme`, `claude/docs-update`, `claude/fix-5-4-pem-validation`, etc.
 - **Open findings:** §INC-1 (HIGH), §INC-3 (MEDIUM), §INC-4 (HIGH) — see AUDIT_LOG.md
 - **Test suite:** `python -m pytest test_analyzer.py -v` → 151 pass, 7 skip (crypto/tree-sitter env)
-- **CI:** Fixed — all action versions SHA-pinned (checkout@v4, setup-python@v5, github-script@v7). Startup error resolved.
-- **Previous blockers:** Proxy 503 issue resolved (was blocking git push from Claude machine).
+- **CI:** SHA-pinned and org-corrected in both repos. Harness fires on new PRs. App Check Run badge disabled pending App re-install under PayloadGuard-PLG.
