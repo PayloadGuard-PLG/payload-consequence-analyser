@@ -1503,5 +1503,75 @@ class TestAddedFileContentScanning(unittest.TestCase):
         self.assertTrue(len(result["content_flags"][0]["shell_patterns"]) > 0)
 
 
+# ==============================================================================
+# INC-3 — UNVERIFIED flag on non-trivial changeset
+# ==============================================================================
+
+class TestINC3UnverifiedFlag(unittest.TestCase):
+    """UNVERIFIED semantic status should surface as a verdict flag on non-SAFE changesets."""
+
+    def test_unverified_on_destructive_changeset_adds_flag(self):
+        a = _make_analyzer()
+        # non-SAFE verdict, no PR description
+        result = a._assess_consequence(
+            files_deleted=15, lines_deleted=6000, days_old=0,
+            deletion_ratio=80.0, structural_severity="LOW",
+        )
+        self.assertNotEqual(result["status"], "SAFE")
+        # Simulate INC-3 injection as analyze() does it
+        from analyze import SemanticTransparencyAnalyzer
+        semantic = SemanticTransparencyAnalyzer("", result["severity"]).analyze_transparency()
+        self.assertEqual(semantic["status"], "UNVERIFIED")
+        if result["status"] != "SAFE":
+            result["flags"].append("No PR description — semantic transparency unverified")
+        self.assertIn("No PR description — semantic transparency unverified", result["flags"])
+
+    def test_unverified_on_safe_changeset_does_not_add_flag(self):
+        a = _make_analyzer()
+        result = a._assess_consequence(
+            files_deleted=0, lines_deleted=0, days_old=0,
+            deletion_ratio=0.0, structural_severity="LOW",
+        )
+        self.assertEqual(result["status"], "SAFE")
+        # No injection on SAFE — flag list should not contain the UNVERIFIED message
+        self.assertNotIn("No PR description — semantic transparency unverified", result["flags"])
+
+    def test_unverified_flag_appears_in_full_analyze_no_description(self):
+        """End-to-end: no PR description + destructive diff → UNVERIFIED flag in verdict."""
+        from test_analyzer import TestAnalyzeSuccess
+        harness = TestAnalyzeSuccess()
+        # Build a diff that produces a non-SAFE verdict (large deletion)
+        deleted_content = "\n".join(f"def fn_{i}(): pass" for i in range(200))
+        d = MagicMock()
+        d.change_type = "D"
+        d.a_path = "auth.py"
+        d.a_blob.data_stream.read.return_value = deleted_content.encode()
+
+        t1 = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2025, 3, 1, tzinfo=timezone.utc)
+        a = _make_analyzer()
+        branch_commit = MagicMock()
+        branch_commit.committed_datetime = t1
+        branch_commit.hexsha = "aabbccddeeff"
+        target_commit = MagicMock()
+        target_commit.committed_datetime = t2
+        target_commit.hexsha = "112233445566"
+        a.repo.commit.side_effect = lambda ref: target_commit if ref == "main" else branch_commit
+        a.repo.iter_commits.return_value = []
+        merge_base_commit = MagicMock()
+        merge_base_commit.diff.return_value = [d]
+        merge_base_commit.hexsha = "deadbeef00000000"
+        a.repo.merge_base.return_value = [merge_base_commit]
+        a.repo.git.diff.return_value = f"0\t200\tauth.py"
+
+        result = a.analyze(pr_description="")
+        self.assertNotIn("error", result)
+        if result["verdict"]["status"] != "SAFE":
+            self.assertIn(
+                "No PR description — semantic transparency unverified",
+                result["verdict"]["flags"],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

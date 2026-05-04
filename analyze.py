@@ -828,6 +828,10 @@ class PayloadAnalyzer:
                 benign_keywords=self.config.semantic["benign_keywords"],
             ).analyze_transparency()
 
+            # INC-3: UNVERIFIED on a non-trivial changeset is itself a flag
+            if semantic["status"] == "UNVERIFIED" and verdict["status"] != "SAFE":
+                verdict["flags"].append("No PR description — semantic transparency unverified")
+
             # COMMIT MESSAGE ANALYSIS (advisory — §4.1)
             commit_flags: list[dict] = []
             try:
