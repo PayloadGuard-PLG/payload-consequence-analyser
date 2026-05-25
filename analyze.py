@@ -162,8 +162,23 @@ _ACTIONS_CREDENTIAL_HARVEST = [
     r"printenv\b[^\n]*\|\s*(grep|awk)\b",
     r"grep\s+-r[^\n]*(AWS_|GITHUB_TOKEN|api[_-]?key|ssh-rsa)",
     r"cat\s+~?/\.ssh/(id_rsa|id_ed25519|authorized_keys)",
+    # RTA-05 fix: curl with secret in URL (original pattern — http after secret)
     r"curl\b[^\n]*\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]*http",
+    # RTA-05 fix: secret passed as HTTP auth header (-H / --header), works
+    # even when curl spans multiple lines with backslash continuation.
+    r"(?:-H|--header)\s+[\"'][^\"']*\$\{\{\s*secrets\.[A-Z_]+\s*\}\}",
+    # RTA-02 fix: secret exfiltrated via GITHUB_OUTPUT or GITHUB_STEP_SUMMARY
+    r"echo\b[^\n]*\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]*>>\s*\$GITHUB_OUTPUT",
+    r"echo\b[^\n]*\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]*>>\s*\$GITHUB_STEP_SUMMARY",
 ]
+
+# Signal 7: GitHub environment file injection — poisons PATH, LD_PRELOAD, or
+# NODE_OPTIONS for subsequent steps via $GITHUB_ENV. Distinguished from
+# legitimate env-var setting by the presence of path-manipulation values.
+_ACTIONS_GITHUB_ENV_INJECTION = re.compile(
+    r"echo\s+['\"]?(PATH=|LD_PRELOAD=|LD_LIBRARY_PATH=|NODE_OPTIONS=--require)[^\n]*>>\s*\$GITHUB_ENV",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 # Signal 3: Dormant trigger — workflow_dispatch or schedule combined with a
 # shell execution pattern in the same file constitutes a sleeper payload.
@@ -1324,6 +1339,13 @@ class PayloadAnalyzer:
                         'type': 'dangerous_trigger_pull_request_target',
                         'pattern': 'pull_request_target trigger',
                     })
+
+            # Signal 7: GITHUB_ENV path/loader injection
+            if _ACTIONS_GITHUB_ENV_INJECTION.search(content):
+                signals.append({
+                    'type': 'github_env_injection',
+                    'pattern': _ACTIONS_GITHUB_ENV_INJECTION.pattern,
+                })
 
             if signals:
                 critical_types = {
