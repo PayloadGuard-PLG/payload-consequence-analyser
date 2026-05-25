@@ -983,9 +983,14 @@ class PayloadAnalyzer:
                 benign_keywords=self.config.semantic["benign_keywords"],
             ).analyze_transparency()
 
-            # INC-3: UNVERIFIED on a non-trivial changeset is itself a flag
-            if semantic["status"] == "UNVERIFIED" and verdict["status"] != "SAFE":
+            # INC-3: UNVERIFIED always flags — no PR description means L5b
+            # cannot protect against deceptive payloads regardless of diff size.
+            # SAFE + UNVERIFIED upgrades to REVIEW so the gap is visible to
+            # reviewers without blocking the PR (REVIEW exits 0).
+            if semantic["status"] == "UNVERIFIED":
                 verdict["flags"].append("No PR description — semantic transparency unverified")
+                if verdict["status"] == "SAFE":
+                    verdict["status"] = "REVIEW"
 
             # COMMIT MESSAGE ANALYSIS (advisory — §4.1)
             commit_flags: list[dict] = []
