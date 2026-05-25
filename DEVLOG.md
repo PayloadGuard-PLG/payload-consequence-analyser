@@ -2,6 +2,109 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-05-25 — Layer 2c: GitHub Actions Poisoning Detection + Harness Expansion + Docs
+
+Full session implementing Layer 2c (GitHub Actions workflow poisoning detection), shipping it to main via PR #36, validating all 12 new harness test cases live, correcting two expectation errors discovered during live validation, rewriting the README professionally, and producing the Squad Optimiser red-team handover document.
+
+### Commits (newest first, analyser)
+
+- `4ea66e9` — Merge PR #36: Layer 2c + three hardening fixes to main
+- `654a0c1` — Harden Layer 2c: three architectural fixes before red-team
+- `83826a5` — (prior commit) Layer 2c initial implementation merged
+
+### Commits (newest first, harness)
+
+- SHA pin updated: `6c04c8c` (pre-Layer-2c) → `83826a5f3204d74afef5e1a930e7d60bfd1b8cba` (Layer 2c build). PR #33.
+- 12 Layer 2c test branches created and PRs opened: PRs #34–#45.
+
+---
+
+### Layer 2c — GitHub Actions Poisoning Detection
+
+Layer 2c scans every added or modified `.github/workflows/` and `.github/actions/` YAML file for seven signal types targeting CI pipeline poisoning. Implemented in `_scan_github_actions_poisoning()` in `analyze.py`.
+
+**Signal types:**
+
+| Signal | Severity | Score | Detection mechanism |
+|---|---|---|---|
+| `base64_payload` | CRITICAL | +5 | Base64 string piped to a shell interpreter |
+| `credential_harvest` | CRITICAL | +5 | Metadata endpoint probing, secret grep, env dump to curl |
+| `pull_request_target_with_write_permissions` | CRITICAL | +5 | `pull_request_target` trigger + any write permission declared |
+| `dormant_trigger_with_payload` | HIGH | +3 | `workflow_dispatch` or `schedule` combined with shell execution |
+| `forged_bot_author` | HIGH | +3 | `git config user.name/email` set to a known bot identity |
+| `oidc_elevation_no_consumer` | HIGH | +3 | `id-token: write` with no legitimate OIDC consumer action |
+| `dangerous_trigger_pull_request_target` | HIGH | +3 | `pull_request_target` trigger alone (no write permissions) |
+
+**Three hardening fixes shipped before red-team:**
+
+**Fix H1 — YAML folded/literal block normalisation**
+Base64 payloads split across multiple YAML folded block lines (`>-` or `|`) would evade single-line regex matching. `_normalize_yaml_content()` collapses folded/literal block continuations before pattern matching. Test: AW01 — folded block base64 → DESTRUCTIVE.
+
+**Fix H2 — Exact-match OIDC consumer allowlist**
+The OIDC consumer check used prefix matching on `uses:` values. A typosquatted action (`aws-actions-unofficial/configure-aws-credentials`) would match `aws-actions/` and suppress the `oidc_elevation_no_consumer` signal. Changed to exact-match against `_SAFE_OIDC_CONSUMERS_DEFAULT`. Typosquatted consumers are correctly rejected. Test: AW03 — typosquatted OIDC → CAUTION (signal fires).
+
+**Fix H3 — `pull_request_target` two-tier scoring**
+`pull_request_target` alone (no write permissions declared) is HIGH (+3 → CAUTION). `pull_request_target` combined with any write permission is CRITICAL (+5 → DESTRUCTIVE). The original implementation scored all `prt` as CRITICAL, producing false positives on repos that use `prt` legitimately. Test: AW02 — `prt` read-only → CAUTION; WS06 — `prt` + `contents: write` → DESTRUCTIVE.
+
+**Unit test expansion:** 163 → 194 tests passing (31 new Layer 2c tests, +7 skipped unchanged).
+
+---
+
+### Harness: 12 Layer 2c Test Branches
+
+All 12 test branches created with adversarial workflow files, PRs opened, and verdicts confirmed live against expected outcomes.
+
+| ID | Branch | Expected | Actual | Notes |
+|---|---|---|---|---|
+| WS01 | workflow-security/base64-payload | DESTRUCTIVE | DESTRUCTIVE | `base64_payload` CRITICAL |
+| WS02 | workflow-security/credential-harvest | DESTRUCTIVE | DESTRUCTIVE | `credential_harvest` CRITICAL |
+| WS03 | workflow-security/dormant-trigger | DESTRUCTIVE | DESTRUCTIVE | L2c HIGH (+3) + L2b shell pattern (+4) = 7 → DESTRUCTIVE |
+| WS04 | workflow-security/forged-bot-author | CAUTION | CAUTION | `forged_bot_author` HIGH |
+| WS05 | workflow-security/oidc-elevation | CAUTION | CAUTION | `oidc_elevation_no_consumer` HIGH |
+| WS06 | workflow-security/prt-write-permissions | DESTRUCTIVE | DESTRUCTIVE | `pull_request_target_with_write_permissions` CRITICAL |
+| WS07 | workflow-security/safe-clean-workflow | SAFE | SAFE | No signals — no false positive |
+| AW01 | adversarial/workflow-yaml-folded-block | DESTRUCTIVE | DESTRUCTIVE | Folded block normalisation working |
+| AW02 | adversarial/workflow-prt-only | CAUTION | CAUTION | `prt` read-only = HIGH only |
+| AW03 | adversarial/workflow-typosquatted-oidc | CAUTION | CAUTION | Typosquat rejected; oidc signal caps at HIGH |
+| AW04 | adversarial/workflow-legitimate-oidc | SAFE | SAFE | Exact-match allowlist passes `aws-actions/` — no false positive |
+| AW05 | adversarial/workflow-modified-poison | DESTRUCTIVE | DESTRUCTIVE | M-type diffs scanned, not just A-type |
+
+**Two expectation corrections:**
+
+*WS03* — Initial expected verdict was CAUTION (L2c dormant trigger HIGH = +3). Actual: DESTRUCTIVE. Root cause: L2b content scanner processes added `.yml` files independently and matches `curl|bash` as a shell pattern (+4). Combined score: 7 → DESTRUCTIVE. This is correct defense-in-depth behaviour; the expected verdict was updated, not the implementation.
+
+*AW03* — Initial expected verdict was DESTRUCTIVE (assuming a typosquatted consumer would score CRITICAL). Actual: CAUTION. Root cause: `oidc_elevation_no_consumer` is always HIGH (+3) regardless of whether the consumer is absent or typosquatted. CAUTION is the correct verdict. The test expectations were updated accordingly.
+
+---
+
+### SHA Pin Fix (Harness)
+
+The harness `payloadguard.yml` initially referenced the analyser at a fabricated full SHA (padded short SHA — incorrect). GitHub Actions failed immediately (action load failure — SHA does not exist). Fixed by running `git rev-parse 83826a5` in the analyser repo to obtain the correct full SHA: `83826a5f3204d74afef5e1a930e7d60bfd1b8cba`. Committed and verified CI passed.
+
+---
+
+### README Professional Rewrite
+
+`README.md` rewritten in full on `docs/professional-readme` branch. Key changes:
+- Removed flippant tagline and `dev: Dark^Vader` credit line
+- Added complete eight-layer architecture table
+- Added GitHub Actions Poisoning (Layer 2c) section with signal type table and hardening description
+- Added scoring reference table covering all signal types
+- Added Contributing section with test requirement
+- Professional tone throughout — targeted at security engineers integrating into real CI pipelines
+
+---
+
+### HANDOVER_REDTEAM.md
+
+Created `HANDOVER_REDTEAM.md` on main for next session with access to `PayloadGuard-PLG/AIntegrity-Squad-Optimiser`. Covers:
+- Full Layer 2c status and all 12 harness test results
+- Eight red-team scenarios (RTA-01 through RTA-08) targeting known detection gaps
+- Known gaps pre-documented: RTA-01 (multi-step env var payload), RTA-02 (GITHUB_OUTPUT exfiltration), RTA-03 (unpinned action advisory)
+- Development rules for the Squad Optimiser session
+
+---
+
 ## 2026-05-03 — GitHub Actions Infrastructure Fix + v1.1.0 Release
 
 Session focused on resolving CI startup failures caused by non-existent action version tags (@v6, @v9) and establishing v1.1.0 as the live release on main.

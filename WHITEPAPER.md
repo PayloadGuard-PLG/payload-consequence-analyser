@@ -2,7 +2,7 @@
 
 **Version:** 1.1.0 — May 2026
 **Repository:** `PayloadGuard-PLG/payload-consequence-analyser`
-**Status:** Live on main (`d843549`)
+**Status:** Live on main (`4ea66e9`)
 
 ---
 
@@ -19,17 +19,18 @@
 
 ---
 
-PayloadGuard is a five-layer static analysis system that runs on every pull request before merge. It detects destructive code payloads — mass deletions, structural gutting, deceptive descriptions — that bypass normal code review because they are either too large for a human reviewer to fully parse or deliberately disguised as low-impact changes.
+PayloadGuard is an eight-layer static analysis system that runs on every pull request before merge. It detects destructive code payloads — mass deletions, structural gutting, CI pipeline poisoning, deceptive descriptions — that bypass normal code review because they are either too large for a human reviewer to fully parse or deliberately disguised as low-impact changes.
 
 The system assigns a severity score across independent signal dimensions and produces one of four verdicts: **SAFE**, **REVIEW**, **CAUTION**, or **DESTRUCTIVE**. A DESTRUCTIVE verdict sets exit code 2; wired to a GitHub branch protection rule, this blocks the merge button automatically.
 
 **v1.1.0 production release** includes:
 - All AIntegrity audit fixes (5 logic defects resolved)
-- SCA dependency hallucination defense (opt-in via allowlist.yml)
+- SCA dependency hallucination defense — Layer 2b (opt-in via allowlist.yml)
 - McCabe complexity advisory for new functions (informational, no score impact)
+- GitHub Actions workflow poisoning detection — Layer 2c (7 signal types, 3 hardening fixes)
 - GitHub Actions infrastructure hardening (all actions SHA-pinned)
 
-Against an 18-case adversarial test suite covering safe baselines, canonical destructive payloads, boundary conditions, and purpose-built evasion techniques, PayloadGuard achieves **17/18 detection (94%)** at default thresholds with zero false positives on safe baselines.
+Against a 30-case active test suite covering safe baselines, canonical destructive payloads, boundary conditions, purpose-built evasion techniques, and CI pipeline poisoning, PayloadGuard achieves **29/30 detection (97%)** at default thresholds with zero false positives on safe baselines.
 
 ---
 
@@ -76,7 +77,7 @@ payload-consequence-analyser@main  (composite action)
         │         --pr-description  --save-json  --save-markdown
         │                   │
         │         ┌─────────┴──────────┐
-        │         │   5-layer engine   │
+        │         │   8-layer engine   │
         │         └─────────┬──────────┘
         │                   │
         │         payloadguard-report.json
@@ -126,6 +127,19 @@ git.Repo(workspace)
   │       deleted_files   = [d.a_path  for D-type diffs]
   │       critical_files  = match(CRITICAL_PATH_PATTERNS)
   │       security_files  = match(_SECURITY_CRITICAL_PATTERNS)
+  │       added_file_flags = _scan_added_file_content(diffs)
+  │
+  ├─[L2b] SCA — Dependency Scanning (opt-in)
+  │        manifest_diffs = added/modified requirements*.txt|package.json|go.mod|Cargo.toml|Gemfile
+  │        unverified     = packages not in allowlist.yml
+  │        score          = +3 per unique unverified package
+  │
+  ├─[L2c] Actions Poisoning Detection
+  │        workflow_diffs = added/modified .github/workflows/**/*.yml
+  │        signals        = base64_payload | credential_harvest | prt_with_write |
+  │                         dormant_trigger | forged_bot_author | oidc_elevation |
+  │                         dangerous_prt
+  │        CRITICAL signals → +5; HIGH signals → +3
   │
   ├─[L3] Consequence Model  →  verdict
   │       _assess_consequence(files_del, lines_del, days_old,
@@ -145,11 +159,11 @@ git.Repo(workspace)
 
 | File | Role |
 |---|---|
-| `analyze.py` | All five layers, CLI entry point, report generation |
+| `analyze.py` | All eight layers, CLI entry point, report generation |
 | `structural_parser.py` | Multi-language AST node extraction |
 | `post_check_run.py` | GitHub Check Run posting via App JWT |
 | `action.yml` | Composite GitHub Action definition |
-| `test_analyzer.py` | 124-test unit suite |
+| `test_analyzer.py` | 194-test unit suite |
 
 ---
 
@@ -200,7 +214,67 @@ permission[^/]*\.(py|js|ts)
 authorization[^/]*\.(py|js|ts)
 ```
 
-**Outputs:** `critical_deletions` (list), `security_deletions` (list), counts passed to L3.
+**Outputs:** `critical_deletions` (list), `security_deletions` (list), `added_file_flags` (list), counts passed to L3.
+
+---
+
+### 4.2b Layer 2b — SCA: Dependency Scanning (opt-in)
+
+**Purpose:** Detect unverified dependency additions in package manifest files. A PR that adds an unrecognised package — whether a dependency confusion attack, a typosquatted package, or an AI hallucination — produces no structural or deletion signal. L2b provides a dedicated check.
+
+**Activation:** Requires `allowlist.yml` in the scanned repository root. Without this file, L2b is a no-op.
+
+**Manifest types scanned:** `requirements*.txt`, `package.json`, `go.mod`, `Cargo.toml`, `Gemfile`.
+
+**Algorithm:**
+```python
+for diff in diffs where change_type in ('A', 'M'):
+    if path matches _MANIFEST_PATTERNS:
+        added_packages = _parse_added_packages(diff)
+        for pkg in added_packages:
+            if pkg not in allowlist['packages']:
+                unverified_packages.add(pkg)
+
+score += 3 * len(unverified_packages)
+```
+
+Each unique unverified package adds +3 points. Multiple packages in a single manifest can push a PR to CAUTION or DESTRUCTIVE regardless of diff volume.
+
+**Interaction with L2c:** Added `.yml` workflow files are also processed by L2b's content scanner (`_scan_added_file_content`), which checks for CI trigger strings and shell execution patterns. This means a dormant-trigger workflow that contains `curl | bash` will be flagged by both L2c (`dormant_trigger_with_payload`, +3) and L2b shell pattern scanning (+2 per match). This is defense-in-depth, not double-counting — the signals represent independent detection dimensions.
+
+**Outputs:** `sca_flags` dict with `unverified_packages` list and count; count passed to L3.
+
+---
+
+### 4.2c Layer 2c — GitHub Actions Poisoning Detection
+
+**Purpose:** Detect CI pipeline poisoning in added or modified workflow files. This layer targets the specific techniques used to poison GitHub Actions pipelines — base64 payload delivery, credential exfiltration, privilege escalation — which are invisible to structural drift analysis (which operates on source code ASTs, not YAML) and to L2 forensic analysis (which operates on file deletions, not content of added files).
+
+**Scope:** All added (`A`) and modified (`M`) files matching `.github/workflows/**/*.yml`, `.github/workflows/**/*.yaml`, `.github/actions/**/*.yml`, `.github/actions/**/*.yaml`.
+
+**Signal types:**
+
+| Signal | Severity | Score | Mechanism |
+|---|---|---|---|
+| `base64_payload` | CRITICAL | +5 | Base64 string piped to a shell interpreter |
+| `credential_harvest` | CRITICAL | +5 | AWS/GCP metadata endpoint, secret grep, env dump to curl |
+| `pull_request_target_with_write_permissions` | CRITICAL | +5 | `pull_request_target` trigger + any write permission declared |
+| `dormant_trigger_with_payload` | HIGH | +3 | `workflow_dispatch` or `schedule` + shell execution in same file |
+| `forged_bot_author` | HIGH | +3 | `git config user.name/email` set to a known bot identity |
+| `oidc_elevation_no_consumer` | HIGH | +3 | `id-token: write` with no legitimate OIDC consumer in the same file |
+| `dangerous_trigger_pull_request_target` | HIGH | +3 | `pull_request_target` trigger alone (no write permissions declared) |
+
+A single CRITICAL signal is sufficient to reach DESTRUCTIVE (score ≥ 5). A single HIGH signal reaches CAUTION (score ≥ 3).
+
+**Three hardening fixes:**
+
+*H1 — YAML block scalar normalisation.* Base64 payloads split across YAML folded (`>`) or literal (`|`) block scalar lines evade single-line regex matching. `_normalize_yaml_content()` collapses block continuation lines before any pattern is applied.
+
+*H2 — Exact-match OIDC consumer allowlist.* The check for legitimate OIDC consumers (`aws-actions/configure-aws-credentials`, `google-github-actions/auth`, `azure/login`, and others) uses exact full-path matching. Prefix matching (`aws-actions/` anywhere in the string) would accept typosquatted names like `aws-actions-unofficial/configure-aws-credentials`. The allowlist is checked against the full `uses:` value only.
+
+*H3 — `pull_request_target` two-tier scoring.* `pull_request_target` alone without any write permission scores HIGH (+3 → CAUTION). Combined with any write permission (`contents: write`, `pull-requests: write`, `id-token: write`, etc.) it scores CRITICAL (+5 → DESTRUCTIVE). This prevents false positives on repos that legitimately use `pull_request_target` in read-only mode while still catching the pwn-request attack surface.
+
+**Outputs:** `actions_poisoning` dict with `flagged_workflows` list (file, signals, severity, change_type), `total`; counts and severity passed to L3.
 
 ---
 
@@ -354,6 +428,31 @@ The `_RATIO_MIN_LINES` floor is also set to 0 when critical files are deleted, e
 
 Auth, security, permission, or authorization files (`.py/.js/.ts`) deleted outright. This single signal alone is sufficient to reach DESTRUCTIVE. These are the highest-value targets for a destructive payload.
 
+**Added file content flags (L2 extension)**
+
+| Condition | Points |
+|---|---|
+| CI trigger string or shell execution pattern in added non-code file | +2 per match |
+
+Patterns scanned include `curl | bash`, `wget | sh`, `chmod +x`, `setfacl`, CI trigger strings. Fires on added `.txt`, `.md`, `.yml`, and similar non-code files.
+
+**Unverified SCA dependencies (L2b)**
+
+| Condition | Points |
+|---|---|
+| Package in manifest diff not in allowlist.yml | +3 per unique package |
+
+Requires `allowlist.yml` to be present in the target repo root. No-op otherwise.
+
+**GitHub Actions poisoning signals (L2c)**
+
+| Condition | Points |
+|---|---|
+| Any CRITICAL signal (`base64_payload`, `credential_harvest`, `prt_with_write`) | +5 |
+| Any HIGH signal (`dormant_trigger`, `forged_bot_author`, `oidc_elevation`, `dangerous_prt`) | +3 |
+
+A single CRITICAL poisoning signal scores identically to a security file deletion — immediate DESTRUCTIVE. A single HIGH signal alone reaches CAUTION. Multiple flagged workflows accumulate at the single highest-severity level (one CRITICAL outweighs any number of HIGH signals for scoring purposes).
+
 ### 5.2 Verdict Thresholds
 
 | Score | Verdict | Severity | Exit Code |
@@ -405,16 +504,20 @@ Auth, security, permission, or authorization files (`.py/.js/.ts`) deleted outri
 
 ### 6.1 Test Harness Architecture
 
-The test harness (`payloadguard-plg/payloadguard-test-harness`) maintains 18 permanent branches, each representing a specific adversarial scenario. Each branch has a closed PR against main. Running a regression:
+The test harness (`payloadguard-plg/payloadguard-test-harness`) maintains 30 active permanent branches (plus 3 pending for future GitHub APIs), each representing a specific adversarial scenario. Each branch has a closed PR against main. Running a regression:
 
-1. `run_regression.py` reopens all 18 PRs
+1. `run_regression.py` reopens all active PRs
 2. GitHub Actions triggers a PayloadGuard scan on each
-3. The script polls GitHub Check Runs until all 18 complete
+3. The script polls GitHub Check Runs until all scans complete
 4. PRs are closed
 5. `ingest.py` pulls the `payloadguard-results` artifact from each workflow run and writes to SQLite
 6. `dashboard.py` visualises results with a threshold simulator; the **Last Run** summary card shows a full `YYYY-MM-DD HH:MM` timestamp linked directly to the GitHub Actions workflow run that produced the data
 
+The harness CI is pinned to the analyser at SHA `83826a5f3204d74afef5e1a930e7d60bfd1b8cba` (Layer 2c). Temporal grouping controls which cases run: `--mode stable` (default, excludes aging/temporal cases), `--mode temporal` (aging cases only), `--mode full` (all cases).
+
 ### 6.2 Test Case Matrix
+
+**Track 1 — Core detection (Layers 1–5)**
 
 | ID | Branch | Category | Expected | Description |
 |---|---|---|---|---|
@@ -437,25 +540,71 @@ The test harness (`payloadguard-plg/payloadguard-test-harness`) maintains 18 per
 | A09 | adversarial/config-only-deletion | adversarial | DESTRUCTIVE | settings.yml + requirements.txt deleted |
 | A10 | adversarial/unicode-payload | adversarial | SAFE | Hostile Unicode in comments, +4/-1 lines |
 
+**Track 3 — Layer 2c validation**
+
+| ID | Branch | Category | Expected | Signal |
+|---|---|---|---|---|
+| WS01 | workflow-security/base64-payload | workflow-security | DESTRUCTIVE | `base64_payload` CRITICAL |
+| WS02 | workflow-security/credential-harvest | workflow-security | DESTRUCTIVE | `credential_harvest` CRITICAL |
+| WS03 | workflow-security/dormant-trigger | workflow-security | DESTRUCTIVE | `dormant_trigger_with_payload` HIGH + L2b shell pattern |
+| WS04 | workflow-security/forged-bot-author | workflow-security | CAUTION | `forged_bot_author` HIGH |
+| WS05 | workflow-security/oidc-elevation | workflow-security | CAUTION | `oidc_elevation_no_consumer` HIGH |
+| WS06 | workflow-security/prt-write-permissions | workflow-security | DESTRUCTIVE | `pull_request_target_with_write_permissions` CRITICAL |
+| WS07 | workflow-security/safe-clean-workflow | workflow-security | SAFE | No signals — L2c false positive baseline |
+
+**Track 4 — Layer 2c adversarial (hardening tests)**
+
+| ID | Branch | Category | Expected | Signal |
+|---|---|---|---|---|
+| AW01 | adversarial/workflow-yaml-folded-block | adversarial | DESTRUCTIVE | Folded block base64 → `base64_payload` CRITICAL |
+| AW02 | adversarial/workflow-prt-only | adversarial | CAUTION | `dangerous_trigger_pull_request_target` HIGH only |
+| AW03 | adversarial/workflow-typosquatted-oidc | adversarial | CAUTION | Typosquat rejected; `oidc_elevation_no_consumer` HIGH |
+| AW04 | adversarial/workflow-legitimate-oidc | adversarial | SAFE | Exact-match allowlist passes — no false positive |
+| AW05 | adversarial/workflow-modified-poison | adversarial | DESTRUCTIVE | M-type diff scanned; `credential_harvest` CRITICAL |
+
+**Pending (blocked on GitHub 2026 APIs)**
+
+| ID | Description |
+|---|---|
+| T23 | Dependency lock file tampering — immutable workflow dependency locking |
+| T24 | Workflow redefines GITHUB_TOKEN scopes — centralised policy controls API |
+| T25 | Curl command to exfiltrate $SECRETS — native egress firewall complement |
+
 ### 6.3 Results at Default Thresholds
 
 ```
-structural deletion_ratio : 0.20 (20%)
-min_deleted_nodes          : 3
-DESTRUCTIVE threshold      : 5
-CAUTION threshold          : 3
-temporal stale             : 250
-temporal dangerous         : 1000
+structural deletion_ratio    : 0.20 (20%)
+min_deleted_nodes            : 3
+DESTRUCTIVE threshold        : 5
+CAUTION threshold            : 3
+temporal stale               : 250
+temporal dangerous           : 1000
+actions critical_signal_score: 5
+actions high_signal_score    : 3
 ```
+
+**Core detection (Track 1):**
 
 | Result | Count | Cases |
 |---|---|---|
 | True DESTRUCTIVE | 14 | T03 T04 T05 T09 T10 T11 A01 A02 A03 A04 A05 A07 A09 |
-| True SAFE | 3 | T01 T02 T12 A10 |
+| True SAFE | 4 | T01 T02 T12 A10 |
 | False SAFE (missed) | 1 | A06 |
 | False DESTRUCTIVE | 0 | — |
 
-**Pass rate: 17/18 (94%)**
+**Layer 2c validation (Tracks 3 + 4):**
+
+| Result | Count | Cases |
+|---|---|---|
+| True DESTRUCTIVE | 5 | WS01 WS02 WS03 WS06 AW01 AW05 |
+| True CAUTION | 4 | WS04 WS05 AW02 AW03 |
+| True SAFE | 2 | WS07 AW04 |
+| False positive | 0 | — |
+| False negative | 0 | — |
+
+**Combined pass rate: 29/30 active cases (97%)**
+
+The one persistent miss is A06 (threshold-gaming), a known limitation of purely additive scoring with no compound detection. All Layer 2c cases pass.
 
 ### 6.4 Scoring Trace for Key Cases
 
@@ -577,7 +726,9 @@ PayloadGuard complements GitHub's 2026 security roadmap without overlapping it. 
 | PayloadGuard Layer | What it detects | 2026 Roadmap Pillar |
 |---|---|---|
 | L1 — Surface Scan | File deletions, binary files, permission changes, symlink replacements | Hardened CI/CD infrastructure |
-| L2 — Forensic | Critical path files, deletion ratios, config-only destruction | Hardened CI/CD infrastructure |
+| L2 — Forensic | Critical path files, security file deletions, added file content (shell/CI patterns) | Hardened CI/CD infrastructure |
+| L2b — SCA | Unverified dependency additions in package manifests | Supply chain security |
+| L2c — Actions Poisoning | Base64 payload delivery, credential harvesting, OIDC privilege escalation, dormant triggers, forged bot identity, unsafe pull_request_target usage | Hardened CI/CD infrastructure — workflow actor permissions |
 | L3 — Consequence Model | Compound severity score across all dimensions | Policy controls — "PR must be SAFE or REVIEW to merge" |
 | L4 — Structural Drift | Named classes/functions that disappeared | Observability — "what actually changed" (not just what lines moved) |
 | L5a — Temporal | Branch staleness, semantic gap relative to target velocity | Observability — stale-context risk surfaced before execution |
@@ -613,4 +764,4 @@ When these APIs land, the test branches will be created and T23–T25 will enter
 
 ---
 
-*PayloadGuard — because AI doesn't feel bad about what it breaks.*
+*PayloadGuard is maintained by [PayloadGuard-PLG](https://github.com/PayloadGuard-PLG).*
