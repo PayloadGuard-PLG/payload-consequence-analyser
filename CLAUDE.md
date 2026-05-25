@@ -3,13 +3,13 @@
 ## Handover (update this block at the end of every session)
 
 - **Branch for next work:** new branch off main
-- **Status:** v1.1.0 live on main. Layer 2c (GitHub Actions poisoning detection) implemented and live (PR #36, analyser). All 12 harness Layer 2c test branches scanned and verified (PRs #34–#45, harness). Harness SHA pin updated to Layer 2c build (PR #33). README rewritten professionally. Handover doc for Squad Optimiser red-team session on main (HANDOVER_REDTEAM.md — merged PR #38, delete after reading).
-- **Next priority:** Squad Optimiser red-team — 8 adversarial scenarios (RTA-01 through RTA-08) documented in HANDOVER_REDTEAM.md. Requires session with access to PayloadGuard-PLG/AIntegrity-Squad-Optimiser.
+- **Status:** v1.1.0 live on main. Layer 2c live (PR #36). All docs updated (PR #39 — README, DEVLOG, WHITEPAPER, CLAUDE.md). Regression runner live (harness PR #47). Automated 3x-daily schedule live (harness PR #48). HANDOVER_REDTEAM.md on main (PR #38) — delete after reading.
+- **Next priority:** Squad Optimiser red-team — 8 adversarial scenarios (RTA-01 through RTA-08) in HANDOVER_REDTEAM.md. Requires session with access to PayloadGuard-PLG/AIntegrity-Squad-Optimiser.
 - **Open findings:** INC-3 (MEDIUM) only — direct push to main → L5b returns UNVERIFIED but raises no flag. Low urgency. See AUDIT_LOG.md.
-- **Post red-team fixes (Session 2):** Multi-step env var payload (RTA-01), GITHUB_OUTPUT exfiltration pattern (RTA-02), unpinned action reference advisory (RTA-03). Document in AUDIT_LOG.md after red-team confirms which are genuine bypass gaps.
+- **Post red-team fixes:** RTA-01 (multi-step env var payload), RTA-02 (GITHUB_OUTPUT exfiltration), RTA-03 (unpinned action advisory). Log in AUDIT_LOG.md after red-team confirms bypass gaps.
 - **Test suite:** `python -m pytest test_analyzer.py -v` → 194 pass, 7 skip (crypto/tree-sitter env)
 - **GitHub App credentials:** STALE after org migration. `post_check_run.py` will fail until App is re-installed under `PayloadGuard-PLG`. Workaround: `continue-on-error: true` on both "Post Check Run" (analyser) and "PayloadGuard Scan" (harness) steps.
-- **Harness CI:** Operational. SHA pinned to `83826a5f3204d74afef5e1a930e7d60bfd1b8cba` (Layer 2c). Temporal groups implemented — `--mode stable` (default), `--mode temporal`, `--mode full`.
+- **Harness CI:** Operational. SHA pinned to `83826a5f3204d74afef5e1a930e7d60bfd1b8cba` (Layer 2c). Regression runner: `workflow_dispatch` + schedule (02:00/10:00/18:00 UTC daily, full mode). Results in `tools/db/results.db` artifact per run. `REGRESSION_PAT` secret set.
 - **Blockers:** None.
 
 ---
