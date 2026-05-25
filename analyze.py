@@ -198,7 +198,7 @@ _SEMANTIC_MICRO_SCOPE = frozenset({
 _SEMANTIC_MACRO_SCOPE = frozenset({
     'massive', 'major', 'complete', 'total', 'overhaul', 'rewrite', 'rework',
     'architecture', 'architectural', 'global', 'substantial', 'large',
-    'significant', 'comprehensive', 'full', 'entire',
+    'significant', 'comprehensive', 'entire',
 })
 _SEMANTIC_ADDITIVE_STEMS    = frozenset({'add', 'implement', 'creat', 'introduc', 'integrat', 'build', 'extend', 'new'})
 _SEMANTIC_DESTRUCTIVE_STEMS = frozenset({'remov', 'delet', 'drop', 'deprecat', 'destroy', 'clean', 'purg', 'strip'})
