@@ -1827,6 +1827,132 @@ class TestGitHubActionsPoisoningScanning(unittest.TestCase):
         result = a.analyze()
         self.assertEqual(result["actions_poisoning"]["total"], 0)
 
+    # ------------------------------------------------------------------
+    # Hardening regression tests (Fixes 1, 2, 3)
+    # ------------------------------------------------------------------
+
+    def test_pull_request_target_alone_is_detected(self):
+        """Fix 1 — PR-4 red-team: pull_request_target without write perms is HIGH."""
+        content = (
+            "on:\n  pull_request_target:\n\n"
+            "jobs:\n  analyze:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "        with:\n"
+            "          ref: ${{ github.event.pull_request.head.sha }}\n"
+            "      - run: npm test\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/pr-check.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 1)
+        wf = result["actions_poisoning"]["flagged_workflows"][0]
+        sig_types = [s['type'] for s in wf['signals']]
+        self.assertIn("dangerous_trigger_pull_request_target", sig_types)
+        self.assertEqual(wf['severity'], 'HIGH')
+
+    def test_pull_request_target_with_write_permissions_is_critical(self):
+        """Fix 1 — pull_request_target + contents: write escalates to CRITICAL."""
+        content = (
+            "on:\n  pull_request_target:\n\n"
+            "permissions:\n  contents: write\n\n"
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - run: echo hello\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/auto-merge.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        wf = result["actions_poisoning"]["flagged_workflows"][0]
+        sig_types = [s['type'] for s in wf['signals']]
+        self.assertIn("pull_request_target_with_write_permissions", sig_types)
+        self.assertEqual(wf['severity'], 'CRITICAL')
+
+    def test_typosquatted_oidc_action_fails_legitimacy_check(self):
+        """Fix 2 — PR-5 red-team: aws-actions-unofficial/ must not pass OIDC check."""
+        content = (
+            "permissions:\n  id-token: write\n  contents: read\n\n"
+            "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: aws-actions-unofficial/configure-aws-credentials@v4\n"
+            "        with:\n"
+            "          role-to-assume: arn:aws:iam::999999999:role/evil-role\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/deploy.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 1)
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("oidc_elevation_no_consumer", sig_types)
+
+    def test_legitimate_oidc_consumer_still_passes(self):
+        """Fix 2 — exact-match should not break legitimate aws-actions/ usage."""
+        content = (
+            "permissions:\n  id-token: write\n  contents: read\n\n"
+            "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: aws-actions/configure-aws-credentials@v4\n"
+            "        with:\n"
+            "          role-to-assume: arn:aws:iam::123456789:role/deploy\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/aws-deploy.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        if result["actions_poisoning"]["total"] > 0:
+            sig_types = [
+                s['type']
+                for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]
+            ]
+            self.assertNotIn("oidc_elevation_no_consumer", sig_types)
+
+    def test_custom_trusted_oidc_consumer_via_config(self):
+        """Fix 2 — teams can whitelist custom OIDC providers in payloadguard.yml."""
+        content = (
+            "permissions:\n  id-token: write\n\n"
+            "jobs:\n  vault:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: hashicorp/vault-action@v3\n"
+        )
+        cfg = PayloadGuardConfig()
+        cfg.actions["trusted_oidc_consumers"] = ["hashicorp/vault-action"]
+        a = _make_analyzer(config=cfg)
+        d = self._build_workflow_diff(".github/workflows/vault.yml", content)
+        flags = a._scan_github_actions_poisoning([d])
+        oidc_flags = [s for f in flags for s in f['signals'] if s['type'] == 'oidc_elevation_no_consumer']
+        self.assertEqual(len(oidc_flags), 0)
+
+    def test_yaml_folded_block_base64_detected(self):
+        """Fix 3 — PR-3 red-team: YAML folded block must not bypass base64 pattern."""
+        content = (
+            "on: [push]\n\n"
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: >-\n"
+            "          echo \"Q0I9Imh0dHA6Ly8yMTYuMTI2LjIyNS4xMjk6ODQ0Mz8i\" |\n"
+            "          base64 -d | bash\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/build.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 1)
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("base64_payload", sig_types)
+
+    def test_yaml_literal_block_base64_detected(self):
+        """Fix 3 — YAML literal block scalar (pipe) also normalised correctly."""
+        content = (
+            "on: [push]\n\n"
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: |\n"
+            "          echo \"Q0I9Imh0dHA6Ly8yMTYuMTI2LjIyNS4xMjk6ODQ0Mz8i\" |\n"
+            "          base64 -d | bash\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/build2.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("base64_payload", sig_types)
+
 
 if __name__ == "__main__":
     unittest.main()

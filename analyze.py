@@ -182,10 +182,24 @@ _ACTIONS_FORGED_AUTHOR = re.compile(
 
 # Signal 5: Elevated OIDC permissions without a legitimate cloud consumer.
 # id-token: write grants ambient cloud credentials — only legitimate alongside
-# aws-actions, google-github-actions, or azure/login.
+# known cloud-auth actions. Exact-match list prevents typosquatted action names
+# (e.g. aws-actions-unofficial/) from bypassing the check.
+# Extend via payloadguard.yml: actions.trusted_oidc_consumers list.
 _ACTIONS_OIDC_ELEVATION_PATTERN = re.compile(r"id-token:\s*write", re.IGNORECASE)
-_ACTIONS_OIDC_LEGITIMATE_CONSUMERS = re.compile(
-    r"uses:\s+(aws-actions/|google-github-actions/|azure/login)", re.IGNORECASE
+_SAFE_OIDC_CONSUMERS_DEFAULT = [
+    "aws-actions/configure-aws-credentials",
+    "google-github-actions/auth",
+    "azure/login",
+]
+
+# Signal 6: pull_request_target trigger — runs in the base-branch context with
+# repository secrets accessible even when triggered by a fork PR. Standalone use
+# is HIGH; combined with any write permission it is CRITICAL because an attacker
+# can both read secrets and push code/artifacts.
+_ACTIONS_DANGEROUS_TRIGGERS = re.compile(r"\bpull_request_target\b", re.IGNORECASE)
+_ACTIONS_WRITE_PERMISSIONS = re.compile(
+    r"contents:\s*write|pull-requests:\s*write|packages:\s*write|deployments:\s*write",
+    re.IGNORECASE,
 )
 
 # ==============================================================================
@@ -247,6 +261,21 @@ def _parse_added_packages(diff_text: str, manifest_type: str) -> list:
                 if pkg not in _TOML_SKIP_KEYS:
                     packages.append(pkg)
     return packages
+
+
+def _normalize_yaml_content(content: str) -> str:
+    """Collapse YAML folded/literal block scalars to a single line.
+
+    YAML folded blocks (>) and literal blocks (|) split a single logical shell
+    command across multiple lines in the raw file, which prevents single-line
+    regex patterns from matching. Joining all lines with a space produces the
+    same string that the shell would execute, making patterns like
+    'base64 -d | bash' visible regardless of how the YAML was formatted.
+
+    Only use this for base64/payload patterns. Do NOT normalise before checks
+    that rely on line structure (dormant-trigger composite, forged-author).
+    """
+    return " ".join(content.split())
 
 
 def _load_allowlist(repo_path: str):
@@ -544,6 +573,7 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "critical_signal_score": 5,
         "high_signal_score": 3,
+        "trusted_oidc_consumers": [],
     },
 }
 
@@ -1153,9 +1183,21 @@ class PayloadAnalyzer:
 
             signals = []
 
+            # Fix 3: normalise folded/literal YAML block scalars to one line so
+            # patterns like 'base64 -d | bash' match even when split across lines.
+            # Only used for base64 checks — other checks depend on line structure.
+            normalized = _normalize_yaml_content(content)
+
+            # Signal 1: base64 payload — check both raw and normalised content so
+            # a payload entirely on one line is still caught without normalisation.
+            seen_b64 = False
             for pat in _ACTIONS_BASE64_PAYLOAD:
-                if re.search(pat, content, re.IGNORECASE | re.MULTILINE):
+                if not seen_b64 and (
+                    re.search(pat, content, re.IGNORECASE | re.MULTILINE)
+                    or re.search(pat, normalized, re.IGNORECASE)
+                ):
                     signals.append({'type': 'base64_payload', 'pattern': pat})
+                    seen_b64 = True  # one entry per file regardless of how many patterns match
 
             for pat in _ACTIONS_CREDENTIAL_HARVEST:
                 if re.search(pat, content, re.IGNORECASE | re.MULTILINE):
@@ -1175,12 +1217,39 @@ class PayloadAnalyzer:
             if _ACTIONS_FORGED_AUTHOR.search(content):
                 signals.append({'type': 'forged_bot_author', 'pattern': _ACTIONS_FORGED_AUTHOR.pattern})
 
+            # Fix 2: exact-match OIDC consumer check — prefix matching allowed
+            # typosquatted action names (aws-actions-unofficial/) to bypass.
+            # User-defined consumers can be added via payloadguard.yml.
             if _ACTIONS_OIDC_ELEVATION_PATTERN.search(content):
-                if not _ACTIONS_OIDC_LEGITIMATE_CONSUMERS.search(content):
+                trusted = (
+                    list(_SAFE_OIDC_CONSUMERS_DEFAULT)
+                    + self.config.actions.get("trusted_oidc_consumers", [])
+                )
+                if not any(consumer in content for consumer in trusted):
                     signals.append({'type': 'oidc_elevation_no_consumer', 'pattern': 'id-token: write'})
 
+            # Fix 1: pull_request_target as a standalone signal.
+            # Alone → HIGH: the trigger is sometimes legitimate (e.g. posting a
+            # comment from a fork PR). Combined with any write permission → CRITICAL
+            # because the workflow can both read secrets and modify the repository.
+            if _ACTIONS_DANGEROUS_TRIGGERS.search(content):
+                if _ACTIONS_WRITE_PERMISSIONS.search(content):
+                    signals.append({
+                        'type': 'pull_request_target_with_write_permissions',
+                        'pattern': 'pull_request_target + write permissions',
+                    })
+                else:
+                    signals.append({
+                        'type': 'dangerous_trigger_pull_request_target',
+                        'pattern': 'pull_request_target trigger',
+                    })
+
             if signals:
-                critical_types = {'base64_payload', 'credential_harvest'}
+                critical_types = {
+                    'base64_payload',
+                    'credential_harvest',
+                    'pull_request_target_with_write_permissions',
+                }
                 severity = 'CRITICAL' if any(s['type'] in critical_types for s in signals) else 'HIGH'
                 flags.append({
                     'file': path,
