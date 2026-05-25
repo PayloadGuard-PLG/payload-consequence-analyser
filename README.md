@@ -117,9 +117,9 @@ python analyze.py . feature/auth-refactor main \
 
 | Code | Meaning |
 |---|---|
-| `0` | SAFE or REVIEW — proceed |
+| `0` | SAFE, REVIEW, or CAUTION — proceed |
 | `1` | Analysis error |
-| `2` | CAUTION or DESTRUCTIVE — do not merge |
+| `2` | DESTRUCTIVE — do not merge |
 
 Wire exit code `2` to your CI enforcement step to block merges automatically.
 

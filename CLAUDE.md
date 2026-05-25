@@ -3,14 +3,14 @@
 ## Handover (update this block at the end of every session)
 
 - **Branch for next work:** new branch off main
-- **Status:** v1.1.0 live on main. L5b v2 complete — PR #44 open (analyser). `SemanticTransparencyAnalyzer` rewritten as three-phase PR-MCI heuristic engine (Linguistic Lexer → Diff Profiler → Cross-Correlation Matrix). `full` removed from `_SEMANTIC_MACRO_SCOPE` (false positive on technical prose).
-- **Next priority:** Merge PR #44. Then: RTA-01 (multi-step env var, YAML-aware parsing), RTA-03 (unpinned action advisory), refactoring sprint (split `analyze.py` into focused modules).
+- **Status:** v1.1.0 live on main. L5b v2 merged (PR #48). GitHub App reinstalled under PayloadGuard-PLG (App ID 3856270, Installation ID 135500427). Branch protection on main now requires `PayloadGuard` check — merge gate is live.
+- **Next priority:** Harness SHA updated to `25abe3b` (L5b v2). Layer isolation (fast gate / deep forensics two-job split in action.yml). Then: RTA-01 (multi-step env var, YAML-aware parsing), RTA-03 (unpinned action advisory), refactoring sprint.
 - **Open findings:** None (INC-1, INC-3, INC-4 all closed). One documented bypass: RTA02 (`rta/schedule-curl-exfil`) — schedule + curl POST body with secret, URL on continuation line evades all credential_harvest patterns. Needs multiline-aware curl body pattern.
 - **Deferred:** RTA-01 (multi-step env var, requires YAML-aware parsing), RTA-03 (unpinned action advisory), refactoring sprint (split `analyze.py` into focused modules).
 - **L5b v2 signals:** V_s scope_understated (+0.4), V_o operation_mutation (+0.3), V_f hidden_component_modification (+0.3), V_r phantom_additions (+0.4), V_e cross_stack_micro_claim (+0.2). macro_scope → CAUTION_MISMATCH advisory (no MCI penalty). mci_score ≥ 0.5 → DECEPTIVE_PAYLOAD.
 - **Test suite:** `python -m pytest test_analyzer.py -v` → 236 pass, 7 skip (crypto/tree-sitter env). +26 new TestSemanticTransparencyV2 tests.
 - **GitHub App credentials:** STALE after org migration. `post_check_run.py` will fail until App is re-installed under `PayloadGuard-PLG`. Workaround: `continue-on-error: true` on both "Post Check Run" (analyser) and "PayloadGuard Scan" (harness) steps.
-- **Harness CI:** Operational. SHA pinned to `32014117afeb5c99f51045b3df0d7ba27e0a187a` (post INC-3 fix). Regression runner: `workflow_dispatch` + schedule (02:00/10:00/18:00 UTC daily, full mode). Results in `tools/db/results.db` artifact per run. `REGRESSION_PAT` secret set.
+- **Harness CI:** Operational. SHA pinned to `25abe3bffb9f2505e51b7826d0fb4a3eb7fa24e1` (L5b v2). Regression runner: `workflow_dispatch` + schedule (02:00/10:00/18:00 UTC daily, full mode). Results in `tools/db/results.db` artifact per run. `REGRESSION_PAT` secret set.
 - **Harness branches:** 38 test cases (main + session + 36 test/rta branches). All stale session branches removed.
 - **Blockers:** None.
 
