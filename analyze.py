@@ -140,6 +140,69 @@ _CONTENT_SHELL_PATTERNS = [
 ]
 
 # ==============================================================================
+# GITHUB ACTIONS POISONING DETECTION (Layer 2c)
+# Scans added and modified .github/workflows/ and .github/actions/ YAML files
+# for poisoning signals. Complements Layer 2 (which catches deletion of .github/
+# files) by inspecting the *content* of new/changed workflow definitions.
+# ==============================================================================
+
+_ACTIONS_WORKFLOW_PATTERN = r"(^|/)\.github/(workflows|actions)/[^/]*\.(yml|yaml)$"
+
+# Signal 1: Base64-encoded payload delivery
+_ACTIONS_BASE64_PAYLOAD = [
+    r"base64\s+-d\s*\|\s*(ba)?sh",
+    r"\|\s*base64\s+--decode\s*\|\s*(ba)?sh",
+    r"echo\s+['\"]?[A-Za-z0-9+/]{20,}={0,2}['\"]?\s*\|\s*(ba)?sh",
+]
+
+# Signal 2: Credential harvesting — env dumps, secret grep, metadata endpoints
+_ACTIONS_CREDENTIAL_HARVEST = [
+    r"curl\s+http://169\.254\.169\.254",
+    r"env\b[^\n]*\|\s*(grep|awk|sed)\b[^\n]*(KEY|TOKEN|SECRET|PASSWORD|CRED)",
+    r"printenv\b[^\n]*\|\s*(grep|awk)\b",
+    r"grep\s+-r[^\n]*(AWS_|GITHUB_TOKEN|api[_-]?key|ssh-rsa)",
+    r"cat\s+~?/\.ssh/(id_rsa|id_ed25519|authorized_keys)",
+    r"curl\b[^\n]*\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]*http",
+]
+
+# Signal 3: Dormant trigger — workflow_dispatch or schedule combined with a
+# shell execution pattern in the same file constitutes a sleeper payload.
+_ACTIONS_DORMANT_TRIGGER = [
+    r"on:\s*\n\s+workflow_dispatch",
+    r"on:\s*\[?\s*schedule",
+]
+
+# Signal 4: Forged bot / impersonator commit identity
+_ACTIONS_FORGED_AUTHOR = re.compile(
+    r"git\s+config\s+user\.(name|email)\s+['\"]?("
+    r"build-bot|auto-ci|ci-bot|github-actions\[bot\]|actions-bot|dependabot"
+    r")['\"]?",
+    re.IGNORECASE,
+)
+
+# Signal 5: Elevated OIDC permissions without a legitimate cloud consumer.
+# id-token: write grants ambient cloud credentials — only legitimate alongside
+# known cloud-auth actions. Exact-match list prevents typosquatted action names
+# (e.g. aws-actions-unofficial/) from bypassing the check.
+# Extend via payloadguard.yml: actions.trusted_oidc_consumers list.
+_ACTIONS_OIDC_ELEVATION_PATTERN = re.compile(r"id-token:\s*write", re.IGNORECASE)
+_SAFE_OIDC_CONSUMERS_DEFAULT = [
+    "aws-actions/configure-aws-credentials",
+    "google-github-actions/auth",
+    "azure/login",
+]
+
+# Signal 6: pull_request_target trigger — runs in the base-branch context with
+# repository secrets accessible even when triggered by a fork PR. Standalone use
+# is HIGH; combined with any write permission it is CRITICAL because an attacker
+# can both read secrets and push code/artifacts.
+_ACTIONS_DANGEROUS_TRIGGERS = re.compile(r"\bpull_request_target\b", re.IGNORECASE)
+_ACTIONS_WRITE_PERMISSIONS = re.compile(
+    r"contents:\s*write|pull-requests:\s*write|packages:\s*write|deployments:\s*write",
+    re.IGNORECASE,
+)
+
+# ==============================================================================
 # SCA — DEPENDENCY MANIFEST PATTERNS (Layer 2b)
 # Opt-in: only runs when allowlist.yml is present in the repo root.
 # ==============================================================================
@@ -198,6 +261,21 @@ def _parse_added_packages(diff_text: str, manifest_type: str) -> list:
                 if pkg not in _TOML_SKIP_KEYS:
                     packages.append(pkg)
     return packages
+
+
+def _normalize_yaml_content(content: str) -> str:
+    """Collapse YAML folded/literal block scalars to a single line.
+
+    YAML folded blocks (>) and literal blocks (|) split a single logical shell
+    command across multiple lines in the raw file, which prevents single-line
+    regex patterns from matching. Joining all lines with a space produces the
+    same string that the shell would execute, making patterns like
+    'base64 -d | bash' visible regardless of how the YAML was formatted.
+
+    Only use this for base64/payload patterns. Do NOT normalise before checks
+    that rely on line structure (dormant-trigger composite, forged-author).
+    """
+    return " ".join(content.split())
 
 
 def _load_allowlist(repo_path: str):
@@ -491,6 +569,12 @@ DEFAULT_CONFIG = {
     "sca": {
         "fail_on_unknown": True,
     },
+    "actions": {
+        "enabled": True,
+        "critical_signal_score": 5,
+        "high_signal_score": 3,
+        "trusted_oidc_consumers": [],
+    },
 }
 
 
@@ -499,6 +583,7 @@ class PayloadGuardConfig:
     thresholds: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["thresholds"]))
     semantic: dict   = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["semantic"]))
     sca: dict        = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["sca"]))
+    actions: dict    = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["actions"]))
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -536,6 +621,7 @@ def load_config(repo_path: str) -> PayloadGuardConfig:
         thresholds=merged_thresholds,
         semantic=merged.get("semantic", copy.deepcopy(DEFAULT_CONFIG["semantic"])),
         sca=merged.get("sca",           copy.deepcopy(DEFAULT_CONFIG["sca"])),
+        actions=merged.get("actions",   copy.deepcopy(DEFAULT_CONFIG["actions"])),
     )
     
 # ==============================================================================
@@ -797,6 +883,9 @@ class PayloadAnalyzer:
             # LAYER 1 (extension): Added non-code file content scanning (INC-1, INC-4)
             added_file_flags = self._scan_added_file_content(diffs)
 
+            # LAYER 2c: GitHub Actions poisoning detection
+            actions_poison_flags = self._scan_github_actions_poisoning(diffs)
+
             # LAYER 3: CONSEQUENCE VERDICT
             unverified_dep_count = len(sca_flags) if self.config.sca.get("fail_on_unknown", True) else 0
             verdict = self._assess_consequence(
@@ -809,6 +898,10 @@ class PayloadAnalyzer:
                 security_file_deletions=len(security_deletions),
                 unverified_dependencies=unverified_dep_count,
                 content_flags=len(added_file_flags),
+                actions_poisoning_flags=len(actions_poison_flags),
+                actions_poisoning_critical=any(
+                    f['severity'] == 'CRITICAL' for f in actions_poison_flags
+                ),
             )
 
             # LAYER 5a: TEMPORAL DRIFT
@@ -893,6 +986,10 @@ class PayloadAnalyzer:
                 "semantic": semantic,
                 "commit_flags": commit_flags,
                 "content_flags": added_file_flags,
+                "actions_poisoning": {
+                    "flagged_workflows": actions_poison_flags[:10],
+                    "total": len(actions_poison_flags),
+                },
                 "permission_changes": permission_changes,
                 "special_files": special_files,
                 "deleted_files": {
@@ -908,7 +1005,7 @@ class PayloadAnalyzer:
                 "error_type": type(e).__name__,
             }
 
-    def _assess_consequence(self, files_deleted, lines_deleted, days_old, deletion_ratio, structural_severity="LOW", critical_file_deletions=0, security_file_deletions=0, unverified_dependencies=0, content_flags=0):
+    def _assess_consequence(self, files_deleted, lines_deleted, days_old, deletion_ratio, structural_severity="LOW", critical_file_deletions=0, security_file_deletions=0, unverified_dependencies=0, content_flags=0, actions_poisoning_flags=0, actions_poisoning_critical=False):
         flags = []
         severity_score = 0.0
         th = self.config.thresholds
@@ -995,6 +1092,20 @@ class PayloadAnalyzer:
             flags.append(f"{content_flags} added file(s) contain CI trigger strings or shell execution patterns")
             severity_score += min(4, content_flags * 2)
 
+        actions_cfg = self.config.actions if hasattr(self.config, 'actions') else DEFAULT_CONFIG["actions"]
+        if actions_poisoning_critical:
+            flags.append(
+                f"{actions_poisoning_flags} GitHub Actions workflow(s) contain critical "
+                f"poisoning signals (base64 payload / credential harvest)"
+            )
+            severity_score += actions_cfg.get("critical_signal_score", 5)
+        elif actions_poisoning_flags > 0:
+            flags.append(
+                f"{actions_poisoning_flags} GitHub Actions workflow(s) contain "
+                f"poisoning signals (elevated OIDC / dormant trigger / forged author)"
+            )
+            severity_score += actions_cfg.get("high_signal_score", 3)
+
         if severity_score >= 5:
             return {
                 "status": "DESTRUCTIVE",
@@ -1051,6 +1162,100 @@ class PayloadAnalyzer:
                     'file': path,
                     'ci_triggers': ci_matches,
                     'shell_patterns': shell_matches,
+                })
+        return flags
+
+    def _scan_github_actions_poisoning(self, diffs) -> list:
+        """Scan added and modified GitHub Actions workflow files for poisoning signals."""
+        if not self.config.actions.get("enabled", True):
+            return []
+        flags = []
+        for d in diffs:
+            if d.change_type not in ('A', 'M'):
+                continue
+            path = d.b_path or d.a_path or ''
+            if not isinstance(path, str) or not re.search(_ACTIONS_WORKFLOW_PATTERN, path):
+                continue
+            try:
+                content = d.b_blob.data_stream.read().decode('utf-8', errors='replace')
+            except Exception:
+                continue
+
+            signals = []
+
+            # Fix 3: normalise folded/literal YAML block scalars to one line so
+            # patterns like 'base64 -d | bash' match even when split across lines.
+            # Only used for base64 checks — other checks depend on line structure.
+            normalized = _normalize_yaml_content(content)
+
+            # Signal 1: base64 payload — check both raw and normalised content so
+            # a payload entirely on one line is still caught without normalisation.
+            seen_b64 = False
+            for pat in _ACTIONS_BASE64_PAYLOAD:
+                if not seen_b64 and (
+                    re.search(pat, content, re.IGNORECASE | re.MULTILINE)
+                    or re.search(pat, normalized, re.IGNORECASE)
+                ):
+                    signals.append({'type': 'base64_payload', 'pattern': pat})
+                    seen_b64 = True  # one entry per file regardless of how many patterns match
+
+            for pat in _ACTIONS_CREDENTIAL_HARVEST:
+                if re.search(pat, content, re.IGNORECASE | re.MULTILINE):
+                    signals.append({'type': 'credential_harvest', 'pattern': pat})
+
+            has_dormant_trigger = any(
+                re.search(p, content, re.IGNORECASE | re.MULTILINE)
+                for p in _ACTIONS_DORMANT_TRIGGER
+            )
+            has_shell_exec = any(
+                re.search(p, content, re.IGNORECASE | re.MULTILINE)
+                for p in _CONTENT_SHELL_PATTERNS
+            )
+            if has_dormant_trigger and has_shell_exec:
+                signals.append({'type': 'dormant_trigger_with_payload', 'pattern': 'composite'})
+
+            if _ACTIONS_FORGED_AUTHOR.search(content):
+                signals.append({'type': 'forged_bot_author', 'pattern': _ACTIONS_FORGED_AUTHOR.pattern})
+
+            # Fix 2: exact-match OIDC consumer check — prefix matching allowed
+            # typosquatted action names (aws-actions-unofficial/) to bypass.
+            # User-defined consumers can be added via payloadguard.yml.
+            if _ACTIONS_OIDC_ELEVATION_PATTERN.search(content):
+                trusted = (
+                    list(_SAFE_OIDC_CONSUMERS_DEFAULT)
+                    + self.config.actions.get("trusted_oidc_consumers", [])
+                )
+                if not any(consumer in content for consumer in trusted):
+                    signals.append({'type': 'oidc_elevation_no_consumer', 'pattern': 'id-token: write'})
+
+            # Fix 1: pull_request_target as a standalone signal.
+            # Alone → HIGH: the trigger is sometimes legitimate (e.g. posting a
+            # comment from a fork PR). Combined with any write permission → CRITICAL
+            # because the workflow can both read secrets and modify the repository.
+            if _ACTIONS_DANGEROUS_TRIGGERS.search(content):
+                if _ACTIONS_WRITE_PERMISSIONS.search(content):
+                    signals.append({
+                        'type': 'pull_request_target_with_write_permissions',
+                        'pattern': 'pull_request_target + write permissions',
+                    })
+                else:
+                    signals.append({
+                        'type': 'dangerous_trigger_pull_request_target',
+                        'pattern': 'pull_request_target trigger',
+                    })
+
+            if signals:
+                critical_types = {
+                    'base64_payload',
+                    'credential_harvest',
+                    'pull_request_target_with_write_permissions',
+                }
+                severity = 'CRITICAL' if any(s['type'] in critical_types for s in signals) else 'HIGH'
+                flags.append({
+                    'file': path,
+                    'signals': signals,
+                    'severity': severity,
+                    'change_type': d.change_type,
                 })
         return flags
 
@@ -1142,6 +1347,13 @@ def print_report(report):
         if sem.get('matched_keyword'):
             print(f"   Matched keyword: \"{sem['matched_keyword']}\"")
         print(f"   {sem['directive']}")
+
+    ap = report.get('actions_poisoning', {})
+    if ap.get('total', 0) > 0:
+        print(f"\n🎯  GITHUB ACTIONS POISONING (Layer 2c) — {ap['total']} workflow(s) flagged")
+        for wf in ap.get('flagged_workflows', [])[:5]:
+            sig_types = ', '.join(s['type'] for s in wf['signals'])
+            print(f"   [{wf['severity']}] {wf['file']}: {sig_types}")
 
     commit_flags = report.get('commit_flags', [])
     if commit_flags:
@@ -1428,6 +1640,33 @@ def format_markdown_report(report: dict) -> str:
             ci_cell = f"{len(cf['ci_triggers'])} match(es)" if cf['ci_triggers'] else "—"
             sh_cell = f"{len(cf['shell_patterns'])} match(es)" if cf['shell_patterns'] else "—"
             out.append(f"| `{_md_escape(cf['file'])}` | {ci_cell} | {sh_cell} |")
+        out.append("")
+
+    # ── GitHub Actions Poisoning ──────────────────────────────────────────────
+    ap = report.get('actions_poisoning', {})
+    if ap.get('total', 0) > 0:
+        ap_emoji = "🚨" if any(
+            wf['severity'] == 'CRITICAL' for wf in ap.get('flagged_workflows', [])
+        ) else "⚠️"
+        out.append("### 🎯 GitHub Actions Poisoning (Layer 2c)")
+        out.append(
+            "_Scans added and modified `.github/workflows/` and `.github/actions/` files for "
+            "poisoning signals: base64-encoded payload delivery, credential harvesting "
+            "(env dumps, metadata endpoint probing), dormant triggers with embedded shell "
+            "execution, forged bot commit identity, and elevated OIDC permissions without "
+            "a legitimate cloud consumer._"
+        )
+        out.append("")
+        out.append(f"**{ap_emoji} {ap['total']} workflow(s) flagged**")
+        out.append("")
+        out.append("| File | Signal types | Severity |")
+        out.append("|---|---|---|")
+        for wf in ap.get('flagged_workflows', []):
+            sig_types = ', '.join(f"`{s['type']}`" for s in wf['signals'])
+            sev_emoji = "🚨" if wf['severity'] == 'CRITICAL' else "⚠️"
+            out.append(
+                f"| `{_md_escape(wf['file'])}` | {sig_types} | {sev_emoji} {wf['severity']} |"
+            )
         out.append("")
 
     # ── Deleted Files ─────────────────────────────────────────────────────────
