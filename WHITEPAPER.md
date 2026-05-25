@@ -151,8 +151,14 @@ git.Repo(workspace)
   │        CURRENT / STALE / DANGEROUS
   │
   └─[L5b] Semantic Transparency
-           benign_keyword(pr_description) AND severity==CRITICAL
-           → TRANSPARENT / UNVERIFIED / DECEPTIVE_PAYLOAD
+           Phase 1: _extract_claim(pr_description) → scope, dominant_op, raw_tokens
+           Phase 2: _profile_diff(diffs) → churn, insertion_ratio, ext_count,
+                                           structural_alterations, sensitive_paths
+           Phase 3: cross-correlate → mci_score ∈ [0,1]
+           mci_score ≥ 0.5 → DECEPTIVE_PAYLOAD (escalates verdict)
+           mci_score > 0   → CAUTION_MISMATCH (escalates SAFE→REVIEW)
+           mci_score = 0   → TRANSPARENT
+           no description  → UNVERIFIED (escalates SAFE→REVIEW)
 ```
 
 ### 3.3 Component Map
@@ -163,7 +169,7 @@ git.Repo(workspace)
 | `structural_parser.py` | Multi-language AST node extraction |
 | `post_check_run.py` | GitHub Check Run posting via App JWT |
 | `action.yml` | Composite GitHub Action definition |
-| `test_analyzer.py` | 194-test unit suite |
+| `test_analyzer.py` | 236-test unit suite |
 
 ---
 
@@ -353,21 +359,52 @@ Branch age is clamped to `max(0, days)` — a branch newer than the target commi
 
 ---
 
-### 4.6 Layer 5b — Semantic Transparency
+### 4.6 Layer 5b — Semantic Transparency (v2 — PR-MCI Heuristic Engine)
 
-**Purpose:** Detect the *deceptive description* pattern — benign language in the PR description contradicting a destructive diff.
+**Purpose:** Detect the *deceptive description* pattern — language in the PR description that misrepresents the actual scope, operation type, or affected components of the diff.
 
-**Algorithm:**
-```python
-claims_benign = any(keyword in pr_description.lower() for keyword in benign_keywords)
-is_deceptive  = claims_benign AND actual_severity == "CRITICAL"
-```
+**Algorithm:** Three-phase heuristic engine derived from the PR-MCI academic framework (CodeFuse-CommitEval + 23,247-PR agent study). Pure Python stdlib, no external dependencies, sub-second.
 
-Default benign keywords: `minor fix`, `minor syntax fix`, `typo`, `formatting`, `cleanup`, `docs`, `refactor whitespace`, `small tweak`, `cosmetic`, `minor update`.
+**Phase 1 — Linguistic Lexer** (`_extract_claim`):
 
-No PR description → `UNVERIFIED` (advisory only, no score impact). The layer is purely semantic — it does not change the numerical score; it adds a high-visibility flag in the report.
+Sanitises markdown (strips code fences, inline code, link syntax, formatting characters), tokenises to lowercase alphanumeric tokens, applies a Lovins-inspired suffix stemmer (longest-first, minimum 3-character candidate). Classifies two dimensions:
 
-**Output:** `semantic` dict with `status` (TRANSPARENT / UNVERIFIED / DECEPTIVE_PAYLOAD), `is_deceptive`, `matched_keyword`, directive string.
+- **Scope:** `micro` if any token matches `_SEMANTIC_MICRO_SCOPE` (minor, typo, cleanup, whitespace, cosmetic, etc.); `macro` if any matches `_SEMANTIC_MACRO_SCOPE` (overhaul, architectural, rewrite, comprehensive, etc.); `unspecified` otherwise.
+- **Dominant operation:** checked in priority order — `remedial` (fix, patch, resolve, revert), `destructive` (remove, delete, drop, deprecate), `additive` (add, implement, create, build), `mutative` (update, refactor, migrate, replace).
+
+**Phase 2 — Diff Profiler** (`_profile_diff`):
+
+Walks GitPython diff objects. For each diff: extracts file extension; checks path against `_SEMANTIC_SENSITIVE_PATHS` (`.github/workflows/`, auth files, package manifests, Dockerfiles, schema/migration files, secrets); counts added and deleted lines from the unified diff bytes; detects structural additions (lines matching `+def `, `+class `, `+async def `, `+function `, `+interface `, `+struct `).
+
+Computes: `total_churn = lines_added + lines_deleted`, `insertion_ratio = lines_added / total_churn`.
+
+**Phase 3 — Cross-Correlation** (`analyze_transparency`):
+
+Five independent signals, each contributing to `mci_score`:
+
+| Signal | Condition | MCI |
+|---|---|---|
+| `scope_understated` | scope == micro AND total_churn > churn_limit (default 50) | +0.4 |
+| `operation_mutation` | scope == micro AND structural_alterations > 0 | +0.3 |
+| `hidden_component_modification` | scope == micro AND sensitive file in diff not named in description | +0.3 |
+| `phantom_additions` | dominant_op == remedial AND insertion_ratio > ir_threshold (default 0.9) | +0.4 |
+| `cross_stack_micro_claim` | scope == micro AND distinct_file_extensions >= 3 | +0.2 |
+| `macro_scope_manual_review` | scope == macro | advisory only — no MCI contribution |
+
+`mci_score` is capped at 1.0.
+
+**Status thresholds:**
+
+| mci_score | Status | Verdict effect |
+|---|---|---|
+| ≥ 0.5 | `DECEPTIVE_PAYLOAD` | Escalates verdict one step (SAFE→CAUTION, REVIEW→CAUTION, CAUTION→DESTRUCTIVE) |
+| > 0.0 or macro advisory | `CAUTION_MISMATCH` | Escalates SAFE→REVIEW only |
+| 0.0 | `TRANSPARENT` | No change |
+| (no description) | `UNVERIFIED` | Escalates SAFE→REVIEW |
+
+Unlike L1–L4, L5b verdict escalation operates on the pre-existing verdict rather than contributing to the numerical `severity_score`. This allows it to upgrade a SAFE verdict on a low-volume deceptive PR without interfering with the scoring model's calibration.
+
+**Output:** `semantic` dict with `status`, `is_deceptive`, `mci_score`, `signals` list, `semantic_claim` (scope, dominant_op, raw_tokens), `diff_reality` (churn, insertion_ratio, ext_count, structural_alterations, sensitive_paths), `matched_keyword` (first signal, for backwards compatibility), `directive` string.
 
 ---
 
@@ -504,7 +541,7 @@ A single CRITICAL poisoning signal scores identically to a security file deletio
 
 ### 6.1 Test Harness Architecture
 
-The test harness (`payloadguard-plg/payloadguard-test-harness`) maintains 30 active permanent branches (plus 3 pending for future GitHub APIs), each representing a specific adversarial scenario. Each branch has a closed PR against main. Running a regression:
+The test harness (`payloadguard-plg/payloadguard-test-harness`) maintains 35 active permanent branches (plus 3 pending for future GitHub APIs), each representing a specific adversarial scenario. Each branch has a closed PR against main. Running a regression:
 
 1. `run_regression.py` reopens all active PRs
 2. GitHub Actions triggers a PayloadGuard scan on each
@@ -513,7 +550,7 @@ The test harness (`payloadguard-plg/payloadguard-test-harness`) maintains 30 act
 5. `ingest.py` pulls the `payloadguard-results` artifact from each workflow run and writes to SQLite
 6. `dashboard.py` visualises results with a threshold simulator; the **Last Run** summary card shows a full `YYYY-MM-DD HH:MM` timestamp linked directly to the GitHub Actions workflow run that produced the data
 
-The harness CI is pinned to the analyser at SHA `83826a5f3204d74afef5e1a930e7d60bfd1b8cba` (Layer 2c). Temporal grouping controls which cases run: `--mode stable` (default, excludes aging/temporal cases), `--mode temporal` (aging cases only), `--mode full` (all cases).
+The harness CI is pinned to the analyser at SHA `32014117afeb5c99f51045b3df0d7ba27e0a187a` (post INC-3 fix). Temporal grouping controls which cases run: `--mode stable` (default, excludes aging/temporal cases), `--mode temporal` (aging cases only), `--mode full` (all cases).
 
 ### 6.2 Test Case Matrix
 
@@ -562,6 +599,18 @@ The harness CI is pinned to the analyser at SHA `83826a5f3204d74afef5e1a930e7d60
 | AW04 | adversarial/workflow-legitimate-oidc | adversarial | SAFE | Exact-match allowlist passes — no false positive |
 | AW05 | adversarial/workflow-modified-poison | adversarial | DESTRUCTIVE | M-type diff scanned; `credential_harvest` CRITICAL |
 
+**Track 5 — Red-team simulation (bypass probing)**
+
+| ID | Branch | Category | Expected | Signal / Notes |
+|---|---|---|---|---|
+| RTA01 | rta/push-rm-rf | red-team | REVIEW | `rm -rf` in workflow — caught by L2 content scanner |
+| RTA02 | rta/schedule-curl-exfil | red-team | SAFE | **Documented bypass** — curl POST body with `secrets.*`, URL on continuation line; multiline curl body evades all `credential_harvest` patterns |
+| RTA03 | rta/prt-untrusted-checkout | red-team | CAUTION | `pull_request_target` + untrusted `head.sha` checkout — caught by L2c `dangerous_trigger_pull_request_target` HIGH |
+| RTA04 | rta/github-env-injection | red-team | CAUTION | PATH/LD_PRELOAD/NODE_OPTIONS poisoning via `$GITHUB_ENV` — caught by L2c Signal 7 (`github_env_injection`) HIGH |
+| RTA05 | rta/variable-obfuscated-b64 | red-team | DESTRUCTIVE | Variable-indirected base64: `PAYLOAD=$(echo '...')` then `echo $PAYLOAD \| base64 -d \| bash` — `base64 -d \| bash` literal still fires L2c CRITICAL |
+
+RTA02 is a registered bypass: the regression passes when the analyser returns SAFE (confirming the bypass still exists) and fails if a future fix starts catching it (signalling the detection improvement). Fix requires multiline-aware curl body pattern matching.
+
 **Pending (blocked on GitHub 2026 APIs)**
 
 | ID | Description |
@@ -602,9 +651,9 @@ actions high_signal_score    : 3
 | False positive | 0 | — |
 | False negative | 0 | — |
 
-**Combined pass rate: 29/30 active cases (97%)**
+**Combined pass rate: 34/35 active cases (97%)**
 
-The one persistent miss is A06 (threshold-gaming), a known limitation of purely additive scoring with no compound detection. All Layer 2c cases pass.
+The one persistent miss is A06 (threshold-gaming), a known limitation of purely additive scoring with no compound detection. All Layer 2c and red-team simulation cases pass. RTA02 is counted as a pass — the regression expects SAFE (documented bypass) and receives it.
 
 ### 6.4 Scoring Trace for Key Cases
 
@@ -667,12 +716,8 @@ thresholds:
     min_deleted_nodes: 3               # both must exceed their threshold
 
 semantic:
-  benign_keywords:                     # phrases that claim low impact
-    - minor fix
-    - typo
-    - formatting
-    - cleanup
-    - small tweak
+  micro_scope_churn_limit: 50          # V_s: churn threshold for scope_understated signal
+  insertion_ratio_fix_threshold: 0.9   # V_r: insertion ratio threshold for phantom_additions
 ```
 
 Out-of-order threshold lists are auto-sorted after load. Deep-merge semantics — only keys present in your file override the defaults.
@@ -699,9 +744,15 @@ Structural drift analysis requires a tree-sitter grammar for non-Python language
 
 For repositories with complex merge histories, `merge_base()` may return multiple candidates. The implementation uses `[0]` — the first candidate returned by git. In pathological cases this may not be the optimal merge base.
 
-### 8.5 Semantic Layer Keyword Coverage
+### 8.5 Semantic Layer Signal Coverage
 
-Layer 5b fires only when the PR description contains one of the configured benign keywords. A sufficiently vague description ("updates") that doesn't match any keyword produces `UNVERIFIED` rather than `DECEPTIVE_PAYLOAD`. The layer is a high-precision supplement, not a comprehensive intent classifier.
+Layer 5b v2 uses structural heuristics rather than keyword lists, but coverage remains bounded by what can be inferred from description text and diff structure alone.
+
+*Unspecified scope descriptions* ("updates config", "changes handler behaviour") produce no micro or macro scope classification. None of the five MCI signals fire without a scope classification (V_s, V_o, V_f, V_e all require micro scope; V_r requires a remedial operation claim). A sufficiently vague description yields TRANSPARENT regardless of diff severity — the layer cannot penalise what it cannot classify.
+
+*V_r false positives on greenfield additions* — a PR claiming "fix" that adds a new module from scratch will have a high insertion ratio and trigger `phantom_additions`. This may be a valid description ("fix the gap by adding X") rather than deception. The signal is advisory at mci_score 0.4 (CAUTION_MISMATCH) unless combined with another signal.
+
+*V_f acknowledgement check* uses the last two path components (e.g. `auth_handler.py` for `src/auth_handler.py`). The full filename including extension must appear in the description to suppress the signal — stem-only references ("auth_handler" without ".py") are not recognised as acknowledgement.
 
 ### 8.6 AI Research Tool Context Pollution is an Out-of-Scope Threat
 
