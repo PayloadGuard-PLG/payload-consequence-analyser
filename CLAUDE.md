@@ -86,7 +86,14 @@ sca:
 
 ## Current Version
 
-`__version__ = "1.1.0"` (analyze.py:29)
+`__version__ = "1.2.0"` (analyze.py:29)
+
+### v1.2.0 changes
+- Feature: L2c GitHub Actions poisoning detection — base64 payload, credential harvest, dormant trigger, forged bot author, OIDC elevation, pull_request_target signals
+- Feature: L5b v2 PR-MCI heuristic engine — three-phase (Linguistic Lexer → Diff Profiler → Cross-Correlation), mci_score ∈ [0,1], five signals (V_s/V_o/V_f/V_r/V_e)
+- Fix: L2 content scanner now excludes `.github/workflows/` files — L2c is the exclusive handler, preventing double-scoring
+- Fix: Exit code table corrected — CAUTION exits 0, only DESTRUCTIVE exits 2
+- Test suite: 236 pass, 7 skip (+26 TestSemanticTransparencyV2 tests)
 
 ### v1.1.0 changes (branch `claude/initial-setup-WO53R`)
 - Fix 1.1: Cross-file structural aggregation requires BOTH count AND ratio (was count-only)

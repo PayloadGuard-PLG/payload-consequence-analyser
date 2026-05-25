@@ -1,6 +1,6 @@
 # PayloadGuard
 
-**Version:** 1.1.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Released:** May 2026
+**Version:** 1.2.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Released:** May 2026
 
 PayloadGuard is a static analysis tool for pull requests. It scans the full diff before a merge and produces a forensic verdict on the risk of the changeset — catching destructive, deceptive, or malicious contributions that code review alone is likely to miss.
 
