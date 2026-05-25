@@ -26,7 +26,7 @@ from typing import Any, Dict, Union
 from dataclasses import dataclass, field
 import structural_parser
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 # ==============================================================================
