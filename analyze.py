@@ -192,6 +192,53 @@ _SAFE_OIDC_CONSUMERS_DEFAULT = [
     "azure/login",
 ]
 
+# OIDC Consumer Allowlist (Exact Match Only)
+_SAFE_OIDC_CONSUMERS = [
+    'aws-actions/configure-aws-credentials',
+    'google-github-actions/auth',
+    'azure/login',
+    'azure/login@v1',
+]
+
+_SAFE_OIDC_PREFIXES = [
+    'aws-actions/',
+    'google-github-actions/',
+    'azure/',
+]
+
+
+def _is_oidc_consumer_legitimate(action_string):
+    """Check if action is in the safe OIDC allowlist."""
+    return any(action_string.startswith(safe) for safe in _SAFE_OIDC_CONSUMERS)
+
+
+def _is_oidc_consumer_typosquatted(action_string):
+    """
+    Detect if action appears to be a typosquat of a known-safe OIDC consumer.
+
+    Typosquats: aws-actions-unofficial/, aws-action/, google-github-action-fork/, etc.
+    """
+    if not action_string:
+        return False
+
+    # Pattern 1: Uses safe prefix but isn't on allowlist
+    for prefix in _SAFE_OIDC_PREFIXES:
+        if action_string.startswith(prefix):
+            if not _is_oidc_consumer_legitimate(action_string):
+                return True
+
+    # Pattern 2: Common typosquat indicators
+    typosquat_patterns = [
+        'aws-actions-',
+        'aws-action/',
+        'google-github-actions-',
+        'google-github-action-',
+        'google-github-action/',
+        'azure-login',
+    ]
+    return any(pattern in action_string for pattern in typosquat_patterns)
+
+
 # Signal 6: pull_request_target trigger — runs in the base-branch context with
 # repository secrets accessible even when triggered by a fork PR. Standalone use
 # is HIGH; combined with any write permission it is CRITICAL because an attacker
@@ -1217,16 +1264,50 @@ class PayloadAnalyzer:
             if _ACTIONS_FORGED_AUTHOR.search(content):
                 signals.append({'type': 'forged_bot_author', 'pattern': _ACTIONS_FORGED_AUTHOR.pattern})
 
-            # Fix 2: exact-match OIDC consumer check — prefix matching allowed
-            # typosquatted action names (aws-actions-unofficial/) to bypass.
-            # User-defined consumers can be added via payloadguard.yml.
             if _ACTIONS_OIDC_ELEVATION_PATTERN.search(content):
-                trusted = (
-                    list(_SAFE_OIDC_CONSUMERS_DEFAULT)
-                    + self.config.actions.get("trusted_oidc_consumers", [])
+                # id-token: write detected - verify legitimate OIDC consumer.
+
+                # Extract all action references
+                actions_in_workflow = re.findall(
+                    r'uses:\s+([^\s@\n]+)',
+                    content,
+                    re.IGNORECASE
                 )
-                if not any(consumer in content for consumer in trusted):
-                    signals.append({'type': 'oidc_elevation_no_consumer', 'pattern': 'id-token: write'})
+
+                # Config-extended trusted consumers
+                config_trusted = self.config.actions.get("trusted_oidc_consumers", [])
+
+                # Check if any action is legitimate (built-in or config)
+                has_legitimate_consumer = any(
+                    _is_oidc_consumer_legitimate(action)
+                    or any(t in action for t in config_trusted)
+                    for action in actions_in_workflow
+                )
+
+                if has_legitimate_consumer:
+                    # Safe: id-token granted to trusted action
+                    pass
+                else:
+                    # No legitimate consumer - check for typosquat
+                    has_typosquat = any(
+                        _is_oidc_consumer_typosquatted(action)
+                        for action in actions_in_workflow
+                    )
+
+                    if has_typosquat:
+                        signals.append({
+                            'type': 'oidc_elevation_typosquatted',
+                            'pattern': 'id-token: write with typosquatted OIDC action',
+                            'risk': 'Deliberate impersonation of trusted cloud auth action',
+                            'severity': 'CRITICAL'
+                        })
+                    else:
+                        signals.append({
+                            'type': 'oidc_elevation_no_consumer',
+                            'pattern': 'id-token: write without safe OIDC consumer',
+                            'risk': 'Elevated permissions without legitimate use',
+                            'severity': 'HIGH'
+                        })
 
             # Fix 1: pull_request_target as a standalone signal.
             # Alone → HIGH: the trigger is sometimes legitimate (e.g. posting a
@@ -1249,6 +1330,7 @@ class PayloadAnalyzer:
                     'base64_payload',
                     'credential_harvest',
                     'pull_request_target_with_write_permissions',
+                    'oidc_elevation_typosquatted',
                 }
                 severity = 'CRITICAL' if any(s['type'] in critical_types for s in signals) else 'HIGH'
                 flags.append({
