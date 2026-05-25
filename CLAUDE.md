@@ -3,14 +3,15 @@
 ## Handover (update this block at the end of every session)
 
 - **Branch for next work:** new branch off main
-- **Status:** v1.1.0 live on main. Layer 2c live (PR #36). All docs updated (PR #39/#40). Regression runner + 3x-daily schedule live (harness PRs #47/#48). Branch cleanup done (20 stale branches removed). Red-team simulation complete (PRs #49–53 harness) — RTA-05/07/02 fixes in PR #41.
-- **Next priority:** Merge PR #41 (RTA bypass fixes), then refactoring sprint — split `analyze.py` into focused modules, reorganise test file by layer.
-- **Open findings:** INC-3 (MEDIUM) only — direct push to main → L5b returns UNVERIFIED but raises no flag. Low urgency. See AUDIT_LOG.md.
-- **Post red-team fixes:** RTA-02 ✓, RTA-05 ✓, RTA-07 ✓ (all in PR #41). RTA-01 (multi-step env var) deferred — requires YAML-aware parsing. RTA-03 (unpinned action advisory) deferred to refactor sprint.
-- **Test suite:** `python -m pytest test_analyzer.py -v` → 203 pass, 7 skip (crypto/tree-sitter env)
+- **Status:** v1.1.0 live on main. All INC findings closed. Red-team complete — RTA-02/05/07 fixes merged (PR #41). INC-3 fixed (PR #42). 5 RTA branches registered in harness test_cases.json (38 total cases).
+- **Next priority:** L5b semantic analysis v2 — Steve researching with Gemini/NotebookLM. Bring findings back to implement a credible `SemanticTransparencyAnalyzer` (pure Python, no network, no ML, <2s). Current implementation is hardcoded keyword list — too simple.
+- **Open findings:** None (INC-1, INC-3, INC-4 all closed). One documented bypass: RTA02 (`rta/schedule-curl-exfil`) — schedule + curl POST body with secret, URL on continuation line evades all credential_harvest patterns. Needs multiline-aware curl body pattern.
+- **Deferred:** RTA-01 (multi-step env var, requires YAML-aware parsing), RTA-03 (unpinned action advisory), refactoring sprint (split `analyze.py` into focused modules).
+- **Post red-team fixes:** RTA-02 ✓, RTA-05 ✓, RTA-07 ✓ (PR #41, merged). RTA-01, RTA-03 deferred.
+- **Test suite:** `python -m pytest test_analyzer.py -v` → 206 pass, 7 skip (crypto/tree-sitter env)
 - **GitHub App credentials:** STALE after org migration. `post_check_run.py` will fail until App is re-installed under `PayloadGuard-PLG`. Workaround: `continue-on-error: true` on both "Post Check Run" (analyser) and "PayloadGuard Scan" (harness) steps.
-- **Harness CI:** Operational. SHA pinned to `83826a5f3204d74afef5e1a930e7d60bfd1b8cba` (Layer 2c). Regression runner: `workflow_dispatch` + schedule (02:00/10:00/18:00 UTC daily, full mode). Results in `tools/db/results.db` artifact per run. `REGRESSION_PAT` secret set.
-- **Harness branches:** 31 total (main + session + 29 test cases). All stale session branches removed.
+- **Harness CI:** Operational. SHA pinned to `32014117afeb5c99f51045b3df0d7ba27e0a187a` (post INC-3 fix). Regression runner: `workflow_dispatch` + schedule (02:00/10:00/18:00 UTC daily, full mode). Results in `tools/db/results.db` artifact per run. `REGRESSION_PAT` secret set.
+- **Harness branches:** 38 test cases (main + session + 36 test/rta branches). All stale session branches removed.
 - **Blockers:** None.
 
 ---
@@ -142,10 +143,3 @@ sca:
 5. Begin work
 
 **Update the Handover block before ending every session.**
-
-- **Status:** v1.1.0 live on main. INC-1 and INC-4 closed — `_scan_added_file_content()` implemented, 163 tests passing. Only INC-3 (MEDIUM) remains open.
-- **Next priority:** INC-3 — direct push to main raises no flag despite L5b returning UNVERIFIED. Low urgency.
-- **Warning:** Many other Claude session branches exist on remote — do NOT merge without review: `claude/audit-hardening`, `claude/fix-tests-and-ci`, `claude/pypi-and-action`, `claude/cleanup-readme`, `claude/docs-update`, `claude/fix-5-4-pem-validation`, etc.
-- **Open findings:** §INC-3 (MEDIUM) only — see AUDIT_LOG.md
-- **Test suite:** `python -m pytest test_analyzer.py -v` → 163 pass, 7 skip (crypto/tree-sitter env)
-- **CI:** SHA-pinned and org-corrected in both repos. Harness fires on new PRs. App Check Run badge disabled pending App re-install under PayloadGuard-PLG.
