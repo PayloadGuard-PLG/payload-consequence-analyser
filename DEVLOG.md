@@ -2,6 +2,66 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-05-25 — L5b v2: PR-MCI Heuristic Semantic Transparency Engine
+
+Replaced the 10-keyword substring matcher with a three-phase heuristic engine based on the PR-MCI academic framework (CodeFuse-CommitEval + 23,247-PR agent study). Pure Python stdlib, zero new dependencies, sub-second.
+
+### Commits (newest first, analyser)
+
+- `1bc226c` — fix: remove 'full' from `_SEMANTIC_MACRO_SCOPE` — too common in technical prose
+- `9aa66d3` — feat: Layer 5b v2 — PR-MCI heuristic semantic transparency engine
+
+### PR
+
+- **#44** (analyser) — L5b v2 implementation. Open.
+
+---
+
+### Architecture
+
+Three phases replace the old keyword list:
+
+**Phase 1 — Linguistic Lexer** (`_extract_claim`): Sanitises markdown (strips fences, inline code, links), tokenises, applies a Lovins-inspired suffix stemmer (longest-first, minimum 3-char candidate), then classifies `scope` (micro/macro/unspecified) and `dominant_op` (remedial/destructive/additive/mutative/unspecified).
+
+**Phase 2 — Diff Profiler** (`_profile_diff`): Walks GitPython diff objects, counts added/deleted lines, detects structural additions (lines matching `+def `/`+class `/`+function `/etc.), tracks file extensions, and identifies sensitive paths (`.github/workflows/`, auth files, manifests, Dockerfiles, schema/migration files, secrets).
+
+**Phase 3 — Cross-Correlation** (`analyze_transparency`): Five signals, each contributing independently to `mci_score ∈ [0,1]`:
+
+| Signal | Condition | MCI |
+|---|---|---|
+| `scope_understated` | micro claim + total churn > 50 | +0.4 |
+| `operation_mutation` | micro claim + structural additions in diff | +0.3 |
+| `hidden_component_modification` | sensitive file in diff not named in description | +0.3 |
+| `phantom_additions` | remedial claim + insertion_ratio > 0.9 | +0.4 |
+| `cross_stack_micro_claim` | micro claim + ≥3 distinct file extensions | +0.2 |
+| `macro_scope_manual_review` | macro scope word in description | advisory only |
+
+Thresholds: mci_score ≥ 0.5 → DECEPTIVE_PAYLOAD (escalates verdict one step); mci_score > 0.0 or macro advisory → CAUTION_MISMATCH (escalates SAFE → REVIEW); 0.0 → TRANSPARENT.
+
+---
+
+### Scoring Integration
+
+DECEPTIVE_PAYLOAD escalates: SAFE→CAUTION, REVIEW→CAUTION, CAUTION→DESTRUCTIVE.
+CAUTION_MISMATCH escalates: SAFE→REVIEW only.
+INC-3 fix preserved: UNVERIFIED (no PR description) escalates SAFE→REVIEW.
+
+---
+
+### `full` Removed from Macro Scope
+
+The first CI scan of PR #44 returned CAUTION_MISMATCH with `macro_scope_manual_review` and MCI 0.000. Root cause: the word "full" in "Full suite: 236 pass" in the PR test plan section matched `_SEMANTIC_MACRO_SCOPE`. Removed — "full" is routine in technical prose ("full suite", "full test run") unlike the remaining set members ("overhaul", "architectural", "rewrite", "comprehensive", etc.) which are genuinely unusual in routine PRs.
+
+---
+
+### Test Suite
+
+206 → 236 pass (+30). New class `TestSemanticTransparencyV2` — 26 tests covering all five signals (true/false for each), composite accumulation, mci_score clamping, threshold boundaries, status→verdict escalation, and backwards-compat fields (`matched_keyword`, `is_deceptive`).
+
+Noted fix during test authoring: V_f acknowledgement check uses `Path(p).parts[-2:]` which includes the file extension in the filename part. PR descriptions must include the full filename (e.g. `auth_handler.py`) not just the stem to suppress the signal. Test updated with explicit comment documenting this behaviour.
+
+---
+
 ## 2026-05-25 — Maintenance Sprint: Red-Team Simulation, Bypass Fixes, INC-3 Close, Regression Coverage
 
 Post-Layer-2c hardening session. Ran a full red-team simulation against the live analyser using five adversarial harness branches, identified three active bypass gaps, closed them, fixed INC-3, pruned 20 stale remote branches, and registered all red-team branches as permanent regression cases (38 total).
