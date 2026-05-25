@@ -180,6 +180,48 @@ _ACTIONS_GITHUB_ENV_INJECTION = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+# ==============================================================================
+# SEMANTIC TRANSPARENCY (Layer 5b v2) — PR-MCI heuristic engine
+# Derives mci_score from five signals:
+#   V_s  Scope Adequacy        — description verbosity vs diff churn
+#   V_o  Operation Mutation    — claimed op type vs structural alterations
+#   V_f  File-Type Verify      — sensitive files in diff not acknowledged
+#   V_r  Phantom Additions     — remedial claim + high insertion ratio
+#   V_e  Cross-stack micro     — micro claim touches ≥3 distinct file types
+# ==============================================================================
+
+_SEMANTIC_MICRO_SCOPE = frozenset({
+    'typo', 'minor', 'trivial', 'small', 'cosmetic', 'syntax', 'formatting',
+    'cleanup', 'whitespace', 'indent', 'comment', 'docs', 'readme', 'changelog',
+    'spelling', 'grammar', 'style', 'lint', 'nit', 'docstring',
+})
+_SEMANTIC_MACRO_SCOPE = frozenset({
+    'massive', 'major', 'complete', 'total', 'overhaul', 'rewrite', 'rework',
+    'architecture', 'architectural', 'global', 'substantial', 'large',
+    'significant', 'comprehensive', 'full', 'entire',
+})
+_SEMANTIC_ADDITIVE_STEMS    = frozenset({'add', 'implement', 'creat', 'introduc', 'integrat', 'build', 'extend', 'new'})
+_SEMANTIC_DESTRUCTIVE_STEMS = frozenset({'remov', 'delet', 'drop', 'deprecat', 'destroy', 'clean', 'purg', 'strip'})
+_SEMANTIC_MUTATIVE_STEMS    = frozenset({'updat', 'modif', 'refactor', 'rewrit', 'restructur', 'bump', 'chang', 'migrat', 'replac'})
+_SEMANTIC_REMEDIAL_STEMS    = frozenset({'fix', 'patch', 'resolv', 'revert', 'correct', 'repair', 'hotfix'})
+
+_SEMANTIC_SUFFIXES = [  # Lovins-inspired, longest-first; guard: stem must remain ≥3 chars
+    ('ations', ''), ('ation', ''), ('tions', ''), ('tion', ''),
+    ('ments', ''), ('ment', ''), ('ness', ''), ('ings', ''), ('ing', ''),
+    ('ized', ''), ('izes', ''), ('ize', ''), ('ified', ''), ('ify', ''),
+    ('able', ''), ('ible', ''), ('ed', ''), ('ers', ''), ('er', ''),
+    ('ies', 'y'), ('es', ''), ('s', ''),
+]
+
+_SEMANTIC_SENSITIVE_PATHS = [
+    re.compile(r'\.github/workflows/', re.IGNORECASE),
+    re.compile(r'(?:^|/)auth[^/]*\.', re.IGNORECASE),
+    re.compile(r'package\.json|requirements\.txt|Pipfile|go\.mod|Cargo\.toml', re.IGNORECASE),
+    re.compile(r'Dockerfile|docker-compose', re.IGNORECASE),
+    re.compile(r'schema\.|migration', re.IGNORECASE),
+    re.compile(r'(?:^|/)secrets?[^/]*\.', re.IGNORECASE),
+]
+
 # Signal 3: Dormant trigger — workflow_dispatch or schedule combined with a
 # shell execution pattern in the same file constitutes a sleeper payload.
 _ACTIONS_DORMANT_TRIGGER = [
@@ -537,67 +579,206 @@ class TemporalDriftAnalyzer:
 # ==============================================================================
 
 class SemanticTransparencyAnalyzer:
+    """Layer 5b v2 — PR-MCI heuristic semantic transparency engine.
+
+    Three-phase analysis: Linguistic Lexer → Diff Profiler → Cross-Correlation.
+    Derives mci_score ∈ [0,1] from five signals (V_s/V_o/V_f/V_r/V_e).
+    Zero external dependencies. Sub-second execution.
+
+    Status values:
+      UNVERIFIED        No PR description — cannot evaluate
+      TRANSPARENT       Description consistent with diff profile
+      CAUTION_MISMATCH  Partial inconsistency — manual review advised
+      DECEPTIVE_PAYLOAD High-confidence mismatch — escalation triggered
     """
-    Evaluates the integrity of a pull request by comparing the stated intent
-    (PR description) against the actual structural impact (severity verdict).
 
-    Detects the 'benign description / catastrophic payload' pattern that was
-    central to the April 2026 Codex incident.
+    def __init__(self, pr_description: str, diffs, config: dict = None):
+        self.pr_description = pr_description or ''
+        self.diffs = list(diffs) if diffs is not None else []
+        self.config = config or {}
 
-    Configurable:
-        benign_keywords (list): Phrases that signal a claimed low-impact change.
-    """
+    # ── Phase 1: Linguistic Lexer ─────────────────────────────────────────────
 
-    DEFAULT_BENIGN_KEYWORDS = [
-        "minor fix",
-        "minor syntax fix",
-        "typo",
-        "formatting",
-        "cleanup",
-        "docs",
-        "refactor whitespace",
-        "small tweak",
-        "cosmetic",
-        "minor update",
-    ]
+    @staticmethod
+    def _stem(word: str) -> str:
+        """Lovins-inspired suffix stripper — stem must remain ≥3 chars."""
+        if len(word) <= 3:
+            return word
+        for suffix, replacement in _SEMANTIC_SUFFIXES:
+            if word.endswith(suffix):
+                candidate = word[:-len(suffix)] + replacement
+                if len(candidate) >= 3:
+                    return candidate
+        return word
 
-    def __init__(
-        self,
-        pr_description: str,
-        actual_severity: str,
-        benign_keywords: list = None,
-    ):
-        self.pr_description = pr_description.lower().strip()
-        self.actual_severity = actual_severity.upper()
-        self.benign_keywords = benign_keywords if benign_keywords is not None else self.DEFAULT_BENIGN_KEYWORDS
+    @staticmethod
+    def _sanitize(text: str) -> str:
+        """Strip markdown, normalize to lowercase ASCII."""
+        text = re.sub(r'```.*?```', ' ', text, flags=re.DOTALL)
+        text = re.sub(r'`[^`]+`', ' ', text)
+        text = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', text)
+        text = re.sub(r'[#*_~>|]', ' ', text)
+        return text.encode('ascii', errors='ignore').decode().lower()
 
-    def analyze_transparency(self) -> Dict[str, Union[str, bool]]:
-        if not self.pr_description:
-            return {
-                "status": "UNVERIFIED",
-                "is_deceptive": False,
-                "matched_keyword": None,
-                "directive": "⚠ CAUTION. No PR description provided for semantic analysis.",
-            }
+    def _extract_claim(self) -> dict:
+        """Extract Semantic Claim Object: scope, dominant_op, raw_tokens."""
+        clean = self._sanitize(self.pr_description)
+        tokens = re.findall(r'[a-z0-9_/.-]+', clean)
+        raw = set(tokens)
+        stems = {self._stem(t) for t in tokens if len(t) > 2}
 
-        matched_keyword = next(
-            (kw for kw in self.benign_keywords if kw in self.pr_description), None
+        scope = 'unspecified'
+        if raw & _SEMANTIC_MICRO_SCOPE:
+            scope = 'micro'
+        elif raw & _SEMANTIC_MACRO_SCOPE:
+            scope = 'macro'
+
+        dominant_op = 'unspecified'
+        for op_name, op_set in [
+            ('remedial',    _SEMANTIC_REMEDIAL_STEMS),
+            ('destructive', _SEMANTIC_DESTRUCTIVE_STEMS),
+            ('additive',    _SEMANTIC_ADDITIVE_STEMS),
+            ('mutative',    _SEMANTIC_MUTATIVE_STEMS),
+        ]:
+            if stems & op_set:
+                dominant_op = op_name
+                break
+
+        return {'scope': scope, 'dominant_op': dominant_op, 'raw_tokens': raw}
+
+    # ── Phase 2: Diff Profiler ────────────────────────────────────────────────
+
+    def _profile_diff(self) -> dict:
+        """Extract Diff Reality Object: churn, extensions, structural alterations."""
+        lines_added = lines_deleted = structural_alterations = 0
+        extensions: set = set()
+        sensitive_paths: list = []
+
+        struct_pat = re.compile(
+            r'^\+[ \t]*(def |class |async def |function |interface |struct )',
         )
-        claims_benign = matched_keyword is not None
-        is_deceptive = claims_benign and self.actual_severity == "CRITICAL"
 
-        if is_deceptive:
-            status = "DECEPTIVE_PAYLOAD"
-            directive = "❌ DO NOT MERGE. PR description deliberately contradicts catastrophic architectural changes."
-        else:
-            status = "TRANSPARENT"
-            directive = "✓ SAFE. PR description aligns with verified structural impact."
+        for d in self.diffs:
+            path = d.b_path or getattr(d, 'a_path', '') or ''
+            if not isinstance(path, str):
+                path = ''
+            if path:
+                ext = Path(path).suffix.lower()
+                if ext:
+                    extensions.add(ext)
+                for pat in _SEMANTIC_SENSITIVE_PATHS:
+                    if pat.search(path):
+                        sensitive_paths.append(path)
+                        break
+
+            try:
+                diff_bytes = d.diff if isinstance(d.diff, bytes) else b''
+                diff_text = diff_bytes.decode('utf-8', errors='replace')
+            except Exception:
+                diff_text = ''
+
+            for line in diff_text.splitlines():
+                if line.startswith('+') and not line.startswith('+++'):
+                    lines_added += 1
+                    if struct_pat.match(line):
+                        structural_alterations += 1
+                elif line.startswith('-') and not line.startswith('---'):
+                    lines_deleted += 1
+
+        total_churn = lines_added + lines_deleted
+        insertion_ratio = lines_added / total_churn if total_churn else 0.0
 
         return {
-            "status": status,
-            "is_deceptive": is_deceptive,
-            "matched_keyword": matched_keyword,
-            "directive": directive,
+            'lines_added': lines_added,
+            'lines_deleted': lines_deleted,
+            'total_churn': total_churn,
+            'insertion_ratio': insertion_ratio,
+            'ext_count': len(extensions),
+            'structural_alterations': structural_alterations,
+            'sensitive_paths': sensitive_paths,
+        }
+
+    # ── Phase 3: Cross-Correlation Matrix ────────────────────────────────────
+
+    def analyze_transparency(self) -> dict:
+        if not self.pr_description.strip():
+            return {
+                'status': 'UNVERIFIED',
+                'is_deceptive': False,
+                'matched_keyword': None,
+                'directive': '⚠ CAUTION. No PR description provided for semantic analysis.',
+                'mci_score': 0.0,
+                'signals': [],
+                'semantic_claim': {},
+                'diff_reality': {},
+            }
+
+        claim   = self._extract_claim()
+        reality = self._profile_diff()
+        signals: list = []
+        mci_score = 0.0
+
+        churn_limit   = self.config.get('micro_scope_churn_limit', 50)
+        fix_ir_thresh = self.config.get('insertion_ratio_fix_threshold', 0.9)
+
+        # V_s — Scope Adequacy: micro claim but large churn
+        if claim['scope'] == 'micro' and reality['total_churn'] > churn_limit:
+            signals.append('scope_understated')
+            mci_score += 0.4
+
+        # V_o — Operation Mutation: micro claim + new structural declarations
+        if claim['scope'] == 'micro' and reality['structural_alterations'] > 0:
+            signals.append('operation_mutation')
+            mci_score += 0.3
+
+        # V_f — Hidden Component: sensitive file modified but not named in description
+        if reality['sensitive_paths'] and claim['scope'] == 'micro':
+            desc_lower = self.pr_description.lower()
+            unacknowledged = [
+                p for p in reality['sensitive_paths']
+                if not any(part.lower() in desc_lower
+                           for part in Path(p).parts[-2:] if len(part) > 2)
+            ]
+            if unacknowledged:
+                signals.append('hidden_component_modification')
+                mci_score += 0.3
+
+        # V_r — Phantom Additions: "fix" claim but diff is almost entirely additions
+        if claim['dominant_op'] == 'remedial' and reality['insertion_ratio'] > fix_ir_thresh:
+            signals.append('phantom_additions')
+            mci_score += 0.4
+
+        # V_e — Cross-stack micro claim: touches ≥3 distinct file types
+        if claim['scope'] == 'micro' and reality['ext_count'] >= 3:
+            signals.append('cross_stack_micro_claim')
+            mci_score += 0.2
+
+        # Macro scope → human reviewer advisory; no MCI penalty (attacker who
+        # claims a massive change loses the stealth advantage anyway)
+        if claim['scope'] == 'macro':
+            signals.append('macro_scope_manual_review')
+
+        mci_score = min(round(mci_score, 3), 1.0)
+
+        if mci_score >= 0.5:
+            status, is_deceptive = 'DECEPTIVE_PAYLOAD', True
+            directive = '❌ DO NOT MERGE. PR description is inconsistent with actual diff scope and structure.'
+        elif mci_score > 0.0 or 'macro_scope_manual_review' in signals:
+            status, is_deceptive = 'CAUTION_MISMATCH', False
+            directive = '⚠ REVIEW ADVISED. Partial mismatch between stated intent and diff profile.'
+        else:
+            status, is_deceptive = 'TRANSPARENT', False
+            directive = '✓ Description aligns with verified diff scope and operation type.'
+
+        return {
+            'status': status,
+            'is_deceptive': is_deceptive,
+            'matched_keyword': signals[0] if signals else None,  # backwards compat
+            'directive': directive,
+            'mci_score': mci_score,
+            'signals': signals,
+            'semantic_claim': claim,
+            'diff_reality': reality,
         }
 
 
@@ -621,12 +802,10 @@ DEFAULT_CONFIG = {
         },
     },
     "semantic": {
-        "benign_keywords": [
-            "minor fix", "minor syntax fix", "typo",
-            "formatting", "cleanup", "docs",
-            "refactor whitespace", "small tweak",
-            "cosmetic", "minor update",
-        ],
+        "enabled": True,
+        "micro_scope_churn_limit": 50,
+        "insertion_ratio_fix_threshold": 0.9,
+        "benign_keywords": [],  # legacy — kept for payloadguard.yml compat; unused by v2
     },
     "sca": {
         "fail_on_unknown": True,
@@ -976,19 +1155,32 @@ class PayloadAnalyzer:
                 critical_threshold=temporal_th["dangerous"],
             ).analyze_drift()
 
-            # LAYER 5b: SEMANTIC TRANSPARENCY
+            # LAYER 5b: SEMANTIC TRANSPARENCY (v2 — PR-MCI heuristic engine)
             semantic = SemanticTransparencyAnalyzer(
                 pr_description=pr_description,
-                actual_severity=verdict['severity'],
-                benign_keywords=self.config.semantic["benign_keywords"],
+                diffs=diffs,
+                config=self.config.semantic,
             ).analyze_transparency()
 
-            # INC-3: UNVERIFIED always flags — no PR description means L5b
-            # cannot protect against deceptive payloads regardless of diff size.
-            # SAFE + UNVERIFIED upgrades to REVIEW so the gap is visible to
-            # reviewers without blocking the PR (REVIEW exits 0).
             if semantic["status"] == "UNVERIFIED":
+                # INC-3: no PR description — cannot validate; SAFE upgrades to REVIEW
+                # so the gap is visible to reviewers without blocking the PR.
                 verdict["flags"].append("No PR description — semantic transparency unverified")
+                if verdict["status"] == "SAFE":
+                    verdict["status"] = "REVIEW"
+            elif semantic["status"] == "DECEPTIVE_PAYLOAD":
+                verdict["flags"].append(
+                    f"Semantic mismatch — description contradicts diff profile "
+                    f"(signals: {', '.join(semantic['signals'])})"
+                )
+                _escalate = {"SAFE": "CAUTION", "REVIEW": "CAUTION", "CAUTION": "DESTRUCTIVE"}
+                if verdict["status"] in _escalate:
+                    verdict["status"] = _escalate[verdict["status"]]
+            elif semantic["status"] == "CAUTION_MISMATCH":
+                verdict["flags"].append(
+                    f"Partial semantic mismatch — manual review advised "
+                    f"(signals: {', '.join(semantic['signals'])})"
+                )
                 if verdict["status"] == "SAFE":
                     verdict["status"] = "REVIEW"
 
@@ -1451,10 +1643,10 @@ def print_report(report):
 
     if 'semantic' in report:
         sem = report['semantic']
-        print(f"\n🔎 SEMANTIC TRANSPARENCY (Layer 5b)")
-        print(f"   Status: {sem['status']}")
-        if sem.get('matched_keyword'):
-            print(f"   Matched keyword: \"{sem['matched_keyword']}\"")
+        print(f"\n🔎 SEMANTIC TRANSPARENCY (Layer 5b) — {sem['status']}")
+        print(f"   MCI score: {sem.get('mci_score', 0.0):.3f}")
+        if sem.get('signals'):
+            print(f"   Signals:   {', '.join(sem['signals'])}")
         print(f"   {sem['directive']}")
 
     ap = report.get('actions_poisoning', {})
@@ -1713,13 +1905,13 @@ def format_markdown_report(report: dict) -> str:
     # ── Semantic Transparency ─────────────────────────────────────────────────
     if 'semantic' in report:
         sem = report['semantic']
-        sem_emoji = {"DECEPTIVE_PAYLOAD": "🚨", "UNVERIFIED": "⚠️"}.get(sem['status'], "✅")
+        sem_emoji = {"DECEPTIVE_PAYLOAD": "🚨", "CAUTION_MISMATCH": "⚠️", "UNVERIFIED": "⚠️"}.get(sem['status'], "✅")
         out.append("### 🔎 Semantic Transparency (Layer 5b)")
         out.append("_Compares the PR description against the verified severity. If the description uses low-impact language but the diff says otherwise, that's a deceptive payload pattern — the pattern at the centre of the April 2026 incident._")
         out.append("")
-        out.append(f"**Status:** {sem_emoji} `{sem['status']}`")
-        if sem.get('matched_keyword'):
-            out.append(f"  \n**Matched keyword:** `{sem['matched_keyword']}`")
+        out.append(f"**Status:** {sem_emoji} `{sem['status']}` &nbsp; **MCI score:** `{sem.get('mci_score', 0.0):.3f}`")
+        if sem.get('signals'):
+            out.append(f"  \n**Signals:** {', '.join(f'`{s}`' for s in sem['signals'])}")
         out.append(f"\n> {sem['directive']}")
         out.append("")
 
