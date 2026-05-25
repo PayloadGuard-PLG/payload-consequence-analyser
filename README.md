@@ -223,13 +223,27 @@ Compound staleness score: `branch_age_days × target_commits_per_day`. Raw branc
 
 ### Semantic transparency (Layer 5b)
 
-Compares the PR description against the verified severity level. If the description uses low-impact language while the structural analysis returns CRITICAL, that is a deceptive payload pattern — the same pattern present in the incident that motivated this tool.
+Compares the PR description against the actual diff profile using a three-phase heuristic engine: Linguistic Lexer → Diff Profiler → Cross-Correlation Matrix. Derives an `mci_score ∈ [0,1]` from five independent signals.
 
 | Status | Meaning |
 |---|---|
-| `TRANSPARENT` | Description accurately reflects the diff |
+| `TRANSPARENT` | Description accurately reflects the diff scope and operation type |
 | `UNVERIFIED` | No description provided |
-| `DECEPTIVE_PAYLOAD` | Description claims low impact; diff severity is HIGH or CRITICAL |
+| `CAUTION_MISMATCH` | Partial inconsistency — mci_score > 0 or macro-scope advisory |
+| `DECEPTIVE_PAYLOAD` | High-confidence mismatch — mci_score ≥ 0.5 — escalates verdict |
+
+**Signals:**
+
+| Signal | Trigger | MCI |
+|---|---|---|
+| `scope_understated` | Micro-scope language ("minor", "typo", "cleanup") with total churn > 50 lines | +0.4 |
+| `operation_mutation` | Micro-scope language with structural additions (new functions or classes) in diff | +0.3 |
+| `hidden_component_modification` | Sensitive file (auth, workflow, manifest, Dockerfile, schema) in diff not named in description | +0.3 |
+| `phantom_additions` | Remedial claim ("fix", "patch", "resolve") with insertion ratio > 90% | +0.4 |
+| `cross_stack_micro_claim` | Micro-scope language touching ≥ 3 distinct file types | +0.2 |
+| `macro_scope_manual_review` | Macro-scope language ("overhaul", "architectural", "rewrite", "comprehensive") — advisory only | none |
+
+`DECEPTIVE_PAYLOAD` escalates the verdict one step (SAFE→CAUTION, REVIEW→CAUTION, CAUTION→DESTRUCTIVE). `CAUTION_MISMATCH` escalates SAFE→REVIEW only. No description (`UNVERIFIED`) escalates SAFE→REVIEW.
 
 ---
 
@@ -260,11 +274,8 @@ actions:
     - my-org/custom-deploy-action
 
 semantic:
-  benign_keywords:
-    - minor fix
-    - typo
-    - formatting
-    - cleanup
+  micro_scope_churn_limit: 50          # V_s: churn threshold for micro-scope mismatch
+  insertion_ratio_fix_threshold: 0.9   # V_r: insertion ratio for phantom additions
 ```
 
 ### SCA (Layer 2b)
@@ -378,9 +389,10 @@ PAYLOADGUARD ANALYSIS: codex-suggestion → main
    Status: DANGEROUS   Drift score: 3120.0
    Target velocity: 10.0 commits/day
 
-🔎 SEMANTIC TRANSPARENCY (Layer 5b)
-   Status: DECEPTIVE_PAYLOAD
-   Matched keyword: "minor syntax fix"
+🔎 SEMANTIC TRANSPARENCY (Layer 5b) — DECEPTIVE_PAYLOAD
+   MCI score: 0.700
+   Signals:   scope_understated, operation_mutation
+   ❌ DO NOT MERGE. PR description is inconsistent with actual diff scope and structure.
 
 🔍 VERDICT: DESTRUCTIVE [CRITICAL]
    ❌ DO NOT MERGE — This would catastrophically alter the codebase
@@ -424,7 +436,7 @@ The test suite is the contract. Before submitting a PR:
 python -m pytest test_analyzer.py -v
 ```
 
-All 194 tests must pass. New detection signals require corresponding test coverage in `TestGitHubActionsPoisoningScanning` (Layer 2c) or the relevant test class for other layers.
+All 236 tests must pass. New detection signals require corresponding test coverage in the relevant test class for the layer being extended.
 
 Open findings are tracked in `AUDIT_LOG.md`. Check there before opening a duplicate issue.
 
