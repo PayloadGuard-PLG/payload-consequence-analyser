@@ -1408,6 +1408,10 @@ class PayloadAnalyzer:
             ext = Path(path).suffix.lower()
             if ext in _CONTENT_SCAN_CODE_EXTENSIONS or ext in _CONTENT_BINARY_EXTENSIONS:
                 continue
+            # Workflow files are handled exclusively by L2c (_scan_github_actions_poisoning)
+            # to prevent double-counting scores from the same file.
+            if isinstance(path, str) and re.search(_ACTIONS_WORKFLOW_PATTERN, path):
+                continue
             try:
                 content = d.b_blob.data_stream.read().decode('utf-8', errors='replace')
             except Exception:
