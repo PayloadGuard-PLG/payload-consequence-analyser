@@ -2,6 +2,84 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-05-26 — OIDC Typosquat Detection: CRITICAL Signal + Megalodon Simulation
+
+Upgraded OIDC elevation detection to distinguish typosquatted consumers from legitimately-absent consumers. Added Megalodon full-chain simulation to the test harness, updated docs to reflect the expanded 33-branch suite, and verified the PLG merge gate blocks DESTRUCTIVE PRs via branch protection.
+
+### Commits (analyser)
+
+- `5d631c4` — feat: add typosquatted OIDC action detection as CRITICAL (merged via PR #37 to main)
+
+### PRs
+
+- **#37** (analyser) — OIDC typosquat detection as CRITICAL. Merged.
+- **#56** (harness) — MS01 Megalodon simulation. Open (scan target — do not merge).
+
+---
+
+### OIDC Typosquat Detection (`oidc_elevation_typosquatted`)
+
+**Before:** The OIDC elevation check used exact-match against `_SAFE_OIDC_CONSUMERS_DEFAULT`. A typosquatted consumer like `aws-actions-unofficial/configure-aws-credentials` fell through to `oidc_elevation_no_consumer` (HIGH +3 → CAUTION). Identical scoring whether the consumer was simply missing or deliberately typosquatted — detection was correct but severity was wrong.
+
+**After:** Two-stage check with three new symbols:
+
+| Symbol | Purpose |
+|---|---|
+| `_SAFE_OIDC_PREFIXES` | Prefix set: `aws-actions/`, `google-github-actions/`, `azure/` |
+| `_is_oidc_consumer_legitimate(action)` | Returns True if action starts with a known-safe full prefix |
+| `_is_oidc_consumer_typosquatted(action)` | Returns True if action resembles a safe prefix but isn't in the safe set (mutation patterns: `aws-actions-`, `aws-action/`, `google-github-actions-`, `google-github-action/`, `azure-login`) |
+
+Decision tree (inside `_scan_github_actions_poisoning`):
+1. `id-token: write` present?
+2. Any `uses:` action with `_is_oidc_consumer_legitimate()`? → suppress (benign consumer found)
+3. Any action with `_is_oidc_consumer_typosquatted()`? → `oidc_elevation_typosquatted` **CRITICAL** (+5 → DESTRUCTIVE)
+4. Otherwise → `oidc_elevation_no_consumer` HIGH (+3 → CAUTION) unchanged
+
+`oidc_elevation_typosquatted` added to `critical_types` set — causes the workflow flag to be CRITICAL and pushes score to 5+.
+
+**Test coverage:** +2 new tests:
+- `test_typosquatted_oidc_action_detected_as_critical` — end-to-end: workflow diff with `aws-actions-unofficial/` → `oidc_elevation_typosquatted` signal + CRITICAL severity on workflow result
+- `test_typosquat_detection_patterns` — unit test of `_is_oidc_consumer_typosquatted` with 6 true positives (`aws-actions-unofficial/`, `google-github-actions-fork/`, `azure-login/`, etc.) and 5 true negatives (`aws-actions/`, `google-github-actions/`, `azure/login`, etc.)
+
+Existing test `test_typosquatted_oidc_action_fails_legitimacy_check` updated: `oidc_elevation_no_consumer` → `oidc_elevation_typosquatted` (verdict for typosquatted consumer changed CAUTION→DESTRUCTIVE).
+
+---
+
+### AW03 Verdict Change: CAUTION → DESTRUCTIVE
+
+`adversarial/workflow-typosquatted-oidc` (`aws-actions-unofficial/configure-aws-credentials`) previously returned CAUTION because the existing `oidc_elevation_no_consumer` signal treated typosquatted and absent consumers identically at HIGH severity. With the new `oidc_elevation_typosquatted` CRITICAL signal, AW03 now returns DESTRUCTIVE. `test_cases.json` updated: `expected_verdict` CAUTION→DESTRUCTIVE, `expected_exit_code` 1→2, `signal_type` `oidc_elevation_no_consumer`→`oidc_elevation_typosquatted`, `signal_severity` HIGH→CRITICAL.
+
+---
+
+### MS01: Megalodon Full-Chain Adversarial Simulation
+
+New test case: `test/megalodon-simulation` — a single workflow (`megalodon-sim.yml`) that fires all four CRITICAL/HIGH L2c signals simultaneously, concealed as a routine "CI Pipeline Update" PR.
+
+| Signal | Pattern | Severity |
+|---|---|---|
+| `forged_bot_author` | `git config user.name "build-bot"` | HIGH |
+| `base64_payload` | `echo <20+ B64 chars> \| base64 -d \| bash` | CRITICAL |
+| `credential_harvest` | `curl http://169.254.169.254/...` + `env \| grep TOKEN` | CRITICAL |
+| `oidc_elevation_typosquatted` | `id-token: write` + `aws-actions-unofficial/` | CRITICAL |
+
+Verdict: DESTRUCTIVE. Semantic layer (L5b) returns DECEPTIVE_PAYLOAD (benign description "routine CI pipeline update" vs CRITICAL actual payload). Both `megalodon-report.md` and `megalodon-report.json` generated and committed as evidence artefacts on the branch.
+
+Registered as MS01 in `tools/test_cases.json` with `temporal_group: stable`, `expected_verdict: DESTRUCTIVE`, `expected_exit_code: 2`.
+
+---
+
+### HARNESS.md Sync
+
+Stale count corrected: 18 → 33 permanent branches. Category table updated: adversarial 9→14, workflow-security 3→10. Test case matrix expanded with all WS01-WS07, AW01-AW05, RTA01-RTA05, and MS01 rows.
+
+---
+
+### Branch Protection Gate Verified
+
+PLG merge gate confirmed live on `payloadguard-test-harness`: "Require status checks to pass before merging" enabled with `PayloadGuard` as the required check. PR #56 (Megalodon sim) shows DESTRUCTIVE verdict → MERGE button blocked. Three check slots visible on the PR: (1) `megalodon-sim.yml` running as a real workflow (adversarial payload executes), (2) PLG workflow scan, (3) PLG GitHub App Check Run badge — all driven by the same analysis result.
+
+---
+
 ## 2026-05-25 — L5b v2: PR-MCI Heuristic Semantic Transparency Engine
 
 Replaced the 10-keyword substring matcher with a three-phase heuristic engine based on the PR-MCI academic framework (CodeFuse-CommitEval + 23,247-PR agent study). Pure Python stdlib, zero new dependencies, sub-second.
