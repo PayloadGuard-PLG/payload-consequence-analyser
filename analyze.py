@@ -644,7 +644,7 @@ class SemanticTransparencyAnalyzer:
                 dominant_op = op_name
                 break
 
-        return {'scope': scope, 'dominant_op': dominant_op, 'raw_tokens': raw}
+        return {'scope': scope, 'dominant_op': dominant_op, 'raw_tokens': sorted(raw)}
 
     # ── Phase 2: Diff Profiler ────────────────────────────────────────────────
 
