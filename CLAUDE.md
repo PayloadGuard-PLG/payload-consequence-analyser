@@ -2,8 +2,8 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ`
-- **Status:** v1.2.0 live on main. Phase 2 Stage 1+2+3a+3b FULLY VERIFIED on real hardware (WSL2, kernel 6.6.114.1-microsoft-standard-WSL2, Windows 11).
+- **Branch for next work:** create new branch from main for next sprint (RTA02 or INC-3)
+- **Status:** v1.2.0 live on main. PR #62 merged (`claude/oidc-typosquat-detection-UBCOJ`). Phase 2 Stage 1+2+3a+3b fully shipped and verified. Main is clean.
 - **Phase 2 Stage 3b (block mode + egress allowlist) — VERIFIED on real hardware:**
   - Smoke test PASSED: all 4 event types captured (execve, egress_connect, ptrace_attach, procmem_open).
   - Three PC-specific fixes applied:
