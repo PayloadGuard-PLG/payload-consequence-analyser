@@ -2523,5 +2523,268 @@ class TestSemanticTransparencyV2(unittest.TestCase):
             self.assertIn(key, result)
 
 
+class TestWorkflowRemediation(unittest.TestCase):
+    """Stage 1 auto-remediation: mutable action tag → immutable SHA pinning."""
+
+    def setUp(self):
+        from remediate import WorkflowRemediator, RemediationTarget
+        self.WorkflowRemediator = WorkflowRemediator
+        self.RemediationTarget = RemediationTarget
+        self.remediator = WorkflowRemediator(token='ghp_fake', cache_path='/tmp/pg-test-cache.json')
+        # Start each test with a clean cache
+        self.remediator._cache = {}
+
+    # --- _extract_mutable_refs ---
+
+    def test_already_pinned_sha_skipped(self):
+        content = "steps:\n  - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd\n"
+        targets = self.remediator._extract_mutable_refs('.github/workflows/ci.yml', content)
+        self.assertEqual(targets, [])
+
+    def test_mutable_tag_detected(self):
+        content = "steps:\n  - uses: actions/checkout@v4\n"
+        targets = self.remediator._extract_mutable_refs('.github/workflows/ci.yml', content)
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].action, 'actions/checkout')
+        self.assertEqual(targets[0].current_ref, 'v4')
+        self.assertEqual(targets[0].original_uses, 'actions/checkout@v4')
+
+    def test_local_path_ref_skipped(self):
+        content = "steps:\n  - uses: ./.github/actions/my-action\n"
+        targets = self.remediator._extract_mutable_refs('.github/workflows/ci.yml', content)
+        self.assertEqual(targets, [])
+
+    def test_ref_without_at_sign_skipped(self):
+        content = "steps:\n  - uses: actions/checkout\n"
+        targets = self.remediator._extract_mutable_refs('.github/workflows/ci.yml', content)
+        self.assertEqual(targets, [])
+
+    def test_first_party_action_flagged_as_first_party(self):
+        content = "steps:\n  - uses: actions/setup-python@v5\n"
+        targets = self.remediator._extract_mutable_refs('.github/workflows/ci.yml', content)
+        self.assertEqual(len(targets), 1)
+        self.assertTrue(targets[0].is_first_party)
+
+    def test_third_party_action_not_first_party(self):
+        content = "steps:\n  - uses: aws-actions/configure-aws-credentials@v4\n"
+        targets = self.remediator._extract_mutable_refs('.github/workflows/ci.yml', content)
+        self.assertEqual(len(targets), 1)
+        self.assertFalse(targets[0].is_first_party)
+
+    def test_duplicate_refs_deduplicated(self):
+        content = (
+            "steps:\n"
+            "  - uses: actions/checkout@v4\n"
+            "  - uses: actions/checkout@v4\n"
+        )
+        targets = self.remediator._extract_mutable_refs('.github/workflows/ci.yml', content)
+        self.assertEqual(len(targets), 1)
+
+    def test_step_name_tracked(self):
+        content = (
+            "steps:\n"
+            "  - name: Checkout code\n"
+            "    uses: actions/checkout@v4\n"
+        )
+        targets = self.remediator._extract_mutable_refs('.github/workflows/ci.yml', content)
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].step_name, 'Checkout code')
+
+    def test_multiple_distinct_refs_all_detected(self):
+        content = (
+            "steps:\n"
+            "  - uses: actions/checkout@v4\n"
+            "  - uses: actions/setup-python@v5\n"
+        )
+        targets = self.remediator._extract_mutable_refs('.github/workflows/ci.yml', content)
+        self.assertEqual(len(targets), 2)
+
+    # --- resolve_sha ---
+
+    def test_already_sha_returns_none(self):
+        result = self.remediator.resolve_sha('actions/checkout', 'a' * 40)
+        self.assertIsNone(result)
+
+    def test_resolve_lightweight_tag(self):
+        fake_response = json.dumps({
+            'object': {'type': 'commit', 'sha': 'b' * 40}
+        }).encode()
+        with patch('urllib.request.urlopen') as mock_open:
+            ctx = MagicMock()
+            ctx.__enter__ = MagicMock(return_value=ctx)
+            ctx.__exit__ = MagicMock(return_value=False)
+            ctx.read.return_value = fake_response
+            mock_open.return_value = ctx
+            result = self.remediator.resolve_sha('actions/checkout', 'v4')
+        self.assertIsNotNone(result)
+        self.assertEqual(result.resolved_sha, 'b' * 40)
+        self.assertEqual(result.ref_type, 'tag')
+        self.assertEqual(result.error, '')
+
+    def test_resolve_annotated_tag_dereferences(self):
+        # First call returns annotated tag object; second dereferences to commit
+        responses = [
+            json.dumps({'object': {'type': 'tag', 'sha': 'tag_sha_000'}}).encode(),
+            json.dumps({'object': {'type': 'commit', 'sha': 'c' * 40}}).encode(),
+        ]
+        call_count = [0]
+
+        def fake_urlopen(req, timeout=None):
+            ctx = MagicMock()
+            ctx.__enter__ = MagicMock(return_value=ctx)
+            ctx.__exit__ = MagicMock(return_value=False)
+            ctx.read.return_value = responses[call_count[0]]
+            call_count[0] += 1
+            return ctx
+
+        with patch('urllib.request.urlopen', side_effect=fake_urlopen):
+            result = self.remediator.resolve_sha('actions/checkout', 'v4.1.0')
+
+        self.assertEqual(call_count[0], 2)
+        self.assertEqual(result.resolved_sha, 'c' * 40)
+        self.assertEqual(result.ref_type, 'tag')
+
+    def test_branch_ref_warns_and_not_tag(self):
+        import urllib.error
+        # First call: 404 (tag not found)
+        # Second call: branch found
+        branch_sha = 'd' * 40
+        responses = [
+            json.dumps({'object': {'sha': branch_sha}}).encode(),
+        ]
+
+        def fake_urlopen(req, timeout=None):
+            url = req.get_full_url()
+            if '/git/ref/tags/' in url:
+                raise urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+            ctx = MagicMock()
+            ctx.__enter__ = MagicMock(return_value=ctx)
+            ctx.__exit__ = MagicMock(return_value=False)
+            ctx.read.return_value = responses[0]
+            return ctx
+
+        with patch('urllib.request.urlopen', side_effect=fake_urlopen):
+            result = self.remediator.resolve_sha('actions/checkout', 'main')
+
+        self.assertEqual(result.ref_type, 'branch')
+        self.assertIn('branch', result.error.lower())
+        self.assertEqual(result.resolved_sha, branch_sha)
+
+    def test_sha_cache_prevents_duplicate_api_calls(self):
+        fake_response = json.dumps({
+            'object': {'type': 'commit', 'sha': 'e' * 40}
+        }).encode()
+        call_count = [0]
+
+        def fake_urlopen(req, timeout=None):
+            call_count[0] += 1
+            ctx = MagicMock()
+            ctx.__enter__ = MagicMock(return_value=ctx)
+            ctx.__exit__ = MagicMock(return_value=False)
+            ctx.read.return_value = fake_response
+            return ctx
+
+        with patch('urllib.request.urlopen', side_effect=fake_urlopen):
+            self.remediator.resolve_sha('actions/checkout', 'v4')
+            self.remediator.resolve_sha('actions/checkout', 'v4')
+
+        self.assertEqual(call_count[0], 1)
+
+    # --- patch_workflow ---
+
+    def test_yaml_patch_substitutes_sha(self):
+        content = "steps:\n  - uses: actions/checkout@v4\n"
+        t = self.RemediationTarget(
+            file='.github/workflows/ci.yml',
+            step_name='Checkout',
+            action='actions/checkout',
+            current_ref='v4',
+            resolved_sha='a' * 40,
+            original_uses='actions/checkout@v4',
+            ref_type='tag',
+        )
+        patched = self.remediator.patch_workflow(content, [t])
+        self.assertIn('a' * 40, patched)
+        self.assertIn('# v4', patched)
+        self.assertNotIn('@v4', patched)
+
+    def test_patch_preserves_other_lines(self):
+        content = (
+            "name: CI\n"
+            "on: [push]\n"
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "      - run: echo hello\n"
+        )
+        t = self.RemediationTarget(
+            file='ci.yml', step_name='',
+            action='actions/checkout', current_ref='v4',
+            resolved_sha='a' * 40, original_uses='actions/checkout@v4',
+            ref_type='tag',
+        )
+        patched = self.remediator.patch_workflow(content, [t])
+        self.assertIn('name: CI', patched)
+        self.assertIn('run: echo hello', patched)
+
+    def test_patch_branch_ref_not_substituted(self):
+        content = "steps:\n  - uses: actions/checkout@main\n"
+        t = self.RemediationTarget(
+            file='ci.yml', step_name='',
+            action='actions/checkout', current_ref='main',
+            resolved_sha='f' * 40, original_uses='actions/checkout@main',
+            ref_type='branch',
+        )
+        patched = self.remediator.patch_workflow(content, [t])
+        # Branch refs must NOT be substituted — they remain mutable regardless
+        self.assertIn('@main', patched)
+
+    def test_patch_no_op_when_no_subs(self):
+        content = "steps:\n  - uses: actions/checkout@" + 'a' * 40 + "\n"
+        patched = self.remediator.patch_workflow(content, [])
+        self.assertEqual(content, patched)
+
+    # --- mutable_tag_warnings in analyze.py report ---
+
+    def test_mutable_tag_warnings_key_present_in_report(self):
+        from analyze import _scan_mutable_action_refs
+        # Build a fake diff with a mutable ref
+        blob = MagicMock()
+        blob.data_stream.read.return_value = (
+            b"steps:\n  - uses: actions/checkout@v4\n"
+        )
+        d = MagicMock()
+        d.change_type = 'A'
+        d.b_path = '.github/workflows/ci.yml'
+        d.b_blob = blob
+        result = _scan_mutable_action_refs([d])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]['action'], 'actions/checkout')
+        self.assertEqual(result[0]['ref'], 'v4')
+
+    def test_mutable_tag_warnings_skips_sha_pinned(self):
+        from analyze import _scan_mutable_action_refs
+        sha = 'a' * 40
+        blob = MagicMock()
+        blob.data_stream.read.return_value = (
+            f"steps:\n  - uses: actions/checkout@{sha}\n".encode()
+        )
+        d = MagicMock()
+        d.change_type = 'A'
+        d.b_path = '.github/workflows/ci.yml'
+        d.b_blob = blob
+        result = _scan_mutable_action_refs([d])
+        self.assertEqual(result, [])
+
+    def test_mutable_tag_warnings_skips_deleted_diffs(self):
+        from analyze import _scan_mutable_action_refs
+        d = MagicMock()
+        d.change_type = 'D'
+        d.b_path = '.github/workflows/ci.yml'
+        result = _scan_mutable_action_refs([d])
+        self.assertEqual(result, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -31,6 +31,12 @@ inputs:
     description: GitHub App installation ID for Check Run posting (optional)
     required: false
     default: ""
+  auto-remediate:
+    description: >
+      Open a PR replacing mutable action tags with pinned SHAs.
+      Requires pull-requests: write. Never commits directly to the scanned branch.
+    required: false
+    default: "false"
 
 outputs:
   exit-code:
@@ -126,6 +132,16 @@ runs:
               body,
             });
           }
+
+    - name: Auto-remediate mutable action tags
+      if: inputs.auto-remediate == 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.repo-token }}
+        JSON_REPORT_PATH: ${{ steps.scan.outputs.json_report_path }}
+        PR_BASE_BRANCH: ${{ github.base_ref }}
+        REPO_FULL_NAME: ${{ github.repository }}
+      run: python "${{ github.action_path }}/remediate.py"
 
     - name: Post Check Run
       if: always()

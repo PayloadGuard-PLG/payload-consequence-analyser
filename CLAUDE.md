@@ -2,17 +2,24 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** new branch off main
-- **Status:** v1.1.0 live on main. L5b v2 (PR #48), README exit code fix (PR #49), L2/L2c double-scoring fix (PR #51) all merged. GitHub App fully operational on both repos — Check Run 404 resolved. Merge gate live and verified on analyser and harness.
-- **Next priority:** Layer isolation (fast gate / deep forensics two-job split in action.yml). Then: RTA-01 (multi-step env var, YAML-aware parsing), RTA-03 (unpinned action advisory), refactoring sprint.
-- **Open findings:** One documented bypass: RTA02 (`rta/schedule-curl-exfil`) — schedule + curl POST body with secret, URL on continuation line evades all credential_harvest patterns. Needs multiline-aware curl body pattern.
-- **Deferred:** RTA-01 (multi-step env var, requires YAML-aware parsing), RTA-03 (unpinned action advisory), refactoring sprint (split `analyze.py` into focused modules), clean up empty ci-trigger commit `ab5ddcf` on main.
-- **L5b v2 signals:** V_s scope_understated (+0.4), V_o operation_mutation (+0.3), V_f hidden_component_modification (+0.3), V_r phantom_additions (+0.4), V_e cross_stack_micro_claim (+0.2). macro_scope → CAUTION_MISMATCH advisory (no MCI penalty). mci_score ≥ 0.5 → DECEPTIVE_PAYLOAD.
-- **L2/L2c fix (PR #51):** `_scan_added_file_content` now skips `.github/workflows/` files — L2c is the exclusive handler. Prevents double-scoring (was: WS03 dormant-trigger scoring +7 DESTRUCTIVE instead of +3 CAUTION).
-- **Test suite:** `python -m pytest test_analyzer.py -v` → 236 pass, 7 skip (crypto/tree-sitter env).
-- **GitHub App:** App ID 3856270, Installation ID 135500427. Working on both repos. Both repos confirmed in installation scope. `continue-on-error: true` on harness PayloadGuard Scan step (kept — harness must collect results even from DESTRUCTIVE test branches).
-- **Harness CI:** Operational. SHA pinned to `f954714486e07bd0d41cfb348c7d1614b0c09c3a` (L5b v2 + L2/L2c fix). Regression runner: `workflow_dispatch` + schedule (02:00/10:00/18:00 UTC daily, full mode). `REGRESSION_PAT` secret set. 38 test cases, exit codes corrected (PR #54 merged).
-- **Harness branches:** 38 test cases (main + session + 36 test/rta branches).
+- **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ` (Phase 2 work continues here)
+- **Status:** v1.2.0 live on main. Phase 2 Stage 1+2 in progress on working branch.
+- **Phase 2 Stage 1 (auto-remediation) — SHIPPED on branch:**
+  - `remediate.py`: `WorkflowRemediator` class — scans `uses:` refs, resolves lightweight+annotated tags to SHAs via GitHub API, patches YAML round-trip-safely, opens new PR (never direct commit). SHA cache at `$RUNNER_TEMP/pg-sha-cache.json`.
+  - `analyze.py`: `_scan_mutable_action_refs()` function + `mutable_tag_warnings` key in JSON report (advisory, no score impact).
+  - `action.yml`: `auto-remediate` input (default `false`); new step runs `remediate.py` when enabled.
+  - `requirements.txt`: `ruamel.yaml>=0.18.0`, `z3-solver>=4.12.0`, `pytest-timeout>=2.0`.
+  - `test_analyzer.py`: 21 new `TestWorkflowRemediation` tests.
+- **Phase 2 Stage 2 (Z3 proofs) — SHIPPED on branch:**
+  - `tests/proofs/test_z3_properties.py`: P1–P10, all `unsat` in <0.1 s.
+  - `pyproject.toml`: `proof` marker registered.
+  - Run: `pytest tests/proofs/ -m proof -v --timeout=30`
+- **Test suite:** `python -m pytest test_analyzer.py tests/proofs/ -q --timeout=30` → 267 pass, 7 skip.
+- **Phase 2 Stage 3 (eBPF):** NOT STARTED. Requires WSL2 kernel rebuild (`CONFIG_DEBUG_INFO_BTF=y`), Go toolchain, `cilium/ebpf + bpf2go`. Plan in `/root/.claude/plans/megalodon-test-case-plan-agile-comet.md`.
+- **Next priority (Stage 3):** Set up WSL2 eBPF dev environment → write `agent/probe.c` → `agent/main.go` → add runtime/ harness track (RT01-RT03).
+- **Open findings:** RTA02 bypass still open (multiline curl body), INC-1/INC-4 (added file content scan).
+- **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
+- **Harness CI:** 38 test cases, regression runner operational. Pinned SHA `32014117afeb5c99f51045b3df0d7ba27e0a187a`.
 - **Blockers:** None.
 
 ---
