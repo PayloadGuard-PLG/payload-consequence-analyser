@@ -48,18 +48,20 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 
 ## Architecture
 
-### Five-Layer Analysis (`analyze.py`)
+### Nine-Layer Analysis (`analyze.py`)
 
 | Layer | What it does | Key class/function |
 |---|---|---|
 | L1 Surface | File/line counts, permission changes, symlinks | `PayloadAnalyzer.analyze()` |
-| L2 Forensic | Critical path regex matching on deleted files | `CRITICAL_PATH_PATTERNS`, `_SECURITY_CRITICAL_PATTERNS` |
+| L2 Forensic | Critical path regex matching on deleted files + added file content scan | `CRITICAL_PATH_PATTERNS`, `_scan_added_file_content()` |
 | L2b SCA | Manifest diff scanning vs `allowlist.yml` (opt-in) | `_parse_added_packages()`, `_load_allowlist()` |
+| L2c Actions Poisoning | Added/modified workflow files: base64, credential harvest, OIDC elevation, typosquatted consumers | `_scan_github_actions_poisoning()` |
 | L3 Consequence | Severity scoring → SAFE/REVIEW/CAUTION/DESTRUCTIVE | `_assess_consequence()` |
 | L4 Structural | AST diff — named class/function/constant deletions | `StructuralPayloadAnalyzer` |
 | L4b Complexity | McCabe V(G) advisory for newly added Python fns | inside `analyze_structural_drift()` |
 | L5a Temporal | Branch age × target velocity drift score | `TemporalDriftAnalyzer` |
-| L5b Semantic | PR description vs actual severity (deceptive payload) | `SemanticTransparencyAnalyzer` |
+| L5b Semantic | PR-MCI three-phase heuristic — deceptive description detection | `SemanticTransparencyAnalyzer` |
+| L5c Runtime | eBPF tracepoint agent — execve/connect/ptrace/procmem, audit+block | `agent/`, `_load_runtime_events()` |
 
 ### Key Files
 
@@ -67,8 +69,13 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 analyze.py           — core analyser, all layers, CLI entry point
 structural_parser.py — tree-sitter AST node extraction (Python/JS/TS/Go/Rust/Ruby)
 post_check_run.py    — posts GitHub Check Run via App JWT (RS256)
+remediate.py         — auto-remediation: resolves action tags to SHAs, opens PR
 action.yml           — GitHub Action composite wrapper
-test_analyzer.py     — pytest suite (151 tests)
+agent/               — eBPF runtime defence agent (Go + cilium/ebpf)
+agent/bpf/probe.c    — 4 tracepoint probes + pg_config/egress_allow_ipv4 BPF maps
+scripts/pc-smoke-test.sh — one-command build+verify on real kernel
+test_analyzer.py     — pytest suite (267 tests)
+tests/proofs/        — Z3 formal property proofs (P1–P10)
 allowlist.yml        — SCA package allowlist (user-created, not in repo by default)
 payloadguard.yml     — per-repo threshold config (user-created, not in repo by default)
 AUDIT_LOG.md         — architectural review findings + incident reports
@@ -80,8 +87,11 @@ DEVLOG.md            — chronological session log
 
 - Structural CRITICAL: +5
 - Security file deleted: +5
+- Actions poisoning CRITICAL signal: +5
 - Unverified dependency (SCA): +3 per unique package
+- Actions poisoning HIGH signal: +3
 - Critical path deleted: +2
+- Added file content flags (CI triggers/shell): +2 per match, capped at +4
 - Line/file/ratio flags: up to +4 (capped, correlated dims)
 - Branch age: +1/+2/+3
 - Thresholds: score >=5 -> DESTRUCTIVE, >=3 -> CAUTION, >=1 -> REVIEW
@@ -108,11 +118,13 @@ sca:
 `__version__ = "1.2.0"` (analyze.py:29)
 
 ### v1.2.0 changes
-- Feature: L2c GitHub Actions poisoning detection — base64 payload, credential harvest, dormant trigger, forged bot author, OIDC elevation, pull_request_target signals
+- Feature: L2c GitHub Actions poisoning detection — base64 payload, credential harvest, dormant trigger, forged bot author, OIDC elevation (incl. `oidc_elevation_typosquatted` CRITICAL), pull_request_target signals
 - Feature: L5b v2 PR-MCI heuristic engine — three-phase (Linguistic Lexer → Diff Profiler → Cross-Correlation), mci_score ∈ [0,1], five signals (V_s/V_o/V_f/V_r/V_e)
+- Feature: L5c eBPF runtime defence agent — 4 tracepoints, audit+block mode, egress allowlist, kernel-side `bpf_send_signal(9)`. Verified on WSL2 + GitHub Actions runners.
+- Feature: INC-1/INC-4 fix — `_scan_added_file_content()` scans added non-code files for CI triggers and shell execution patterns (+2/match, capped +4)
 - Fix: L2 content scanner now excludes `.github/workflows/` files — L2c is the exclusive handler, preventing double-scoring
 - Fix: Exit code table corrected — CAUTION exits 0, only DESTRUCTIVE exits 2
-- Test suite: 236 pass, 7 skip (+26 TestSemanticTransparencyV2 tests)
+- Test suite: 267 pass, 7 skip
 
 ### v1.1.0 changes (branch `claude/initial-setup-WO53R`)
 - Fix 1.1: Cross-file structural aggregation requires BOTH count AND ratio (was count-only)
@@ -129,15 +141,9 @@ sca:
 
 | ID | Description | Severity | Priority |
 |---|---|---|---|
-| INC-1 | Added non-code files (.txt, .md) not scanned for content -- CI trigger strings invisible | HIGH | Next sprint |
 | INC-3 | Direct push to main -> L5b returns UNVERIFIED but raises no flag | MEDIUM | Backlog |
-| INC-4 | File additions score 0 regardless of content -- rm -rf / indistinguishable from blank | HIGH | Next sprint |
-
-### INC-1/INC-4 Implementation sketch (not started)
-- New function `_scan_added_file_content(blob, path)` in `analyze.py`
-- Patterns: `[citest`, `needs-ci`, `citest commit:`, `setfacl`, `chmod`, `curl | bash`, `sudo`
-- Only fires on A-type diffs for non-code extensions
-- Adds to `content_flags` list in report, +2 score per match
+| RTA02 | Multiline curl body (YAML block scalar) evades credential harvest pattern | MEDIUM | Next sprint |
+| §2.3 | Single-branch clone / detached HEAD raises BadName exception | MEDIUM | Backlog |
 
 ---
 
@@ -177,7 +183,8 @@ The agent preflight canary will warn and exit 0 gracefully if tracepoints are un
 ## Development Rules
 
 - **Push:** `git push -u origin <branch>` — MCP push works now but PC push is equally fine
-- **CLAUDE.md is updated on every change, no exceptions.** Every code change, fix, finding, doc update, or architectural decision goes into the Handover block before the session ends. Stale handovers cause real work loss.
+- **CLAUDE.md is updated on every change, no exceptions.** Every code change, fix, finding, doc update, or architectural decision goes into the Handover block before the session ends. Stale handovers cause real work loss. This includes architecture table, key files, scoring, open findings, and version changelog — not just the Handover block.
+- **Read CLAUDE.md at session start and verify every section is current before touching code.**
 - **Tests:** Run `python -m pytest test_analyzer.py -v` before every commit -- must stay green
 - **No MCP push_files:** Confirmed broken in multiple sessions. Don't retry.
 - **Commit style:** Imperative, specific, with test count in body. See git log for examples.
