@@ -177,7 +177,7 @@ The agent preflight canary will warn and exit 0 gracefully if tracepoints are un
 ## Development Rules
 
 - **Push:** `git push -u origin <branch>` — MCP push works now but PC push is equally fine
-- **Branch:** Next sprint work on `claude/check-mcp-connection-OUqlz` (INC-1/INC-4)
+- **CLAUDE.md is updated on every change, no exceptions.** Every code change, fix, finding, doc update, or architectural decision goes into the Handover block before the session ends. Stale handovers cause real work loss.
 - **Tests:** Run `python -m pytest test_analyzer.py -v` before every commit -- must stay green
 - **No MCP push_files:** Confirmed broken in multiple sessions. Don't retry.
 - **Commit style:** Imperative, specific, with test count in body. See git log for examples.
