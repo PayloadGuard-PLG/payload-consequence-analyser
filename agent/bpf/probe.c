@@ -219,7 +219,8 @@ int trace_openat(struct sys_enter_args *ctx)
     e->ppid    = 0;
     e->blocked = 0;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
-    __builtin_memcpy(e->detail, path, sizeof(e->detail));
+    __builtin_memset(e->detail, 0, sizeof(e->detail));
+    __builtin_memcpy(e->detail, path, sizeof(path));
     bpf_ringbuf_submit(e, 0);
     return 0;
 }
