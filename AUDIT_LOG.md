@@ -372,10 +372,10 @@ The contamination was not uniform — real PayloadGuard content (test cases, exi
 
 | ID | Finding | Severity | Status |
 |---|---|---|---|
-| §INC-1 | Added non-code files not scanned for content — embedded CI trigger strings (`[citest]`, `needs-ci`) are invisible to all layers | HIGH | Open |
+| §INC-1 | Added non-code files not scanned for content — embedded CI trigger strings (`[citest]`, `needs-ci`) are invisible to all layers | HIGH | **Fixed** — `_scan_added_file_content()` in `analyze.py`; 12 tests in `TestAddedFileContentScanning` |
 | §INC-2 | AI research tool source contamination produces outputs functionally identical to deliberate injection — the mechanism is the same regardless of intent | HIGH | Open (out-of-scope for static analysis; mitigated by human review) |
 | §INC-3 | Direct push to main bypasses L5b entirely — `UNVERIFIED` is returned but no flag is raised when there is no PR context at all | MEDIUM | Open |
-| §INC-4 | File additions with no code content score 0 regardless of payload — a 100-line document containing `rm -rf /` or CI trigger strings is indistinguishable from a blank file | HIGH | Open |
+| §INC-4 | File additions with no code content score 0 regardless of payload — a 100-line document containing `rm -rf /` or CI trigger strings is indistinguishable from a blank file | HIGH | **Fixed** — same fix as INC-1; added files now score +2 per CI/shell match, capped at +4 |
 
 ### Strategic Lessons
 
@@ -392,7 +392,7 @@ After the user identified the contamination, NotebookLM reframed its own source 
 The output was committed before anyone verified it matched reality. Whether the cause is malicious or accidental, the defence is the same: verify AI-generated content against the actual codebase before committing.
 
 **5. PayloadGuard's structural gaps remain real regardless of cause.**
-§INC-1 through §INC-4 are valid findings whether the origin is a deliberate injection or an accidental hallucination. The tool cannot currently detect dangerous content in added non-code files, and direct pushes to main produce no signal.
+§INC-1 and §INC-4 are now fixed. §INC-3 (direct push to main) remains open. The tool can now detect dangerous content in added non-code files; direct pushes to main still produce no escalation signal.
 
 ### Proposed Mitigations (Future Work)
 

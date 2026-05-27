@@ -28,8 +28,8 @@
   - `remediate.py`: `WorkflowRemediator` — resolves `uses:` tags to SHAs, patches YAML, opens PR.
   - `action.yml`: `auto-remediate` input (default `false`).
 - **Test suite:** `python -m pytest test_analyzer.py tests/proofs/ -q --timeout=30` → 267 pass, 7 skip.
-- **Next priority:** INC-1/INC-4 — added file content scan (`_scan_added_file_content`). Branch: `claude/check-mcp-connection-OUqlz`.
-- **Open findings:** RTA02 bypass still open (multiline curl body), INC-1/INC-4 (added file content scan).
+- **Next priority:** RTA02 bypass (multiline curl body evades credential harvest pattern). INC-3 (direct push to main, no flag).
+- **Open findings:** RTA02 bypass (multiline curl body), INC-3 (direct push to main).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
 - **Blockers:** None.
