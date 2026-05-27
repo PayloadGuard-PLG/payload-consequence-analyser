@@ -37,6 +37,15 @@ inputs:
       Requires pull-requests: write. Never commits directly to the scanned branch.
     required: false
     default: "false"
+  runtime-mode:
+    description: >
+      eBPF runtime defence agent mode: disabled | audit | block.
+      audit emits events to pg-runtime-events.json with no blocking.
+      block terminates processes that match egress/ptrace/procmem policies.
+      Requires a runner with CONFIG_KPROBES and CONFIG_FTRACE enabled.
+      The agent degrades gracefully (exit 0) on unsupported kernels.
+    required: false
+    default: "disabled"
 
 outputs:
   exit-code:
@@ -51,6 +60,9 @@ outputs:
   verdict:
     description: "Verdict string: SAFE, REVIEW, CAUTION, or DESTRUCTIVE"
     value: ${{ steps.scan.outputs.verdict }}
+  runtime-events-path:
+    description: Path to pg-runtime-events.json (only set when runtime-mode != disabled)
+    value: ${{ steps.runtime.outputs.events_path }}
 
 runs:
   using: composite
@@ -67,6 +79,23 @@ runs:
     - name: Fetch base branch
       shell: bash
       run: git fetch origin ${{ github.base_ref }}:${{ github.base_ref }}
+
+    - name: PayloadGuard Runtime Agent
+      id: runtime
+      if: inputs.runtime-mode != 'disabled'
+      shell: bash
+      run: |
+        PG_VERSION=v2.0.0
+        ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+        EVENTS_PATH="${{ github.workspace }}/pg-runtime-events.json"
+        curl -fsSL \
+          "https://github.com/PayloadGuard-PLG/payload-consequence-analyser/releases/download/${PG_VERSION}/pg-agent-linux-${ARCH}" \
+          -o /tmp/pg-agent && chmod +x /tmp/pg-agent
+        sudo /tmp/pg-agent \
+          --mode=${{ inputs.runtime-mode }} \
+          --policy="${{ github.workspace }}/payloadguard-policy.yaml" \
+          --out="${EVENTS_PATH}" &
+        echo "events_path=${EVENTS_PATH}" >> "$GITHUB_OUTPUT"
 
     - name: Run PayloadGuard
       id: scan

@@ -1260,6 +1260,7 @@ class PayloadAnalyzer:
                     "critical": critical_deletions[:10],
                     "all": deleted_files[:30],
                 },
+                "runtime_events": _load_runtime_events(),
             }
 
         except Exception as e:
@@ -1597,6 +1598,18 @@ def _scan_mutable_action_refs(diffs) -> list:
             seen.add(raw)
             warnings.append({'file': path, 'action': action, 'ref': ref})
     return warnings
+
+
+def _load_runtime_events() -> list:
+    """Load runtime events from the eBPF agent output file (advisory, no score impact)."""
+    import json as _json
+    import os as _os
+    path = _os.environ.get("PG_RUNTIME_EVENTS_PATH", "pg-runtime-events.json")
+    try:
+        with open(path) as f:
+            return [_json.loads(line) for line in f if line.strip()]
+    except (FileNotFoundError, _json.JSONDecodeError):
+        return []
 
 
 # ==============================================================================
