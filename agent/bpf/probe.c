@@ -166,7 +166,8 @@ __attribute__((section("tracepoint/syscalls/sys_enter_ptrace"), used))
 int trace_ptrace(struct sys_enter_args *ctx)
 {
     long request = (long)ctx->args[0];
-    if (request != 16 && request != 0x4206)
+    // 0=PTRACE_TRACEME, 16=PTRACE_ATTACH, 0x4206=PTRACE_SEIZE
+    if (request != 0 && request != 16 && request != 0x4206)
         return 0;
 
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
