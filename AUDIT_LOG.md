@@ -405,6 +405,26 @@ The output was committed before anyone verified it matched reality. Whether the 
 
 ---
 
+## Implementation Findings — eBPF Runtime Agent: 2026-05-27
+
+Discovered during PC smoke test on WSL2 (kernel 6.6.114.1-microsoft-standard-WSL2, Windows 11). Not vulnerabilities — correctness bugs caught before shipping to CI runners.
+
+| ID | Finding | Component | Severity | Status | Commit |
+|---|---|---|---|---|---|
+| §BPF-1 | `rlimit.RemoveMemlock()` called after BPF canary — WSL2 EPERM causes false-negative preflight exit | `agent/preflight.go` + `agent/main.go` | HIGH | **Fixed** | `fe66363` |
+| §BPF-2 | `trace_openat`: `__builtin_memcpy(e->detail, path, sizeof(e->detail))` copies 64 bytes from 32-byte stack buffer — BPF verifier rejects at R10+7 | `agent/bpf/probe.c` | HIGH | **Fixed** | `5465809` |
+| §BPF-3 | `trace_ptrace` filter excluded `PTRACE_TRACEME` (request=0) — self-attach events silently dropped | `agent/bpf/probe.c` | MEDIUM | **Fixed** | `b473bc1` |
+
+### Detail
+
+**§BPF-1:** `preflight()` loads a minimal canary BPF program to detect kernel support. `rlimit.RemoveMemlock()` was called in `main()` after `preflight()` returned. On WSL2, the default memlock rlimit caused `EPERM` on the canary load even though `CONFIG_KPROBES=y`. The agent exited 0 silently, appearing to succeed. Fixed by moving `RemoveMemlock()` into `preflight()` immediately before the canary.
+
+**§BPF-2:** `sizeof(e->detail)` is 64 bytes; `path[32]` is a 32-byte stack buffer. Attempting to copy 64 bytes from a 32-byte source reads 32 bytes past the end of the stack allocation. The BPF verifier on kernel 6.6 flagged this as `invalid read from stack R10 off=7 size=1` (byte 39 of the copy = R10+7). Fixed: `memset` the full 64-byte detail field to zero, then `memcpy` only `sizeof(path)=32` bytes.
+
+**§BPF-3:** The original filter `request != 16 && request != 0x4206` captured `PTRACE_ATTACH` and `PTRACE_SEIZE` but not `PTRACE_TRACEME` (request=0). Smoke test fires `PTRACE_TRACEME`; no `ptrace_attach` events were emitted. Fixed by adding `request != 0` to the early-return guard.
+
+---
+
 ## Next Audit Checklist
 
 Copy this section into the next audit issue or branch PR description.

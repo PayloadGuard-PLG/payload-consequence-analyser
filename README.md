@@ -1,6 +1,6 @@
 # PayloadGuard
 
-**Version:** 1.2.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Released:** May 2026
+**Version:** 1.2.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Released:** May 2026 &nbsp;|&nbsp; **Runtime Agent:** Verified on WSL2 / Ubuntu 22.04+
 
 PayloadGuard is a static analysis tool for pull requests. It scans the full diff before a merge and produces a forensic verdict on the risk of the changeset — catching destructive, deceptive, or malicious contributions that code review alone is likely to miss.
 
@@ -22,6 +22,7 @@ PayloadGuard analyses eight dimensions of risk across every PR:
 | L4 — Structural Drift | AST-level diff: which named classes, functions, and constants were actually removed |
 | L5a — Temporal Drift | Branch age multiplied by target repo velocity — a quantified measure of semantic divergence |
 | L5b — Semantic Transparency | Whether the PR description matches what the diff actually does |
+| L5c — Runtime Agent | eBPF tracepoint agent (audit/block mode): execve, egress connect, ptrace, /proc/mem — fires on the runner alongside the static scan. Advisory; no score impact. Requires kernel ≥5.8 with `CONFIG_KPROBES=y`. |
 
 Verdicts: **SAFE** · **REVIEW** · **CAUTION** · **DESTRUCTIVE**
 

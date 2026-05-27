@@ -3,39 +3,35 @@
 ## Handover (update this block at the end of every session)
 
 - **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ`
-- **Status:** v1.2.0 live on main. Phase 2 Stage 1+2+3a shipped on working branch.
-- **Phase 2 Stage 1 (auto-remediation) — SHIPPED on branch:**
-  - `remediate.py`: `WorkflowRemediator` class — scans `uses:` refs, resolves lightweight+annotated tags to SHAs via GitHub API, patches YAML round-trip-safely, opens new PR (never direct commit). SHA cache at `$RUNNER_TEMP/pg-sha-cache.json`.
-  - `analyze.py`: `_scan_mutable_action_refs()` function + `mutable_tag_warnings` key in JSON report (advisory, no score impact).
-  - `action.yml`: `auto-remediate` input (default `false`); new step runs `remediate.py` when enabled.
-  - `requirements.txt`: `ruamel.yaml>=0.18.0`, `z3-solver>=4.12.0`, `pytest-timeout>=2.0`.
-  - `test_analyzer.py`: 21 new `TestWorkflowRemediation` tests.
-- **Phase 2 Stage 2 (Z3 proofs) — SHIPPED on branch:**
-  - `tests/proofs/test_z3_properties.py`: P1–P10, all `unsat` in <0.1 s.
-  - `pyproject.toml`: `proof` marker registered.
-  - Run: `pytest tests/proofs/ -m proof -v --timeout=30`
-- **Phase 2 Stage 3b (block mode + egress allowlist) — SHIPPED on branch:**
-  - `agent/bpf/probe.c`: two new BPF maps (`pg_config`, `egress_allow_ipv4`) + block logic in `trace_connect` via `bpf_send_signal(9)`. Event struct gains `blocked` field.
-  - `agent/main.go`: populates `pg_config` (mode) and `egress_allow_ipv4` (IPv4 from policy) into BPF maps at startup. Reports `blocked` in JSON events. Removed Go-side block skip.
-  - `agent/events.go`: `Blocked uint8` + `Pad [3]uint8` fields added to match C struct.
-  - `scripts/pc-smoke-test.sh`: one-command build+run+verify on real kernel. Fires RT01/02/03 events and checks all 4 event types captured.
-  - **Test on PC:** `sudo bash scripts/pc-smoke-test.sh` — needs `CONFIG_KPROBES=y`.
-- **Phase 2 Stage 3a (eBPF agent skeleton) — SHIPPED on branch:**
-  - `agent/bpf/probe.c`: 4 tracepoint probes (execve/connect/ptrace/openat), linux-headers approach (no CO-RE/BTF needed), `BPF_MAP_TYPE_RINGBUF`.
-  - `agent/main.go`: `//go:generate bpf2go` directive, ring buffer event loop, SIGTERM handler, `--mode disabled|audit|block` flag, `--dry-run` flag.
-  - `agent/preflight.go`: kernel ≥5.8 check + BPF canary load (gracefully exits 0 if tracepoints unavailable).
-  - `agent/events.go`, `agent/attach.go`, `agent/policy.go`: event types, tracepoint attacher, YAML egress allowlist.
-  - `agent/go.mod`: `module github.com/payloadguard-plg/pg-agent`, cilium/ebpf v0.21.0.
-  - `agent/Makefile`: generate + build-amd64 + build-arm64.
-  - `dist/pg-agent-linux-amd64` (6.9 MB) + `dist/pg-agent-linux-arm64` (6.6 MB): compiled binaries (not committed).
+- **Status:** v1.2.0 live on main. Phase 2 Stage 1+2+3a+3b FULLY VERIFIED on real hardware (WSL2, kernel 6.6.114.1-microsoft-standard-WSL2, Windows 11).
+- **Phase 2 Stage 3b (block mode + egress allowlist) — VERIFIED on real hardware:**
+  - Smoke test PASSED: all 4 event types captured (execve, egress_connect, ptrace_attach, procmem_open).
+  - Three PC-specific fixes applied:
+    1. `agent/preflight.go`: `rlimit.RemoveMemlock()` moved before canary load — WSL2 fails canary with EPERM if memlock still in effect.
+    2. `agent/bpf/probe.c` `trace_openat`: `__builtin_memcpy` size corrected from `sizeof(e->detail)=64` to `sizeof(path)=32` — BPF verifier caught out-of-bounds read at R10+7.
+    3. `agent/bpf/probe.c` `trace_ptrace`: `PTRACE_TRACEME` (request=0) added to the filter alongside `PTRACE_ATTACH` (16) and `PTRACE_SEIZE` (0x4206).
+  - `agent/bpf/probe.c`: two BPF maps (`pg_config`, `egress_allow_ipv4`) + block logic via `bpf_send_signal(9)`. Event struct has `blocked` field.
+  - `agent/main.go`: populates maps at startup, reports `blocked` in JSON events.
+  - `agent/events.go`: `Blocked uint8` + `Pad [3]uint8` fields.
+  - `scripts/pc-smoke-test.sh`: one-command build+run+verify. Run with `sudo bash scripts/pc-smoke-test.sh`.
+- **Phase 2 Stage 3a (eBPF agent skeleton) — SHIPPED:**
+  - `agent/bpf/probe.c`: 4 tracepoint probes (execve/connect/ptrace/openat).
+  - `agent/main.go`: ring buffer event loop, SIGTERM handler, `--mode disabled|audit|block` flag.
+  - `agent/preflight.go`: kernel ≥5.8 check + memlock removal + BPF canary load (graceful exit 0 if unavailable).
   - `action.yml`: `runtime-mode` input + `runtime-events-path` output + agent download+run step.
   - `analyze.py`: `_load_runtime_events()` + `"runtime_events"` key in report (advisory, no score impact).
-  - **Dev environment note:** This container has `CONFIG_KPROBES=not set` (tracepoints unavailable). Preflight detects this and exits 0 with warning. Binaries compiled and tested for graceful degradation. Full functionality verified via code review — will work on Ubuntu 22.04/24.04 GitHub Actions runners.
+  - **Dev environment note:** This container has `CONFIG_KPROBES=not set` — preflight exits 0 with warning. WSL2 on Windows 11 has `CONFIG_KPROBES=y` and runs the agent fully.
+- **Phase 2 Stage 2 (Z3 proofs) — SHIPPED:**
+  - `tests/proofs/test_z3_properties.py`: P1–P10, all `unsat` in <0.1 s.
+  - Run: `pytest tests/proofs/ -m proof -v --timeout=30`
+- **Phase 2 Stage 1 (auto-remediation) — SHIPPED:**
+  - `remediate.py`: `WorkflowRemediator` — resolves `uses:` tags to SHAs, patches YAML, opens PR.
+  - `action.yml`: `auto-remediate` input (default `false`).
 - **Test suite:** `python -m pytest test_analyzer.py tests/proofs/ -q --timeout=30` → 267 pass, 7 skip.
-- **Next priority (Stage 3b):** Wire egress allowlist into connect handler; add block mode (`bpf_send_signal(9)`); create RT01-RT03 harness branches; add `--mode runtime` to `run_regression.py`.
+- **Next priority:** INC-1/INC-4 — added file content scan (`_scan_added_file_content`). Branch: `claude/check-mcp-connection-OUqlz`.
 - **Open findings:** RTA02 bypass still open (multiline curl body), INC-1/INC-4 (added file content scan).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
-- **Harness CI:** 38 test cases, regression runner operational. Pinned SHA `32014117afeb5c99f51045b3df0d7ba27e0a187a`.
+- **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
 - **Blockers:** None.
 
 ---

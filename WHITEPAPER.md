@@ -1,8 +1,8 @@
 # PayloadGuard — Technical Whitepaper
 
-**Version:** 1.1.0 — May 2026
+**Version:** 1.2.0 — May 2026
 **Repository:** `PayloadGuard-PLG/payload-consequence-analyser`
-**Status:** Live on main (`4ea66e9`)
+**Status:** Live on main
 
 ---
 
@@ -23,14 +23,16 @@ PayloadGuard is an eight-layer static analysis system that runs on every pull re
 
 The system assigns a severity score across independent signal dimensions and produces one of four verdicts: **SAFE**, **REVIEW**, **CAUTION**, or **DESTRUCTIVE**. A DESTRUCTIVE verdict sets exit code 2; wired to a GitHub branch protection rule, this blocks the merge button automatically.
 
-**v1.1.0 production release** includes:
+**v1.2.0 production release** includes:
 - All AIntegrity audit fixes (5 logic defects resolved)
 - SCA dependency hallucination defense — Layer 2b (opt-in via allowlist.yml)
 - McCabe complexity advisory for new functions (informational, no score impact)
-- GitHub Actions workflow poisoning detection — Layer 2c (7 signal types, 3 hardening fixes)
+- GitHub Actions workflow poisoning detection — Layer 2c (8 signal types incl. `oidc_elevation_typosquatted` CRITICAL, 3 hardening fixes)
+- Layer 5b v2 — PR-MCI three-phase heuristic semantic transparency engine (mci_score ∈ [0,1])
+- Layer 5c — eBPF Runtime Defence Agent: 4 tracepoint probes (execve/connect/ptrace/procmem), audit+block mode, egress IPv4 allowlist, `bpf_send_signal(9)` kernel-side blocking. Verified on WSL2 kernel 6.6 and GitHub Actions Ubuntu runners.
 - GitHub Actions infrastructure hardening (all actions SHA-pinned)
 
-Against a 30-case active test suite covering safe baselines, canonical destructive payloads, boundary conditions, purpose-built evasion techniques, and CI pipeline poisoning, PayloadGuard achieves **29/30 detection (97%)** at default thresholds with zero false positives on safe baselines.
+Against a 41-case active test suite covering safe baselines, canonical destructive payloads, boundary conditions, purpose-built evasion techniques, CI pipeline poisoning, and eBPF runtime fixtures, PayloadGuard achieves **≥97%** detection at default thresholds with zero false positives on safe baselines.
 
 ---
 
@@ -150,26 +152,38 @@ git.Repo(workspace)
   │        drift = branch_age_days × target_commits_per_day
   │        CURRENT / STALE / DANGEROUS
   │
-  └─[L5b] Semantic Transparency
-           Phase 1: _extract_claim(pr_description) → scope, dominant_op, raw_tokens
-           Phase 2: _profile_diff(diffs) → churn, insertion_ratio, ext_count,
-                                           structural_alterations, sensitive_paths
-           Phase 3: cross-correlate → mci_score ∈ [0,1]
-           mci_score ≥ 0.5 → DECEPTIVE_PAYLOAD (escalates verdict)
-           mci_score > 0   → CAUTION_MISMATCH (escalates SAFE→REVIEW)
-           mci_score = 0   → TRANSPARENT
-           no description  → UNVERIFIED (escalates SAFE→REVIEW)
+  ├─[L5b] Semantic Transparency
+  │        Phase 1: _extract_claim(pr_description) → scope, dominant_op, raw_tokens
+  │        Phase 2: _profile_diff(diffs) → churn, insertion_ratio, ext_count,
+  │                                        structural_alterations, sensitive_paths
+  │        Phase 3: cross-correlate → mci_score ∈ [0,1]
+  │        mci_score ≥ 0.5 → DECEPTIVE_PAYLOAD (escalates verdict)
+  │        mci_score > 0   → CAUTION_MISMATCH (escalates SAFE→REVIEW)
+  │        mci_score = 0   → TRANSPARENT
+  │        no description  → UNVERIFIED (escalates SAFE→REVIEW)
+  │
+  └─[L5c] Runtime Agent (advisory, no score impact)
+           pg-agent binary downloaded from releases, launched in background
+           Modes: disabled | audit (log only) | block (log + bpf_send_signal(9))
+           4 tracepoint probes: sys_enter_execve / connect / ptrace / openat
+           Egress IPv4 allowlist enforced at kernel time (BPF hash map)
+           Events streamed to pg-runtime-events.json → loaded into report
+           Requires kernel ≥5.8, CONFIG_KPROBES=y; exits 0 gracefully if unavailable
 ```
 
 ### 3.3 Component Map
 
 | File | Role |
 |---|---|
-| `analyze.py` | All eight layers, CLI entry point, report generation |
+| `analyze.py` | All layers, CLI entry point, report generation |
 | `structural_parser.py` | Multi-language AST node extraction |
 | `post_check_run.py` | GitHub Check Run posting via App JWT |
+| `remediate.py` | Workflow action SHA-pinning auto-remediation |
 | `action.yml` | Composite GitHub Action definition |
-| `test_analyzer.py` | 236-test unit suite |
+| `agent/` | eBPF runtime defence agent (Go + cilium/ebpf) |
+| `agent/bpf/probe.c` | 4 tracepoint probes + block mode BPF maps |
+| `test_analyzer.py` | 267-test unit suite |
+| `tests/proofs/` | Z3 formal property proofs (P1–P10) |
 
 ---
 
