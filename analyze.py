@@ -1269,7 +1269,37 @@ class PayloadAnalyzer:
                 "error_type": type(e).__name__,
             }
 
-    def _assess_consequence(self, files_deleted, lines_deleted, days_old, deletion_ratio, structural_severity="LOW", critical_file_deletions=0, security_file_deletions=0, unverified_dependencies=0, content_flags=0, actions_poisoning_flags=0, actions_poisoning_critical=False):
+    def _assess_consequence(
+        self,
+        files_deleted: int,
+        lines_deleted: int,
+        days_old: float,
+        deletion_ratio: float,
+        structural_severity: str = "LOW",
+        critical_file_deletions: int = 0,
+        security_file_deletions: int = 0,
+        unverified_dependencies: int = 0,
+        content_flags: int = 0,
+        actions_poisoning_flags: int = 0,
+        actions_poisoning_critical: bool = False,
+    ) -> dict:
+        """
+        Layer 3 consequence scoring -- assigns a severity verdict to the PR's deletion profile.
+
+        Returns a dict with keys: status, severity, severity_score, flags, recommendation.
+
+        Formal contracts are maintained in verification/consequence_pure.py and verified by
+        CrossHair. Invariants proven there:
+          - verdict in {SAFE, REVIEW, CAUTION, DESTRUCTIVE}
+          - severity_score in [0, 31]
+          - SAFE <-> severity_score < 1; DESTRUCTIVE <-> severity_score >= 5
+          - security_file_deletions > 0 -> DESTRUCTIVE
+          - structural_severity == CRITICAL -> DESTRUCTIVE
+          - actions_poisoning_critical -> DESTRUCTIVE
+          - all-zero inputs -> SAFE
+
+        Run: cd verification && crosshair check consequence_pure
+        """
         flags = []
         severity_score = 0.0
         th = self.config.thresholds

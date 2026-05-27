@@ -52,4 +52,5 @@ py-modules = ["analyze", "structural_parser", "post_check_run", "remediate"]
 [tool.pytest.ini_options]
 markers = [
     "proof: Z3 formal safety proofs — run with pytest -m proof",
+    "crosshair: CrossHair contract verification — run with pytest -m crosshair",
 ]
