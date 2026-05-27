@@ -8,6 +8,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
+	"github.com/cilium/ebpf/rlimit"
 )
 
 // preflight returns true if this environment supports eBPF ring buffers and
@@ -43,7 +44,15 @@ func preflight() bool {
 		return false
 	}
 
-	// 4. Canary load — verify that BPF_PROG_TYPE_TRACEPOINT is actually supported.
+	// 4. Remove memlock limit before canary load — required on kernels without
+	//    automatic memlock exemption (including WSL2). Must happen before any
+	//    BPF program or map is created.
+	if err := rlimit.RemoveMemlock(); err != nil {
+		warn("RemoveMemlock: " + err.Error())
+		return false
+	}
+
+	// 5. Canary load — verify that BPF_PROG_TYPE_TRACEPOINT is actually supported.
 	//    Some kernels (e.g. containers without CONFIG_KPROBES) have BPF_SYSCALL
 	//    but reject tracepoint programs. We detect this early and exit 0.
 	canary, err := ebpf.NewProgram(&ebpf.ProgramSpec{

@@ -16,7 +16,6 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
-	"github.com/cilium/ebpf/rlimit"
 )
 
 func main() {
@@ -32,12 +31,6 @@ func main() {
 
 	if !preflight() {
 		os.Setenv("PAYLOADGUARD_RUNTIME", "disabled")
-		os.Exit(0)
-	}
-
-	// Allow locking memory for BPF maps (needed on kernels without memlock exemption)
-	if err := rlimit.RemoveMemlock(); err != nil {
-		warn("RemoveMemlock: " + err.Error())
 		os.Exit(0)
 	}
 
