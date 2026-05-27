@@ -1127,6 +1127,9 @@ class PayloadAnalyzer:
             # LAYER 2c: GitHub Actions poisoning detection
             actions_poison_flags = self._scan_github_actions_poisoning(diffs)
 
+            # LAYER 2d: Mutable action ref advisory (no score impact)
+            mutable_tag_warnings = _scan_mutable_action_refs(diffs)
+
             # LAYER 3: CONSEQUENCE VERDICT
             unverified_dep_count = len(sca_flags) if self.config.sca.get("fail_on_unknown", True) else 0
             verdict = self._assess_consequence(
@@ -1249,6 +1252,7 @@ class PayloadAnalyzer:
                     "flagged_workflows": actions_poison_flags[:10],
                     "total": len(actions_poison_flags),
                 },
+                "mutable_tag_warnings": mutable_tag_warnings,
                 "permission_changes": permission_changes,
                 "special_files": special_files,
                 "deleted_files": {
@@ -1563,6 +1567,36 @@ class PayloadAnalyzer:
                     'change_type': d.change_type,
                 })
         return flags
+
+
+def _scan_mutable_action_refs(diffs) -> list:
+    """Detect workflow `uses:` values not pinned to a 40-char SHA (advisory, no score impact)."""
+    _sha_re = re.compile(r'^[0-9a-f]{40}$', re.IGNORECASE)
+    warnings: list = []
+    for d in diffs:
+        if d.change_type not in ('A', 'M'):
+            continue
+        path = d.b_path or d.a_path or ''
+        if not isinstance(path, str) or not re.search(_ACTIONS_WORKFLOW_PATTERN, path):
+            continue
+        try:
+            content = d.b_blob.data_stream.read().decode('utf-8', errors='replace')
+        except Exception:
+            continue
+        seen: set = set()
+        for line in content.splitlines():
+            m = re.match(r'\s+(?:-\s+)?uses:\s+([^\s#\n]+)', line)
+            if not m:
+                continue
+            raw = m.group(1).strip()
+            if raw.startswith('./') or raw.startswith('/') or '@' not in raw:
+                continue
+            action, ref = raw.rsplit('@', 1)
+            if _sha_re.match(ref) or raw in seen:
+                continue
+            seen.add(raw)
+            warnings.append({'file': path, 'action': action, 'ref': ref})
+    return warnings
 
 
 # ==============================================================================
