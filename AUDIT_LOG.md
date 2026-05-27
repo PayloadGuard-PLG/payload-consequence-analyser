@@ -372,10 +372,10 @@ The contamination was not uniform — real PayloadGuard content (test cases, exi
 
 | ID | Finding | Severity | Status |
 |---|---|---|---|
-| §INC-1 | Added non-code files not scanned for content — embedded CI trigger strings (`[citest]`, `needs-ci`) are invisible to all layers | HIGH | Open |
+| §INC-1 | Added non-code files not scanned for content — embedded CI trigger strings (`[citest]`, `needs-ci`) are invisible to all layers | HIGH | **Fixed** — `_scan_added_file_content()` in `analyze.py`; 12 tests in `TestAddedFileContentScanning` |
 | §INC-2 | AI research tool source contamination produces outputs functionally identical to deliberate injection — the mechanism is the same regardless of intent | HIGH | Open (out-of-scope for static analysis; mitigated by human review) |
 | §INC-3 | Direct push to main bypasses L5b entirely — `UNVERIFIED` is returned but no flag is raised when there is no PR context at all | MEDIUM | Open |
-| §INC-4 | File additions with no code content score 0 regardless of payload — a 100-line document containing `rm -rf /` or CI trigger strings is indistinguishable from a blank file | HIGH | Open |
+| §INC-4 | File additions with no code content score 0 regardless of payload — a 100-line document containing `rm -rf /` or CI trigger strings is indistinguishable from a blank file | HIGH | **Fixed** — same fix as INC-1; added files now score +2 per CI/shell match, capped at +4 |
 
 ### Strategic Lessons
 
@@ -392,7 +392,7 @@ After the user identified the contamination, NotebookLM reframed its own source 
 The output was committed before anyone verified it matched reality. Whether the cause is malicious or accidental, the defence is the same: verify AI-generated content against the actual codebase before committing.
 
 **5. PayloadGuard's structural gaps remain real regardless of cause.**
-§INC-1 through §INC-4 are valid findings whether the origin is a deliberate injection or an accidental hallucination. The tool cannot currently detect dangerous content in added non-code files, and direct pushes to main produce no signal.
+§INC-1 and §INC-4 are now fixed. §INC-3 (direct push to main) remains open. The tool can now detect dangerous content in added non-code files; direct pushes to main still produce no escalation signal.
 
 ### Proposed Mitigations (Future Work)
 
@@ -402,6 +402,26 @@ The output was committed before anyone verified it matched reality. Whether the 
 | Flag direct pushes to main (no PR context) as elevated risk | L5b extension | Return `NO_PR_CONTEXT` status; raise base severity score by +1 |
 | Content fingerprinting for added non-code files | New L2 extension | Flag files containing shell commands (`sudo`, `setfacl`, `chmod`, `curl`) alongside CI trigger strings |
 | Added to WHITEPAPER §8 (Known Limitations) | Documentation | Document LLM-in-the-loop as an out-of-scope threat model for the current version |
+
+---
+
+## Implementation Findings — eBPF Runtime Agent: 2026-05-27
+
+Discovered during PC smoke test on WSL2 (kernel 6.6.114.1-microsoft-standard-WSL2, Windows 11). Not vulnerabilities — correctness bugs caught before shipping to CI runners.
+
+| ID | Finding | Component | Severity | Status | Commit |
+|---|---|---|---|---|---|
+| §BPF-1 | `rlimit.RemoveMemlock()` called after BPF canary — WSL2 EPERM causes false-negative preflight exit | `agent/preflight.go` + `agent/main.go` | HIGH | **Fixed** | `fe66363` |
+| §BPF-2 | `trace_openat`: `__builtin_memcpy(e->detail, path, sizeof(e->detail))` copies 64 bytes from 32-byte stack buffer — BPF verifier rejects at R10+7 | `agent/bpf/probe.c` | HIGH | **Fixed** | `5465809` |
+| §BPF-3 | `trace_ptrace` filter excluded `PTRACE_TRACEME` (request=0) — self-attach events silently dropped | `agent/bpf/probe.c` | MEDIUM | **Fixed** | `b473bc1` |
+
+### Detail
+
+**§BPF-1:** `preflight()` loads a minimal canary BPF program to detect kernel support. `rlimit.RemoveMemlock()` was called in `main()` after `preflight()` returned. On WSL2, the default memlock rlimit caused `EPERM` on the canary load even though `CONFIG_KPROBES=y`. The agent exited 0 silently, appearing to succeed. Fixed by moving `RemoveMemlock()` into `preflight()` immediately before the canary.
+
+**§BPF-2:** `sizeof(e->detail)` is 64 bytes; `path[32]` is a 32-byte stack buffer. Attempting to copy 64 bytes from a 32-byte source reads 32 bytes past the end of the stack allocation. The BPF verifier on kernel 6.6 flagged this as `invalid read from stack R10 off=7 size=1` (byte 39 of the copy = R10+7). Fixed: `memset` the full 64-byte detail field to zero, then `memcpy` only `sizeof(path)=32` bytes.
+
+**§BPF-3:** The original filter `request != 16 && request != 0x4206` captured `PTRACE_ATTACH` and `PTRACE_SEIZE` but not `PTRACE_TRACEME` (request=0). Smoke test fires `PTRACE_TRACEME`; no `ptrace_attach` events were emitted. Fixed by adding `request != 0` to the early-return guard.
 
 ---
 

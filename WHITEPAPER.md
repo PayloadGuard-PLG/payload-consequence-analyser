@@ -1,8 +1,8 @@
 # PayloadGuard — Technical Whitepaper
 
-**Version:** 1.1.0 — May 2026
+**Version:** 1.2.0 — May 2026
 **Repository:** `PayloadGuard-PLG/payload-consequence-analyser`
-**Status:** Live on main (`4ea66e9`)
+**Status:** Live on main
 
 ---
 
@@ -19,18 +19,20 @@
 
 ---
 
-PayloadGuard is an eight-layer static analysis system that runs on every pull request before merge. It detects destructive code payloads — mass deletions, structural gutting, CI pipeline poisoning, deceptive descriptions — that bypass normal code review because they are either too large for a human reviewer to fully parse or deliberately disguised as low-impact changes.
+PayloadGuard is a nine-layer static + runtime analysis system that runs on every pull request before merge. It detects destructive code payloads — mass deletions, structural gutting, CI pipeline poisoning, deceptive descriptions — that bypass normal code review because they are either too large for a human reviewer to fully parse or deliberately disguised as low-impact changes.
 
 The system assigns a severity score across independent signal dimensions and produces one of four verdicts: **SAFE**, **REVIEW**, **CAUTION**, or **DESTRUCTIVE**. A DESTRUCTIVE verdict sets exit code 2; wired to a GitHub branch protection rule, this blocks the merge button automatically.
 
-**v1.1.0 production release** includes:
+**v1.2.0 production release** includes:
 - All AIntegrity audit fixes (5 logic defects resolved)
 - SCA dependency hallucination defense — Layer 2b (opt-in via allowlist.yml)
 - McCabe complexity advisory for new functions (informational, no score impact)
-- GitHub Actions workflow poisoning detection — Layer 2c (7 signal types, 3 hardening fixes)
+- GitHub Actions workflow poisoning detection — Layer 2c (8 signal types incl. `oidc_elevation_typosquatted` CRITICAL, 3 hardening fixes)
+- Layer 5b v2 — PR-MCI three-phase heuristic semantic transparency engine (mci_score ∈ [0,1])
+- Layer 5c — eBPF Runtime Defence Agent: 4 tracepoint probes (execve/connect/ptrace/procmem), audit+block mode, egress IPv4 allowlist, `bpf_send_signal(9)` kernel-side blocking. Verified on WSL2 kernel 6.6 and GitHub Actions Ubuntu runners.
 - GitHub Actions infrastructure hardening (all actions SHA-pinned)
 
-Against a 30-case active test suite covering safe baselines, canonical destructive payloads, boundary conditions, purpose-built evasion techniques, and CI pipeline poisoning, PayloadGuard achieves **29/30 detection (97%)** at default thresholds with zero false positives on safe baselines.
+Against a 41-case active test suite covering safe baselines, canonical destructive payloads, boundary conditions, purpose-built evasion techniques, CI pipeline poisoning, and eBPF runtime fixtures, PayloadGuard achieves **≥97%** detection at default thresholds with zero false positives on safe baselines.
 
 ---
 
@@ -150,26 +152,38 @@ git.Repo(workspace)
   │        drift = branch_age_days × target_commits_per_day
   │        CURRENT / STALE / DANGEROUS
   │
-  └─[L5b] Semantic Transparency
-           Phase 1: _extract_claim(pr_description) → scope, dominant_op, raw_tokens
-           Phase 2: _profile_diff(diffs) → churn, insertion_ratio, ext_count,
-                                           structural_alterations, sensitive_paths
-           Phase 3: cross-correlate → mci_score ∈ [0,1]
-           mci_score ≥ 0.5 → DECEPTIVE_PAYLOAD (escalates verdict)
-           mci_score > 0   → CAUTION_MISMATCH (escalates SAFE→REVIEW)
-           mci_score = 0   → TRANSPARENT
-           no description  → UNVERIFIED (escalates SAFE→REVIEW)
+  ├─[L5b] Semantic Transparency
+  │        Phase 1: _extract_claim(pr_description) → scope, dominant_op, raw_tokens
+  │        Phase 2: _profile_diff(diffs) → churn, insertion_ratio, ext_count,
+  │                                        structural_alterations, sensitive_paths
+  │        Phase 3: cross-correlate → mci_score ∈ [0,1]
+  │        mci_score ≥ 0.5 → DECEPTIVE_PAYLOAD (escalates verdict)
+  │        mci_score > 0   → CAUTION_MISMATCH (escalates SAFE→REVIEW)
+  │        mci_score = 0   → TRANSPARENT
+  │        no description  → UNVERIFIED (escalates SAFE→REVIEW)
+  │
+  └─[L5c] Runtime Agent (advisory, no score impact)
+           pg-agent binary downloaded from releases, launched in background
+           Modes: disabled | audit (log only) | block (log + bpf_send_signal(9))
+           4 tracepoint probes: sys_enter_execve / connect / ptrace / openat
+           Egress IPv4 allowlist enforced at kernel time (BPF hash map)
+           Events streamed to pg-runtime-events.json → loaded into report
+           Requires kernel ≥5.8, CONFIG_KPROBES=y; exits 0 gracefully if unavailable
 ```
 
 ### 3.3 Component Map
 
 | File | Role |
 |---|---|
-| `analyze.py` | All eight layers, CLI entry point, report generation |
+| `analyze.py` | All layers, CLI entry point, report generation |
 | `structural_parser.py` | Multi-language AST node extraction |
 | `post_check_run.py` | GitHub Check Run posting via App JWT |
+| `remediate.py` | Workflow action SHA-pinning auto-remediation |
 | `action.yml` | Composite GitHub Action definition |
-| `test_analyzer.py` | 236-test unit suite |
+| `agent/` | eBPF runtime defence agent (Go + cilium/ebpf) |
+| `agent/bpf/probe.c` | 4 tracepoint probes + block mode BPF maps |
+| `test_analyzer.py` | 267-test unit suite |
+| `tests/proofs/` | Z3 formal property proofs (P1–P10) |
 
 ---
 
@@ -267,6 +281,7 @@ Each unique unverified package adds +3 points. Multiple packages in a single man
 | `pull_request_target_with_write_permissions` | CRITICAL | +5 | `pull_request_target` trigger + any write permission declared |
 | `dormant_trigger_with_payload` | HIGH | +3 | `workflow_dispatch` or `schedule` + shell execution in same file |
 | `forged_bot_author` | HIGH | +3 | `git config user.name/email` set to a known bot identity |
+| `oidc_elevation_typosquatted` | CRITICAL | +5 | `id-token: write` + consumer action resembles a safe prefix but isn't (`aws-actions-unofficial/`, `google-github-actions-fork/`, etc.) |
 | `oidc_elevation_no_consumer` | HIGH | +3 | `id-token: write` with no legitimate OIDC consumer in the same file |
 | `dangerous_trigger_pull_request_target` | HIGH | +3 | `pull_request_target` trigger alone (no write permissions declared) |
 
@@ -405,6 +420,38 @@ Five independent signals, each contributing to `mci_score`:
 Unlike L1–L4, L5b verdict escalation operates on the pre-existing verdict rather than contributing to the numerical `severity_score`. This allows it to upgrade a SAFE verdict on a low-volume deceptive PR without interfering with the scoring model's calibration.
 
 **Output:** `semantic` dict with `status`, `is_deceptive`, `mci_score`, `signals` list, `semantic_claim` (scope, dominant_op, raw_tokens), `diff_reality` (churn, insertion_ratio, ext_count, structural_alterations, sensitive_paths), `matched_keyword` (first signal, for backwards compatibility), `directive` string.
+
+---
+
+### 4.7 Layer 5c — eBPF Runtime Defence Agent
+
+**Purpose:** Observe (audit) or block (block mode) suspicious process behaviour on the GitHub Actions runner itself — catching post-merge payload execution that static analysis cannot see.
+
+**Architecture:** A pre-compiled Go binary (`pg-agent-linux-amd64`) downloaded from GitHub Releases and launched as a background process for the duration of the scan job. Uses the cilium/ebpf library with bpf2go codegen (no CO-RE/vmlinux.h required). Four BPF tracepoint programs attach to kernel syscall entry points:
+
+| Probe | Tracepoint | What it captures |
+|---|---|---|
+| `trace_execve` | `sys_enter_execve` | All process spawns — binary path in detail |
+| `trace_connect` | `sys_enter_connect` | All outbound TCP/UDP connects — sockaddr in detail |
+| `trace_ptrace` | `sys_enter_ptrace` | PTRACE_TRACEME (0), PTRACE_ATTACH (16), PTRACE_SEIZE (0x4206) |
+| `trace_openat` | `sys_enter_openat` | Opens of `/proc/*/mem` — process memory access |
+
+**BPF maps:**
+
+| Map | Type | Purpose |
+|---|---|---|
+| `events` | RINGBUF | Event stream to userspace |
+| `pg_config` | ARRAY[1] | Mode: 0=audit, 1=block — written by Go at startup |
+| `egress_allow_ipv4` | HASH | IPv4 allowlist from policy YAML — written by Go at startup |
+| `ancestry` | LRU_HASH | PID→comm ancestry tracking |
+
+**Block mode:** When `pg_config[0] == 1`, `trace_connect` checks the destination IPv4 against `egress_allow_ipv4`. If not found, sets `event.blocked=1`, submits the event, and calls `bpf_send_signal(9)` (SIGKILL) on the connecting process. Empty allowlist = permissive (no blocking applied even in block mode).
+
+**Preflight:** Before loading any BPF objects, `preflight()` removes the memlock rlimit, checks kernel ≥5.8, verifies `/sys/fs/bpf` is mounted, and attempts a canary `BPF_PROG_TYPE_TRACEPOINT` load. If any check fails, the agent exits 0 with a GitHub Actions warning. The static scan continues unaffected.
+
+**Requirements:** Linux kernel ≥5.8, `CONFIG_KPROBES=y`. Standard on GitHub Actions ubuntu-22.04/24.04 runners. WSL2 on Windows 11 also supported (verified on kernel 6.6.114.1-microsoft-standard-WSL2).
+
+**Output:** `runtime_events` list in the JSON report — each event has `type`, `pid`, `comm`, `detail`, `mode`, `blocked`, `time`. Advisory only; no score impact in current version.
 
 ---
 

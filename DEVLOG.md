@@ -2,6 +2,49 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-05-27 — Stage 3b: eBPF Block Mode + Egress Allowlist — PC Smoke Test Verified
+
+Full end-to-end verification of the eBPF runtime defence agent on real hardware: WSL2 (kernel 6.6.114.1-microsoft-standard-WSL2), Windows 11. All 4 event types captured. Three correctness bugs found and fixed during PC smoke test.
+
+### Commits (analyser, branch `claude/oidc-typosquat-detection-UBCOJ`)
+
+- `fe66363` — fix(preflight): move RemoveMemlock before canary load to fix WSL2
+- `5465809` — fix(probe): fix out-of-bounds read in trace_openat caught by BPF verifier
+- `bbd8bce` — chore: update probe_bpfeb.o (big-endian BPF object)
+- `b473bc1` — fix(probe): capture PTRACE_TRACEME (request=0) in ptrace probe
+
+### Smoke Test Result
+
+```
+    Total events: 10
+    ✓ execve
+    ✓ egress_connect
+    ✓ ptrace_attach
+    ✓ procmem_open
+
+SMOKE TEST PASSED — all 4 event types captured
+```
+
+### Bug 1 — `rlimit.RemoveMemlock()` called after canary (`preflight.go`)
+
+**Root cause:** `RemoveMemlock()` was called in `main.go` after `preflight()` returned. The preflight canary attempts to load a minimal `BPF_PROG_TYPE_TRACEPOINT` program as an early check. On WSL2, the memlock rlimit was still in effect at canary time, causing `EPERM`. The canary failed, preflight returned false, and the agent exited 0 without loading any probes — despite `CONFIG_KPROBES=y` being present.
+
+**Fix:** Moved `rlimit.RemoveMemlock()` into `preflight.go`, immediately before the canary load. Removed the redundant call from `main.go`.
+
+### Bug 2 — `trace_openat` BPF verifier: out-of-bounds stack read (`probe.c`)
+
+**Root cause:** `__builtin_memcpy(e->detail, path, sizeof(e->detail))` attempted to copy 64 bytes from `path[32]` — a 32-byte stack buffer. The BPF verifier on kernel 6.6 correctly rejected this: the 33rd byte of `path` (at stack address `R10+1`) up to the 40th byte (`R10+7`) are past the allocated buffer. The verifier error was `invalid read from stack R10 off=7 size=1`.
+
+**Fix:** `__builtin_memset(e->detail, 0, sizeof(e->detail))` then `__builtin_memcpy(e->detail, path, sizeof(path))` — copy only 32 bytes, zero-fill the rest of the 64-byte detail field.
+
+### Bug 3 — `trace_ptrace` missed `PTRACE_TRACEME` (`probe.c`)
+
+**Root cause:** The ptrace probe filtered for `request != 16 && request != 0x4206` (`PTRACE_ATTACH` and `PTRACE_SEIZE`). The smoke test fires `PTRACE_TRACEME` (request=0) which was dropped by the filter. No `ptrace_attach` events were emitted.
+
+**Fix:** Added `request != 0` to the early-return guard. `PTRACE_TRACEME` is now captured alongside `PTRACE_ATTACH` and `PTRACE_SEIZE`.
+
+---
+
 ## 2026-05-26 — OIDC Typosquat Detection: CRITICAL Signal + Megalodon Simulation
 
 Upgraded OIDC elevation detection to distinguish typosquatted consumers from legitimately-absent consumers. Added Megalodon full-chain simulation to the test harness, updated docs to reflect the expanded 33-branch suite, and verified the PLG merge gate blocks DESTRUCTIVE PRs via branch protection.
