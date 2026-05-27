@@ -14,6 +14,12 @@
   - `tests/proofs/test_z3_properties.py`: P1–P10, all `unsat` in <0.1 s.
   - `pyproject.toml`: `proof` marker registered.
   - Run: `pytest tests/proofs/ -m proof -v --timeout=30`
+- **Phase 2 Stage 3b (block mode + egress allowlist) — SHIPPED on branch:**
+  - `agent/bpf/probe.c`: two new BPF maps (`pg_config`, `egress_allow_ipv4`) + block logic in `trace_connect` via `bpf_send_signal(9)`. Event struct gains `blocked` field.
+  - `agent/main.go`: populates `pg_config` (mode) and `egress_allow_ipv4` (IPv4 from policy) into BPF maps at startup. Reports `blocked` in JSON events. Removed Go-side block skip.
+  - `agent/events.go`: `Blocked uint8` + `Pad [3]uint8` fields added to match C struct.
+  - `scripts/pc-smoke-test.sh`: one-command build+run+verify on real kernel. Fires RT01/02/03 events and checks all 4 event types captured.
+  - **Test on PC:** `sudo bash scripts/pc-smoke-test.sh` — needs `CONFIG_KPROBES=y`.
 - **Phase 2 Stage 3a (eBPF agent skeleton) — SHIPPED on branch:**
   - `agent/bpf/probe.c`: 4 tracepoint probes (execve/connect/ptrace/openat), linux-headers approach (no CO-RE/BTF needed), `BPF_MAP_TYPE_RINGBUF`.
   - `agent/main.go`: `//go:generate bpf2go` directive, ring buffer event loop, SIGTERM handler, `--mode disabled|audit|block` flag, `--dry-run` flag.
@@ -136,6 +142,39 @@ sca:
 - Patterns: `[citest`, `needs-ci`, `citest commit:`, `setfacl`, `chmod`, `curl | bash`, `sudo`
 - Only fires on A-type diffs for non-code extensions
 - Adds to `content_flags` list in report, +2 score per match
+
+---
+
+## PC Setup — eBPF Agent (Stage 3b)
+
+When moving to a PC (Ubuntu 22.04/24.04 or WSL2 with kernel ≥5.15):
+
+```bash
+# 1. Pull latest
+git pull origin claude/oidc-typosquat-detection-UBCOJ
+
+# 2. One-shot smoke test (builds, runs, fires all 4 event types, checks results)
+sudo bash scripts/pc-smoke-test.sh
+
+# 3. Manual run
+cd agent
+go generate ./...                          # recompile BPF (only needed after probe.c edits)
+go build -o ../dist/pg-agent-linux-amd64 .
+sudo ../dist/pg-agent-linux-amd64 --mode=audit --dry-run
+
+# 4. Block mode with policy
+cat > /tmp/policy.yaml << 'EOF'
+egress:
+  allow:
+    - github.com
+    - api.github.com
+    - 127.0.0.1
+EOF
+sudo ../dist/pg-agent-linux-amd64 --mode=block --policy=/tmp/policy.yaml
+```
+
+Kernel requirement check: `zcat /proc/config.gz | grep CONFIG_KPROBES` — must be `=y`.
+The agent preflight canary will warn and exit 0 gracefully if tracepoints are unavailable.
 
 ---
 

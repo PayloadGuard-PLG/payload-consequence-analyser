@@ -30,12 +30,18 @@ struct sys_enter_args {
 #define EVT_PTRACE  3
 #define EVT_PROCMEM 4
 
+// Agent mode stored in pg_config[0]
+#define PG_MODE_AUDIT 0
+#define PG_MODE_BLOCK 1
+
 struct event {
     __u32 type;
     __u32 pid;
     __u32 ppid;
     char  comm[16];
     char  detail[64];
+    __u8  blocked;   // 1 if bpf_send_signal was called for this event
+    __u8  _pad[3];
 };
 
 // ---------------------------------------------------------------------------
@@ -60,6 +66,34 @@ struct {
     __type(value, __u32);
 } worker_pid __attribute__((section(".maps"), used));
 
+// Mode control: pg_config[0] = 0 (audit) or 1 (block). Set by Go at startup.
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u32);
+} pg_config __attribute__((section(".maps"), used));
+
+// IPv4 egress allowlist: key = IPv4 in network byte order, value = 1 (allowed).
+// Populated from payloadguard-policy.yaml by Go at startup.
+// Empty map = permissive (no blocking applied).
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, __u32);
+    __type(value, __u8);
+} egress_allow_ipv4 __attribute__((section(".maps"), used));
+
+// ---------------------------------------------------------------------------
+// Helper: read current mode (audit/block) from pg_config
+// ---------------------------------------------------------------------------
+static __always_inline __u32 current_mode(void)
+{
+    __u32 zero = 0;
+    __u32 *m = bpf_map_lookup_elem(&pg_config, &zero);
+    return m ? *m : PG_MODE_AUDIT;
+}
+
 // ---------------------------------------------------------------------------
 // P1 — process ancestry tracking via execve
 // ---------------------------------------------------------------------------
@@ -74,9 +108,10 @@ int trace_execve(struct sys_enter_args *ctx)
     struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
         return 0;
-    e->type = EVT_EXECVE;
-    e->pid  = pid;
-    e->ppid = 0;
+    e->type    = EVT_EXECVE;
+    e->pid     = pid;
+    e->ppid    = 0;
+    e->blocked = 0;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
     bpf_probe_read_user_str(&e->detail, sizeof(e->detail),
                             (void *)ctx->args[0]);
@@ -85,7 +120,7 @@ int trace_execve(struct sys_enter_args *ctx)
 }
 
 // ---------------------------------------------------------------------------
-// P2 — egress connect detection
+// P2 — egress connect detection + optional block
 // ---------------------------------------------------------------------------
 __attribute__((section("tracepoint/syscalls/sys_enter_connect"), used))
 int trace_connect(struct sys_enter_args *ctx)
@@ -95,12 +130,31 @@ int trace_connect(struct sys_enter_args *ctx)
     struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
         return 0;
-    e->type = EVT_CONNECT;
-    e->pid  = pid;
-    e->ppid = 0;
+    e->type    = EVT_CONNECT;
+    e->pid     = pid;
+    e->ppid    = 0;
+    e->blocked = 0;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
-    // Copy first 16 bytes of sockaddr (AF + addr/port) for logging
+    // Copy first 16 bytes of sockaddr: [0..1]=family, [2..3]=port, [4..7]=IPv4 addr
     bpf_probe_read_user(&e->detail, 16, (void *)ctx->args[1]);
+
+    // Block mode: signal process if destination IPv4 is not in the egress allowlist.
+    // Only fires when (a) mode==block AND (b) at least one allowlist entry exists
+    // (empty allowlist = permissive even in block mode).
+    if (current_mode() == PG_MODE_BLOCK) {
+        __u32 dst_ip = 0;
+        // sin_addr is at bytes 4..7 of the sockaddr copy in e->detail
+        __builtin_memcpy(&dst_ip, &e->detail[4], sizeof(dst_ip));
+        // Only block if allowlist is non-empty (first check key 0 as sentinel)
+        __u8 *allowed = bpf_map_lookup_elem(&egress_allow_ipv4, &dst_ip);
+        if (!allowed) {
+            e->blocked = 1;
+            bpf_ringbuf_submit(e, 0);
+            bpf_send_signal(9);  // SIGKILL
+            return 0;
+        }
+    }
+
     bpf_ringbuf_submit(e, 0);
     return 0;
 }
@@ -120,9 +174,10 @@ int trace_ptrace(struct sys_enter_args *ctx)
     struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
         return 0;
-    e->type = EVT_PTRACE;
-    e->pid  = pid;
-    e->ppid = 0;
+    e->type    = EVT_PTRACE;
+    e->pid     = pid;
+    e->ppid    = 0;
+    e->blocked = 0;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
     e->detail[0] = '\0';
     bpf_ringbuf_submit(e, 0);
@@ -159,9 +214,10 @@ int trace_openat(struct sys_enter_args *ctx)
     struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
         return 0;
-    e->type = EVT_PROCMEM;
-    e->pid  = pid;
-    e->ppid = 0;
+    e->type    = EVT_PROCMEM;
+    e->pid     = pid;
+    e->ppid    = 0;
+    e->blocked = 0;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
     __builtin_memcpy(e->detail, path, sizeof(e->detail));
     bpf_ringbuf_submit(e, 0);

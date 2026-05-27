@@ -64,9 +64,11 @@ type ProbeProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type ProbeMapSpecs struct {
-	Ancestry  *ebpf.MapSpec `ebpf:"ancestry"`
-	Events    *ebpf.MapSpec `ebpf:"events"`
-	WorkerPid *ebpf.MapSpec `ebpf:"worker_pid"`
+	Ancestry        *ebpf.MapSpec `ebpf:"ancestry"`
+	EgressAllowIpv4 *ebpf.MapSpec `ebpf:"egress_allow_ipv4"`
+	Events          *ebpf.MapSpec `ebpf:"events"`
+	PgConfig        *ebpf.MapSpec `ebpf:"pg_config"`
+	WorkerPid       *ebpf.MapSpec `ebpf:"worker_pid"`
 }
 
 // ProbeVariableSpecs contains global variables before they are loaded into the kernel.
@@ -95,15 +97,19 @@ func (o *ProbeObjects) Close() error {
 //
 // It can be passed to LoadProbeObjects or ebpf.CollectionSpec.LoadAndAssign.
 type ProbeMaps struct {
-	Ancestry  *ebpf.Map `ebpf:"ancestry"`
-	Events    *ebpf.Map `ebpf:"events"`
-	WorkerPid *ebpf.Map `ebpf:"worker_pid"`
+	Ancestry        *ebpf.Map `ebpf:"ancestry"`
+	EgressAllowIpv4 *ebpf.Map `ebpf:"egress_allow_ipv4"`
+	Events          *ebpf.Map `ebpf:"events"`
+	PgConfig        *ebpf.Map `ebpf:"pg_config"`
+	WorkerPid       *ebpf.Map `ebpf:"worker_pid"`
 }
 
 func (m *ProbeMaps) Close() error {
 	return _ProbeClose(
 		m.Ancestry,
+		m.EgressAllowIpv4,
 		m.Events,
+		m.PgConfig,
 		m.WorkerPid,
 	)
 }

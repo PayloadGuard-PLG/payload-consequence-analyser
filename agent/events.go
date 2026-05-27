@@ -7,13 +7,16 @@ const (
 	EvtProcmem uint32 = 4
 )
 
-// Event must match the C struct layout in probe.c exactly (packed, little-endian).
+// Event must match the C struct layout in bpf/probe.c exactly (packed, little-endian).
+// type(4) + pid(4) + ppid(4) + comm(16) + detail(64) + blocked(1) + _pad(3) = 96 bytes
 type Event struct {
-	Type   uint32
-	Pid    uint32
-	Ppid   uint32
-	Comm   [16]byte
-	Detail [64]byte
+	Type    uint32
+	Pid     uint32
+	Ppid    uint32
+	Comm    [16]byte
+	Detail  [64]byte
+	Blocked uint8
+	Pad     [3]uint8
 }
 
 func (e *Event) CommStr() string   { return nullterm(e.Comm[:]) }
