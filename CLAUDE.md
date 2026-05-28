@@ -2,8 +2,9 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** create a new branch from main (docs/cleanup-stale-planning-docs was the last doc-only branch; that PR is now merged)
-- **Status:** v1.2.0 live on main. All Phase 2 stages shipped and verified. Vericoding Phase 2 (CrossHair) complete — all 4 layers. Documentation cleanup committed (6 stale planning docs removed, README formal verification section added, TEST_REPORT/REGISTRY updated to 272).
+- **Branch for next work:** create a new branch from main
+- **Status:** v1.2.0 live on main. All Phase 2 stages shipped. Vericoding Phase 2 (CrossHair) complete — all 4 layers. Docs cleaned. Cross-repo regression trigger wired up (push to main → dispatches stable regression to test harness).
+- **CI:** `trigger-regression.yml` dispatches `analyser-updated` to payloadguard-test-harness on every push to main. Requires `REGRESSION_PAT` secret (repo-scope PAT on the harness) in this repo's secrets.
 - **Vericoding Phase 2 — CrossHair SHIPPED, all 4 layers verified (272 pass, 7 skip):**
   - `verification/consequence_pure.py`: Layer 3 — C1–C12 contracts (verdict bijection, score bounds, safety implications)
   - `verification/temporal_pure.py`: Layer 5a — T1–T7 contracts (drift_score ≥ 0, status bijection, zero-input → CURRENT)
