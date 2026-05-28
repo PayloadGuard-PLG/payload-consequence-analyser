@@ -1,0 +1,41 @@
+name: Trigger Regression
+
+# Fires the test harness stable regression on every push to main.
+# Requires REGRESSION_PAT secret in this repo — a GitHub PAT with repo scope
+# on payloadguard-test-harness. The same PAT used by the harness itself.
+# If the secret is absent the step warns and exits 0 (non-blocking).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Dispatch analyser-updated to test harness
+        env:
+          REGRESSION_PAT: ${{ secrets.REGRESSION_PAT }}
+        run: |
+          if [ -z "$REGRESSION_PAT" ]; then
+            echo "::warning::REGRESSION_PAT secret is not configured — skipping regression dispatch."
+            echo "::warning::Add a GitHub PAT with repo scope on payloadguard-test-harness as REGRESSION_PAT."
+            exit 0
+          fi
+          curl -fsS -X POST \
+            -H "Authorization: token $REGRESSION_PAT" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/PayloadGuard-PLG/payloadguard-test-harness/dispatches \
+            -d "{
+              \"event_type\": \"analyser-updated\",
+              \"client_payload\": {
+                \"sha\": \"${{ github.sha }}\",
+                \"ref\": \"${{ github.ref }}\",
+                \"actor\": \"${{ github.actor }}\"
+              }
+            }"
+          echo "Dispatched analyser-updated to payloadguard-test-harness (sha: ${{ github.sha }})"

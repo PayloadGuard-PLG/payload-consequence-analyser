@@ -1,9 +1,9 @@
 # PayloadGuard — Test Run Report
 
-**Date:** 2026-05-27 11:40 UTC  
+**Date:** 2026-05-28 UTC  
 **Environment:** Python 3.11, pytest 9.0.3  
 **Platform:** Linux (WSL2 / GitHub Actions)  
-**Result:** 267 passed · 7 skipped · 0 failed267 passed, 7 skipped in 0.83s ========================
+**Result:** 272 passed · 7 skipped · 0 failed
 
 ---
 
@@ -394,3 +394,11 @@
 - ✓ `test_p8_typosquat_cannot_yield_safe_verdict`
 - ✓ `test_p9_score_upper_bound_finite`
 - ✓ `test_p10_empty_signal_set_always_safe`
+
+## tests/proofs/test_crosshair_contracts.py
+
+- ✓ `test_crosshair_deletion_dim_contracts`
+- ✓ `test_crosshair_assess_consequence_contracts`
+- ✓ `test_crosshair_temporal_drift_contracts`
+- ✓ `test_crosshair_structural_drift_contracts`
+- ✓ `test_crosshair_semantic_mci_contracts`

@@ -2,19 +2,9 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** create a new branch from main (this branch ready to PR)
-- **Status:** v1.2.0 live on main. Vericoding Phase 4 (Dafny) shipped on `claude/oidc-typosquat-detection-UBCOJ`. Cross-repo regression trigger live.
-- **Vericoding Phase 4 — Dafny SHIPPED (pending local run to commit log):**
-  - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–12 (score bounds, verdict bijection, safety implications, empty-input guarantee)
-  - `verification/dafny/structural_drift.dfy`: L4 — S1–S7 dual-gate biconditional
-  - `verification/dafny/temporal_drift.dfy`: L5a — T1–T8 linear drift, zero-input guarantees
-  - `verification/dafny/assess_consequence_verify.log`: placeholder — replace with `dafny verify` output
-  - `.github/workflows/verify-dafny.yml`: CI — runs on PR/push touching `verification/dafny/**`
-  - Phase 3 (Nagini): **SKIPPED** — pure integer scorer has no heap/concurrency; toolchain (Java, Viper JAR, Python ≤3.12 ceiling) adds no theorem beyond CrossHair.
-  - Install Dafny: `dotnet tool install --global dafny`
-  - Verify: `dafny verify verification/dafny/assess_consequence.dfy`
-  - Expected output: `Dafny program verifier finished with N verified, 0 errors`
-  - Confirm: `grep -q "0 errors" <log> && echo PASS`
+- **Branch for next work:** create a new branch from main
+- **Status:** v1.2.0 live on main. All Phase 2 stages shipped. Vericoding Phase 2 (CrossHair) complete — all 4 layers. Docs cleaned. Cross-repo regression trigger wired up (push to main → dispatches stable regression to test harness).
+- **CI:** `trigger-regression.yml` dispatches `analyser-updated` to payloadguard-test-harness on every push to main. Requires `REGRESSION_PAT` secret (repo-scope PAT on the harness) in this repo's secrets.
 - **Vericoding Phase 2 — CrossHair SHIPPED, all 4 layers verified (272 pass, 7 skip):**
   - `verification/consequence_pure.py`: Layer 3 — C1–C12 contracts (verdict bijection, score bounds, safety implications)
   - `verification/temporal_pure.py`: Layer 5a — T1–T7 contracts (drift_score ≥ 0, status bijection, zero-input → CURRENT)
@@ -234,6 +224,7 @@ The agent preflight canary will warn and exit 0 gracefully if tracepoints are un
 - **No MCP push_files:** Confirmed broken in multiple sessions. Don't retry.
 - **Commit style:** Imperative, specific, with test count in body. See git log for examples.
 - **NotebookLM:** Do not use for active code sessions -- use only for reading stable documents.
+- **Documentation style:** Professional and concise throughout. No informal, casual, or whimsical language in any documentation, commit messages, comments, or README content. State facts directly. Every sentence must earn its place.
 
 ---
 
