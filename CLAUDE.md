@@ -2,8 +2,29 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** create new branch from main for next sprint (RTA02 or INC-3)
-- **Status:** v1.2.0 live on main. PR #62 merged (`claude/oidc-typosquat-detection-UBCOJ`). Phase 2 Stage 1+2+3a+3b fully shipped and verified. Main is clean.
+- **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ` (still active — vericoding phase in progress)
+- **Status:** v1.2.0 live on main. PR #62 merged. Phase 2 Stage 1+2+3a+3b fully shipped and verified. Vericoding Phase 1 (Z3) done; Phase 2 (CrossHair spec) in progress.
+- **Vericoding Phase 2 — CrossHair SHIPPED (C1–C12 all hold):**
+  - `verification/consequence_pure.py`: pure extraction of `_assess_consequence()` (no git.Repo dep, required for CrossHair to symbolically execute it).
+  - `tests/proofs/test_crosshair_contracts.py`: pytest wrapper (`@pytest.mark.crosshair`) — both tests pass in ~6s.
+  - `VERIFICATION.md`: public-facing doc — what is proven, how, what is not, sync requirement.
+  - `CROSSHAIR_PHASE2_PLAN.md`: full implementation plan committed to repo.
+  - `VERIFICATION_SPEC.md`: formal specification for external verifiers (CrossHair/Nagini/Dafny) — pinned to `d0541f6`.
+  - Test count: **269 pass, 7 skip** (267 existing + 2 CrossHair).
+  - Run CrossHair: `cd verification && crosshair check consequence_pure --analysis_kind PEP316 --per_condition_timeout 30`
+  - Run via pytest: `pytest tests/proofs/ -m crosshair -v`
+  - **Constraint:** Verification is external. Claude produces specs/extraction modules only. External parties run the tools.
+  - **Next for vericoding:** Phase 3 is Nagini (heap separation + null safety). Phase 4 is Dafny reference implementation. Vericoding plan is in `payloadguard-vericoding-plan.md` on main.
+- **Phase 2 Stage 3b (block mode + egress allowlist) — VERIFIED on real hardware:**
+  - Smoke test PASSED: all 4 event types captured (execve, egress_connect, ptrace_attach, procmem_open).
+  - Three PC-specific fixes applied:
+    1. `agent/preflight.go`: `rlimit.RemoveMemlock()` moved before canary load — WSL2 fails canary with EPERM if memlock still in effect.
+    2. `agent/bpf/probe.c` `trace_openat`: `__builtin_memcpy` size corrected from `sizeof(e->detail)=64` to `sizeof(path)=32` — BPF verifier caught out-of-bounds read at R10+7.
+    3. `agent/bpf/probe.c` `trace_ptrace`: `PTRACE_TRACEME` (request=0) added to the filter alongside `PTRACE_ATTACH` (16) and `PTRACE_SEIZE` (0x4206).
+  - `agent/bpf/probe.c`: two BPF maps (`pg_config`, `egress_allow_ipv4`) + block logic via `bpf_send_signal(9)`. Event struct has `blocked` field.
+  - `agent/main.go`: populates maps at startup, reports `blocked` in JSON events.
+  - `agent/events.go`: `Blocked uint8` + `Pad [3]uint8` fields.
+  - `scripts/pc-smoke-test.sh`: one-command build+run+verify. Run with `sudo bash scripts/pc-smoke-test.sh`.
 - **Phase 2 Stage 3b (block mode + egress allowlist) — VERIFIED on real hardware:**
   - Smoke test PASSED: all 4 event types captured (execve, egress_connect, ptrace_attach, procmem_open).
   - Three PC-specific fixes applied:
@@ -74,8 +95,9 @@ action.yml           — GitHub Action composite wrapper
 agent/               — eBPF runtime defence agent (Go + cilium/ebpf)
 agent/bpf/probe.c    — 4 tracepoint probes + pg_config/egress_allow_ipv4 BPF maps
 scripts/pc-smoke-test.sh — one-command build+verify on real kernel
-test_analyzer.py     — pytest suite (267 tests)
-tests/proofs/        — Z3 formal property proofs (P1–P10)
+test_analyzer.py     — pytest suite (267 tests, + 2 CrossHair = 269 total)
+tests/proofs/        — Z3 formal property proofs (P1–P10) + CrossHair pytest wrapper
+verification/        — CrossHair verification target: consequence_pure.py (C1–C12)
 allowlist.yml        — SCA package allowlist (user-created, not in repo by default)
 payloadguard.yml     — per-repo threshold config (user-created, not in repo by default)
 AUDIT_LOG.md         — architectural review findings + incident reports
@@ -144,6 +166,18 @@ sca:
 | INC-3 | Direct push to main -> L5b returns UNVERIFIED but raises no flag | MEDIUM | Backlog |
 | RTA02 | Multiline curl body (YAML block scalar) evades credential harvest pattern | MEDIUM | Next sprint |
 | §2.3 | Single-branch clone / detached HEAD raises BadName exception | MEDIUM | Backlog |
+
+## Vericoding Plan (from `payloadguard-vericoding-plan.md` on main)
+
+| Phase | Tool | Target | Status |
+|---|---|---|---|
+| 1 | Z3 SMT | L3 scoring — 10 properties (P1–P10) | Done — `tests/proofs/test_z3_properties.py` |
+| 2 | CrossHair | `_assess_consequence()` — C1–C12 contracts | Done — `verification/consequence_pure.py` |
+| 3 | Nagini | `_assess_consequence()` — heap/null safety | Not started |
+| 4 | Dafny | Reference implementation vs spec | Not started |
+| 5 | Publication | `VERIFICATION.md` public summary | Stub created |
+
+**Constraint:** Verification is always external. Claude writes specs; external parties run the tools.
 
 ---
 
