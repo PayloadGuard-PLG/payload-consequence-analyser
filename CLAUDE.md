@@ -2,9 +2,15 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** create a new branch from main
-- **Status:** v1.2.0 live on main. All Phase 2 stages shipped. Vericoding Phase 2 (CrossHair) complete — all 4 layers. Docs cleaned. Cross-repo regression trigger wired up (push to main → dispatches stable regression to test harness).
+- **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ` (currently at main HEAD — start PLI/RTA02 work here)
+- **Status:** v1.2.0 live on main. Vericoding Phase 4 (Dafny) merged via PR #70. Next: v1.3.0 — RTA02 fix + PLI Layer L4b (see plan file).
 - **CI:** `trigger-regression.yml` dispatches `analyser-updated` to payloadguard-test-harness on every push to main. Requires `REGRESSION_PAT` secret (repo-scope PAT on the harness) in this repo's secrets.
+- **Vericoding Phase 4 — Dafny MERGED (PR #70, main `b44a116`):**
+  - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–12 (score bounds, verdict bijection, safety implications, empty-input guarantee)
+  - `verification/dafny/structural_drift.dfy`: L4 — S1–S7 dual-gate biconditional
+  - `verification/dafny/temporal_drift.dfy`: L5a — T1–T8 linear drift, zero-input guarantees
+  - `.github/workflows/verify-dafny.yml`: CI — Dafny 4.9.1 release zip (bundles Z3 4.12.1); runs on PR/push touching `verification/dafny/**`
+  - `verify-dafny.log` placeholder in place — replace with actual `dafny verify` output after local run
 - **Vericoding Phase 2 — CrossHair SHIPPED, all 4 layers verified (272 pass, 7 skip):**
   - `verification/consequence_pure.py`: Layer 3 — C1–C12 contracts (verdict bijection, score bounds, safety implications)
   - `verification/temporal_pure.py`: Layer 5a — T1–T7 contracts (drift_score ≥ 0, status bijection, zero-input → CURRENT)
@@ -50,8 +56,8 @@
   - `remediate.py`: `WorkflowRemediator` — resolves `uses:` tags to SHAs, patches YAML, opens PR.
   - `action.yml`: `auto-remediate` input (default `false`).
 - **Test suite:** `python -m pytest test_analyzer.py tests/proofs/ -q --timeout=30` → 272 pass, 7 skip.
-- **Next priority:** RTA02 bypass (multiline curl body evades credential harvest pattern). INC-3 (direct push to main, no flag).
-- **Open findings:** RTA02 bypass (multiline curl body), INC-3 (direct push to main).
+- **Next priority:** v1.3.0 — PLI Layer L4b. RTA02 CLOSED. See plan file `/root/.claude/plans/megalodon-test-case-plan-agile-comet.md`.
+- **Open findings:** INC-3 (direct push to main).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
 - **Blockers:** None.
@@ -165,7 +171,6 @@ sca:
 | ID | Description | Severity | Priority |
 |---|---|---|---|
 | INC-3 | Direct push to main -> L5b returns UNVERIFIED but raises no flag | MEDIUM | Backlog |
-| RTA02 | Multiline curl body (YAML block scalar) evades credential harvest pattern | MEDIUM | Next sprint |
 | §2.3 | Single-branch clone / detached HEAD raises BadName exception | MEDIUM | Backlog |
 
 ## Vericoding Plan (from `payloadguard-vericoding-plan.md` on main)

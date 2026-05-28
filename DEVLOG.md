@@ -2,6 +2,50 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-05-28 — Vericoding Phase 4: Dafny CI live + RTA02 closed
+
+### Dafny CI workflow (PR #70)
+
+Added `.github/workflows/verify-dafny.yml` — runs `dafny verify` on all three `.dfy` files for every PR and push touching `verification/dafny/**`. Guards against the known dafny-lang/dafny#21 false-zero bug by grepping for `"0 errors"` in addition to checking the exit code. Verification logs uploaded as CI artifacts (90-day retention).
+
+Two CI iterations to reach green:
+1. `actions/setup-dotnet@v4` was unpinned — job failed in ~2 seconds. Fixed by pinning to SHA `67a3573c9a986a3f9c594539f4ab511d57bb3ce9` (v4.3.1).
+2. `dotnet tool install --global dafny` does not bundle Z3. Dafny 4.x requires Z3 4.12.1 co-located alongside the binary. Fixed by switching to the Dafny 4.9.1 release zip (ubuntu-20.04 build) which bundles Z3. Added `find -name 'dafny' -type f` to locate the binary regardless of zip directory structure.
+
+### Local verification run
+
+Confirmed all three `.dfy` files verify clean with Dafny 4.9.1+452c307 and bundled Z3:
+
+| File | Result |
+|---|---|
+| `verification/dafny/assess_consequence.dfy` | 7 verified, 0 errors (POST-1–12) |
+| `verification/dafny/structural_drift.dfy` | 1 verified, 0 errors (S1–S7) |
+| `verification/dafny/temporal_drift.dfy` | 1 verified, 0 errors (T1–T8) |
+
+Replaced the placeholder `assess_consequence_verify.log` with the actual verifier output. Added `!verification/dafny/*.log` exception to `.gitignore` — verifier logs are citable proof artifacts per `VERIFICATION.md`.
+
+### RTA02 — multiline curl credential_harvest bypass — CLOSED
+
+**Root cause:** `_ACTIONS_CREDENTIAL_HARVEST` patterns use `[^\n]*secrets\.` which cannot match across YAML block scalar line continuations. A `curl` command split across lines with `\` put `secrets.GITHUB_TOKEN` on a different line from `curl`, evading all patterns.
+
+**Fix:** `_scan_github_actions_poisoning()` already calls `_normalize_yaml_content(content)` for base64 checks. Applied the same normalized string to the `credential_harvest` loop — backslash-newline continuations collapse to spaces, making the full curl command a single matchable line.
+
+**Test:** `test_multiline_curl_credential_harvest_detected` — covers the `rta/schedule-curl-exfil` bypass pattern.
+
+Test suite: **273 pass, 7 skip**.
+
+### Commits (analyser, branch `claude/oidc-typosquat-detection-UBCOJ`)
+
+- `75faca3` — ci(dafny): pin actions/setup-dotnet to SHA — v4.3.1
+- `306a16b` — ci(dafny): switch to release zip install to bundle Z3 4.12.1
+- `168d73f` — ci(dafny): find dafny binary directly to set PATH — fix command not found
+- `b9694b2` — docs(dafny): commit real verification log — 9 verified, 0 errors
+- `0bfeb60` — fix(L2c): apply normalized content to credential_harvest loop — closes RTA02
+
+PR #70 merged to main at `b44a116`.
+
+---
+
 ## 2026-05-28 — Vericoding Phase 2: CrossHair Contracts — All Four Scoring Layers
 
 Completed CrossHair formal contract verification for all four layers with pure scoring logic.

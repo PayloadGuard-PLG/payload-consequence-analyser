@@ -1498,7 +1498,8 @@ class PayloadAnalyzer:
                     seen_b64 = True  # one entry per file regardless of how many patterns match
 
             for pat in _ACTIONS_CREDENTIAL_HARVEST:
-                if re.search(pat, content, re.IGNORECASE | re.MULTILINE):
+                if re.search(pat, content, re.IGNORECASE | re.MULTILINE) or \
+                   re.search(pat, normalized, re.IGNORECASE):
                     signals.append({'type': 'credential_harvest', 'pattern': pat})
 
             has_dormant_trigger = any(
