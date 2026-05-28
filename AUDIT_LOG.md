@@ -425,6 +425,41 @@ Discovered during PC smoke test on WSL2 (kernel 6.6.114.1-microsoft-standard-WSL
 
 ---
 
+## Formal Verification Register — 2026-05-28
+
+**Method:** CrossHair symbolic contract verification + Z3 SMT proofs  
+**Coverage:** L3 Consequence, L4 Structural, L5a Temporal, L5b Semantic  
+**Result:** All contracts hold — exit code 0, no counterexamples
+
+### Verified Properties
+
+| Layer | Module | Contracts | Status |
+|-------|--------|-----------|--------|
+| L3 | `verification/consequence_pure.py` | C1–C12: verdict enum, score bounds [0,31], bijection, safety-critical implications, zero-input guarantee | ✅ Verified |
+| L4 | `verification/structural_pure.py` | S1–S7: dual-gate invariant (DESTRUCTIVE requires BOTH conditions), deletion_ratio ∈ [0,1], empty-input safety | ✅ Verified |
+| L5a | `verification/temporal_pure.py` | T1–T7: drift_score ≥ 0, status bijection, zero-age → CURRENT, zero-velocity → CURRENT | ✅ Verified |
+| L5b | `verification/semantic_pure.py` | M1–M9: mci_score ∈ [0,1], DECEPTIVE ↔ score ≥ 0.5, no-description → UNVERIFIED, TRANSPARENT → score == 0 | ✅ Verified |
+| L3 (Z3) | `tests/proofs/test_z3_properties.py` | P1–P10: monotonicity, structural ordering, score bounds (abstract model) | ✅ Verified |
+
+### Architecture Note
+
+CrossHair cannot symbolically construct `PayloadAnalyzer` because `git.Repo()` runs
+`git --version` as a subprocess during `__init__()`. The solution is pure extraction modules
+in `verification/` — self-contained mirrors of each layer's scoring logic with no external
+dependencies. The sync requirement (documented in `VERIFICATION.md`) ensures these stay
+aligned with production code.
+
+### Not Yet Verified
+
+| Layer | Reason |
+|-------|--------|
+| L1 Surface Scan | Signal collection, not scoring logic |
+| L2/L2b/L2c | Regex matching, YAML parsing, manifest diffing |
+| L5b Phases 1 & 2 | String/regex operations; cannot be symbolically executed |
+| L5c Runtime Agent | eBPF/kernel boundary |
+
+---
+
 ## Next Audit Checklist
 
 Copy this section into the next audit issue or branch PR description.
