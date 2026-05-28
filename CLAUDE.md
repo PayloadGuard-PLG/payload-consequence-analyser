@@ -2,8 +2,8 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ` (currently at main HEAD — start PLI/RTA02 work here)
-- **Status:** v1.2.0 live on main. Vericoding Phase 4 (Dafny) merged via PR #70. Next: v1.3.0 — RTA02 fix + PLI Layer L4b (see plan file).
+- **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ` (at main HEAD — PLI Layer L4b next)
+- **Status:** v1.2.0 live on main. PR #70 (Dafny Phase 4) and PR #72 (RTA02 fix + docs restructure) merged. Next: v1.3.0 — PLI Layer L4b (requires `pli_engine.py` in repo root).
 - **CI:** `trigger-regression.yml` dispatches `analyser-updated` to payloadguard-test-harness on every push to main. Requires `REGRESSION_PAT` secret (repo-scope PAT on the harness) in this repo's secrets.
 - **Vericoding Phase 4 — Dafny MERGED (PR #70, main `b44a116`):**
   - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–12 (score bounds, verdict bijection, safety implications, empty-input guarantee)
