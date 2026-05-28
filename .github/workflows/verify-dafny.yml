@@ -23,15 +23,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v4
 
-      - name: Install .NET SDK
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9  # v4.3.1
-        with:
-          dotnet-version: '8.0'
-
-      - name: Install Dafny
+      - name: Install Dafny (release zip — includes Z3 4.12.1)
         run: |
-          dotnet tool install --global dafny
-          echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
+          DAFNY_VERSION=4.9.1
+          curl -fsSL \
+            "https://github.com/dafny-lang/dafny/releases/download/v${DAFNY_VERSION}/dafny-${DAFNY_VERSION}-x64-ubuntu-20.04.zip" \
+            -o /tmp/dafny.zip
+          unzip -q /tmp/dafny.zip -d /tmp/dafny
+          DAFNY_DIR=$(find /tmp/dafny -maxdepth 1 -type d -name 'dafny-*' | head -1)
+          echo "${DAFNY_DIR}" >> $GITHUB_PATH
 
       - name: Verify assess_consequence.dfy
         run: |
