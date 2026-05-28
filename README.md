@@ -16,37 +16,21 @@ PayloadGuard runs on every PR. It scans the full diff across nine independent an
 
 Each layer examines a different dimension of risk. They are independent — a payload that evades one is still exposed by the others.
 
-| Layer | What it examines | Deep dive |
-|---|---|---|
-| **L1 — Surface** | File and line counts, deletion ratios, binary files, permission changes, symlinks | [Scoring reference](#scoring-reference) |
-| **L2 — Forensic** | Critical-path deletions, security-sensitive file removal, added file content (CI triggers, shell execution) | [WHITEPAPER §3](WHITEPAPER.md) |
-| **L2b — SCA** | Package manifest diffs scanned against an allowlist for unverified dependencies | [SCA config](#sca-layer-2b) |
-| **L2c — Actions Poisoning** | Workflow files scanned for base64 payload delivery, credential harvesting, dormant triggers, forged bot identity, OIDC privilege escalation, unsafe `pull_request_target` | [Signal table](#github-actions-poisoning-layer-2c) |
-| **L3 — Consequence Model** | Weighted scoring across all signals → single verdict | [Scoring reference](#scoring-reference) |
-| **L4 — Structural Drift** | AST-level diff: which named classes, functions, and constants were actually deleted | [Supported languages](#supported-languages-layer-4) |
-| **L5a — Temporal Drift** | Branch age × target repo velocity — a quantified staleness score | [Report reference](#temporal-drift-layer-5a) |
-| **L5b — Semantic Transparency** | Whether the PR description matches what the diff actually does | [Signal table](#semantic-transparency-layer-5b) |
-| **L5c — Runtime Agent** | eBPF tracepoints on the runner: execve, egress connect, ptrace, /proc/mem — audit or block mode | [WHITEPAPER §8](WHITEPAPER.md) |
+| Layer | What it examines | Verified | Deep dive |
+|---|---|---|---|
+| **L1 — Surface** | File and line counts, deletion ratios, binary files, permission changes, symlinks | — | [Scoring](#scoring-reference) |
+| **L2 — Forensic** | Critical-path deletions, security-sensitive file removal, added file content (CI triggers, shell execution) | — | [WHITEPAPER §3](WHITEPAPER.md) |
+| **L2b — SCA** | Package manifest diffs scanned against an allowlist for unverified dependencies | — | [Config](#sca-layer-2b) |
+| **L2c — Actions Poisoning** | Workflow files: base64 payload, credential harvesting, dormant triggers, forged bot identity, OIDC escalation, unsafe `pull_request_target` | — | [Signals](#github-actions-poisoning-layer-2c) |
+| **L3 — Consequence Model** | Weighted scoring across all signals → single verdict | ✅ CrossHair C1–C12 · Z3 P1–P10 · Dafny POST-1–12 | [Scoring](#scoring-reference) |
+| **L4 — Structural Drift** | AST-level diff: which named classes, functions, and constants were actually deleted | ✅ CrossHair S1–S7 · Dafny S1–S7 | [Languages](#supported-languages-layer-4) |
+| **L5a — Temporal Drift** | Branch age × target repo velocity — a quantified staleness score | ✅ CrossHair T1–T7 · Dafny T1–T8 | [Signals](#temporal-drift-layer-5a) |
+| **L5b — Semantic Transparency** | Whether the PR description matches what the diff actually does | ✅ CrossHair M1–M9 | [Signals](#semantic-transparency-layer-5b) |
+| **L5c — Runtime Agent** | eBPF tracepoints on the runner: execve, egress connect, ptrace, /proc/mem — audit or block mode | — | [WHITEPAPER §8](WHITEPAPER.md) |
 
-The key layers to understand: **L4** catches structural gutting that line counts hide. **L2c** catches CI pipeline poisoning. **L5b** catches deceptive descriptions. **L3** ties it all together into a single score with proven bounds.
+The scoring logic (L3, L4, L5a, L5b) is verified by three independent methods — CrossHair symbolic execution on the actual Python source, Z3 SMT proofs on an abstract model, and Dafny machine-checked proofs over the entire input domain. A bug would have to produce a consistent false result across all three simultaneously to go undetected. **273 tests pass. 9 Dafny postconditions verified, 0 errors.**
 
----
-
-## Formal verification
-
-The scoring logic — the part that determines verdicts — is verified by three independent methods operating on three different representations of the same code.
-
-| Method | What it operates on | What it proves |
-|---|---|---|
-| **Z3 SMT** | Abstract scoring model | Monotonicity, verdict ordering, score bounds — P1–P10 |
-| **CrossHair** | Actual Python source | 35 contracts across 4 layers — C1–C12, S1–S7, T1–T7, M1–M9 |
-| **Dafny + Z3** | Dafny reference implementation | Machine-checked postconditions over the entire input domain — 9 verified, 0 errors |
-
-A scoring bug would have to produce a consistent false result across all three representations simultaneously to go undetected.
-
-**273 tests pass.** All CrossHair checks exit 0. No counterexamples found.
-
-→ [`VERIFICATION.md`](VERIFICATION.md) — full specification, contracts, and run instructions  
+→ [`VERIFICATION.md`](VERIFICATION.md) — contracts, methods, and run instructions  
 → [`VERIFICATION_SPEC.md`](VERIFICATION_SPEC.md) — formal spec for external auditors
 
 ---
