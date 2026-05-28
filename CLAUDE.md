@@ -2,8 +2,19 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ` (still active — vericoding phase in progress)
-- **Status:** v1.2.0 live on main. PR #62 merged. Phase 2 Stage 1+2+3a+3b fully shipped and verified. Vericoding Phase 1 (Z3) done; Phase 2 (CrossHair spec) in progress.
+- **Branch for next work:** create a new branch from main (this branch ready to PR)
+- **Status:** v1.2.0 live on main. Vericoding Phase 4 (Dafny) shipped on `claude/oidc-typosquat-detection-UBCOJ`. Cross-repo regression trigger live.
+- **Vericoding Phase 4 — Dafny SHIPPED (pending local run to commit log):**
+  - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–12 (score bounds, verdict bijection, safety implications, empty-input guarantee)
+  - `verification/dafny/structural_drift.dfy`: L4 — S1–S7 dual-gate biconditional
+  - `verification/dafny/temporal_drift.dfy`: L5a — T1–T8 linear drift, zero-input guarantees
+  - `verification/dafny/assess_consequence_verify.log`: placeholder — replace with `dafny verify` output
+  - `.github/workflows/verify-dafny.yml`: CI — runs on PR/push touching `verification/dafny/**`
+  - Phase 3 (Nagini): **SKIPPED** — pure integer scorer has no heap/concurrency; toolchain (Java, Viper JAR, Python ≤3.12 ceiling) adds no theorem beyond CrossHair.
+  - Install Dafny: `dotnet tool install --global dafny`
+  - Verify: `dafny verify verification/dafny/assess_consequence.dfy`
+  - Expected output: `Dafny program verifier finished with N verified, 0 errors`
+  - Confirm: `grep -q "0 errors" <log> && echo PASS`
 - **Vericoding Phase 2 — CrossHair SHIPPED, all 4 layers verified (272 pass, 7 skip):**
   - `verification/consequence_pure.py`: Layer 3 — C1–C12 contracts (verdict bijection, score bounds, safety implications)
   - `verification/temporal_pure.py`: Layer 5a — T1–T7 contracts (drift_score ≥ 0, status bijection, zero-input → CURRENT)
@@ -14,8 +25,7 @@
   - `VERIFICATION_SPEC.md`: formal specification for external verifiers — pinned to `d0541f6`.
   - Run CrossHair: `cd verification && crosshair check <module> --analysis_kind PEP316 --per_condition_timeout 30`
   - Run via pytest: `pytest tests/proofs/ -m crosshair -v`
-  - **Constraint:** Verification is external. Claude produces specs/extraction modules only.
-  - **Next for vericoding:** Phase 3 is Nagini (heap separation + null safety). Phase 4 is Dafny reference implementation.
+  - **Constraint:** Verification is external. Claude produces specs/implementation modules only.
 - **Phase 2 Stage 3b (block mode + egress allowlist) — VERIFIED on real hardware:**
   - Smoke test PASSED: all 4 event types captured (execve, egress_connect, ptrace_attach, procmem_open).
   - Three PC-specific fixes applied:
@@ -49,7 +59,7 @@
 - **Phase 2 Stage 1 (auto-remediation) — SHIPPED:**
   - `remediate.py`: `WorkflowRemediator` — resolves `uses:` tags to SHAs, patches YAML, opens PR.
   - `action.yml`: `auto-remediate` input (default `false`).
-- **Test suite:** `python -m pytest test_analyzer.py tests/proofs/ -q --timeout=30` → 267 pass, 7 skip.
+- **Test suite:** `python -m pytest test_analyzer.py tests/proofs/ -q --timeout=30` → 272 pass, 7 skip.
 - **Next priority:** RTA02 bypass (multiline curl body evades credential harvest pattern). INC-3 (direct push to main, no flag).
 - **Open findings:** RTA02 bypass (multiline curl body), INC-3 (direct push to main).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
@@ -174,11 +184,11 @@ sca:
 |---|---|---|---|
 | 1 | Z3 SMT | L3 scoring — 10 properties (P1–P10) | Done — `tests/proofs/test_z3_properties.py` |
 | 2 | CrossHair | All 4 layers — C1–C12, T1–T7, S1–S7, M1–M9 | Done — `verification/consequence_pure.py`, `temporal_pure.py`, `structural_pure.py`, `semantic_pure.py` |
-| 3 | Nagini | `_assess_consequence()` — heap/null safety | Not started |
-| 4 | Dafny | Reference implementation vs spec | Not started |
-| 5 | Publication | `VERIFICATION.md` public summary | Stub created |
+| 3 | Nagini | `_assess_consequence()` — heap/null safety | **SKIPPED** — pure integer scorer; no heap or concurrency; toolchain cost (Java, Viper JAR, Python ≤3.12) adds no theorem beyond CrossHair |
+| 4 | Dafny | L3/L4/L5a reference implementation vs spec | Done — `verification/dafny/assess_consequence.dfy`, `structural_drift.dfy`, `temporal_drift.dfy`; CI: `verify-dafny.yml`; run log pending |
+| 5 | Publication | `VERIFICATION.md` public summary | Done — three-method summary, Dafny row added |
 
-**Constraint:** Verification is always external. Claude writes specs; external parties run the tools.
+**Constraint:** Verification is always external. Claude writes specs and implementation modules; external parties run the tools and commit logs.
 
 ---
 

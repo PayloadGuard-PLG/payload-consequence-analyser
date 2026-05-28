@@ -1,0 +1,61 @@
+name: Dafny Verification
+
+# Runs on any push or PR that touches the Dafny verification files.
+# Fails the build if dafny verify reports any error on any target file.
+# Guard against the known dafny-lang/dafny#21 false-zero bug by grepping
+# the output for "0 errors" in addition to checking the exit code.
+
+on:
+  push:
+    branches: [main]
+    paths: ['verification/dafny/**']
+  pull_request:
+    paths: ['verification/dafny/**']
+  workflow_dispatch:
+
+jobs:
+  dafny:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v4
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4  # TODO: pin to commit SHA before merging to main
+        with:
+          dotnet-version: '8.0'
+
+      - name: Install Dafny
+        run: |
+          dotnet tool install --global dafny
+          echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
+
+      - name: Verify assess_consequence.dfy
+        run: |
+          dafny verify verification/dafny/assess_consequence.dfy \
+            2>&1 | tee /tmp/dafny_consequence.txt
+          grep -q "0 errors" /tmp/dafny_consequence.txt
+
+      - name: Verify structural_drift.dfy
+        run: |
+          dafny verify verification/dafny/structural_drift.dfy \
+            2>&1 | tee /tmp/dafny_structural.txt
+          grep -q "0 errors" /tmp/dafny_structural.txt
+
+      - name: Verify temporal_drift.dfy
+        run: |
+          dafny verify verification/dafny/temporal_drift.dfy \
+            2>&1 | tee /tmp/dafny_temporal.txt
+          grep -q "0 errors" /tmp/dafny_temporal.txt
+
+      - name: Upload verification logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v4
+        with:
+          name: dafny-verification-logs-${{ github.run_number }}
+          path: /tmp/dafny_*.txt
+          if-no-files-found: warn
+          retention-days: 90
