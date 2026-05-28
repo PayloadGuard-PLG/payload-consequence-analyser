@@ -1,7 +1,7 @@
 # PayloadGuard — Test Registry
 
-**Last run:** 2026-05-27 11:40 UTC  
-**Result:** 267 passed · 7 skipped · 0 failed · 274 total
+**Last run:** 2026-05-28 08:48 UTC  
+**Result:** 272 passed · 7 skipped · 0 failed · 279 total
 
 Run with: `python -m pytest test_analyzer.py tests/proofs/ --timeout=30 -v`  
 Regenerate this file: `python tools/gen_test_registry.py`
@@ -380,6 +380,14 @@ Regenerate this file: `python tools/gen_test_registry.py`
 - ✓ `test_step_name_tracked`
 - ✓ `test_third_party_action_not_first_party`
 - ✓ `test_yaml_patch_substitutes_sha`
+
+## tests/proofs/test_crosshair_contracts.py — test_crosshair_contracts
+
+- ✓ `test_crosshair_deletion_dim_contracts`
+- ✓ `test_crosshair_assess_consequence_contracts`
+- ✓ `test_crosshair_temporal_drift_contracts`
+- ✓ `test_crosshair_structural_drift_contracts`
+- ✓ `test_crosshair_semantic_mci_contracts`
 
 ## tests/proofs/test_z3_properties.py — test_z3_properties
 
