@@ -56,8 +56,8 @@
   - `remediate.py`: `WorkflowRemediator` — resolves `uses:` tags to SHAs, patches YAML, opens PR.
   - `action.yml`: `auto-remediate` input (default `false`).
 - **Test suite:** `python -m pytest test_analyzer.py tests/proofs/ -q --timeout=30` → 272 pass, 7 skip.
-- **Next priority:** v1.3.0 — RTA02 fix (multiline curl evades credential_harvest) + PLI Layer L4b. See plan file `/root/.claude/plans/megalodon-test-case-plan-agile-comet.md`.
-- **Open findings:** RTA02 bypass (multiline curl body), INC-3 (direct push to main).
+- **Next priority:** v1.3.0 — PLI Layer L4b. RTA02 CLOSED. See plan file `/root/.claude/plans/megalodon-test-case-plan-agile-comet.md`.
+- **Open findings:** INC-3 (direct push to main).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
 - **Blockers:** None.
@@ -171,7 +171,6 @@ sca:
 | ID | Description | Severity | Priority |
 |---|---|---|---|
 | INC-3 | Direct push to main -> L5b returns UNVERIFIED but raises no flag | MEDIUM | Backlog |
-| RTA02 | Multiline curl body (YAML block scalar) evades credential harvest pattern | MEDIUM | Next sprint |
 | §2.3 | Single-branch clone / detached HEAD raises BadName exception | MEDIUM | Backlog |
 
 ## Vericoding Plan (from `payloadguard-vericoding-plan.md` on main)

