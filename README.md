@@ -2,7 +2,7 @@
 
 **Version:** 1.2.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Released:** May 2026 &nbsp;|&nbsp; **Runtime Agent:** Verified on WSL2 / Ubuntu 22.04+
 
-PayloadGuard is a static analysis tool for pull requests. It scans the full diff before a merge and produces a forensic verdict on the risk of the changeset — catching destructive, deceptive, or malicious contributions that code review alone is likely to miss.
+PayloadGuard is a static and runtime analysis tool for pull requests. It scans the full diff before a merge and produces a forensic verdict on the risk of the changeset — catching destructive, deceptive, or malicious contributions that code review alone is likely to miss. An optional eBPF runtime agent fires alongside the static scan on the Actions runner, auditing or blocking suspicious process behaviour at kernel level.
 
 It was built in response to a specific class of incident: a branch held open for months, submitted under a harmless description, containing a diff that would delete tens of thousands of lines and wipe an entire application architecture in a single merge. PayloadGuard makes that class of attack detectable before it reaches main.
 
@@ -10,7 +10,7 @@ It was built in response to a specific class of incident: a branch held open for
 
 ## What it detects
 
-PayloadGuard analyses eight dimensions of risk across every PR:
+PayloadGuard analyses nine dimensions of risk across every PR:
 
 | Layer | What it examines |
 |---|---|
