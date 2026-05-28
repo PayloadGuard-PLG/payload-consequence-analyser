@@ -1,9 +1,10 @@
 # CrossHair Formal Contract Verification — Phase 2 Implementation Plan
 
-**Status:** Implemented  
-**Branch:** `claude/oidc-typosquat-detection-UBCOJ`  
-**Target:** `_assess_consequence()` in `analyze.py` (Layer 3 Consequence Model)  
-**Method:** CrossHair PEP316 docstring contracts via pure extraction module  
+**Status:** Complete — all four scoring layers verified  
+**Branch:** `claude/oidc-typosquat-detection-UBCOJ` (merged to main via PR #66)  
+**Target:** L3 Consequence, L4 Structural, L5a Temporal, L5b Semantic (MCI Phase 3)  
+**Method:** CrossHair PEP316 docstring contracts via pure extraction modules  
+**Test count:** 272 pass, 7 skip  
 
 ---
 
@@ -25,9 +26,12 @@ external dependencies. CrossHair verifies this module directly.
 | File | Purpose |
 |------|---------|
 | `verification/__init__.py` | Makes `verification/` a proper Python package |
-| `verification/consequence_pure.py` | Pure extraction of `_assess_consequence()` — the CrossHair verification target |
-| `tests/proofs/test_crosshair_contracts.py` | pytest wrapper shelling out to the CrossHair CLI |
-| `VERIFICATION.md` | Public-facing documentation of what is proven, how, and what is not |
+| `verification/consequence_pure.py` | L3 — pure extraction of `_assess_consequence()` (C1–C12) |
+| `verification/structural_pure.py` | L4 — pure extraction of dual-gate classification logic (S1–S7) |
+| `verification/temporal_pure.py` | L5a — pure extraction of `analyze_drift()` (T1–T7) |
+| `verification/semantic_pure.py` | L5b — pure extraction of MCI cross-correlation Phase 3 (M1–M9) |
+| `tests/proofs/test_crosshair_contracts.py` | pytest wrapper — 5 CrossHair tests, ~8s |
+| `VERIFICATION.md` | Public-facing documentation — all 4 layers, all contracts |
 | `VERIFICATION_SPEC.md` | Formal specification for external verifiers (CrossHair/Nagini/Dafny) |
 | `CROSSHAIR_PHASE2_PLAN.md` | This document |
 
@@ -132,10 +136,10 @@ both pass.
 | Phase | Tool | Status |
 |-------|------|--------|
 | 1 | Z3 SMT | Done — `tests/proofs/test_z3_properties.py` (P1–P10) |
-| 2 | CrossHair | Done — `verification/consequence_pure.py` (C1–C12) |
+| 2 | CrossHair | Done — all 4 layers: C1–C12, S1–S7, T1–T7, M1–M9 (272 pass) |
 | 3 | Nagini | Not started — heap separation + null safety |
 | 4 | Dafny | Not started — reference implementation |
-| 5 | Publication | Not started — `VERIFICATION.md` public summary (stub created) |
+| 5 | Publication | Stub created — `VERIFICATION.md` covers all 4 layers |
 
 ---
 

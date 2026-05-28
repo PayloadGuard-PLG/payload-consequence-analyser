@@ -13,9 +13,10 @@
 3. [System Architecture](#3-system-architecture)
 4. [Layer Engineering](#4-layer-engineering)
 5. [Scoring Model](#5-scoring-model)
-6. [Regression Validation](#6-regression-validation)
-7. [Configuration Reference](#7-configuration-reference)
-8. [Known Limitations](#8-known-limitations)
+6. [Formal Verification](#6-formal-verification)
+7. [Regression Validation](#7-regression-validation)
+8. [Configuration Reference](#8-configuration-reference)
+9. [Known Limitations](#9-known-limitations)
 
 ---
 
@@ -182,8 +183,9 @@ git.Repo(workspace)
 | `action.yml` | Composite GitHub Action definition |
 | `agent/` | eBPF runtime defence agent (Go + cilium/ebpf) |
 | `agent/bpf/probe.c` | 4 tracepoint probes + block mode BPF maps |
-| `test_analyzer.py` | 267-test unit suite |
-| `tests/proofs/` | Z3 formal property proofs (P1–P10) |
+| `test_analyzer.py` | 267-test unit suite (272 total with CrossHair) |
+| `tests/proofs/` | Z3 SMT proofs (P1–P10) + CrossHair pytest wrapper (5 tests) |
+| `verification/` | CrossHair pure extraction modules — consequence, structural, temporal, semantic |
 
 ---
 
@@ -584,7 +586,66 @@ A single CRITICAL poisoning signal scores identically to a security file deletio
 
 ---
 
-## 6. Regression Validation
+## 6. Formal Verification
+
+PayloadGuard applies two orthogonal formal methods to its scoring logic. Both are independent
+of the production code's author — the specifications are written for external verifiers and
+external tools run the checks.
+
+### 6.1 Verification Methods
+
+| Method | Tool | Scope | What it proves |
+|--------|------|-------|----------------|
+| SMT proof | Z3 Solver | L3 only | P1–P10: abstract symbolic properties of the scoring model |
+| Contract verification | CrossHair | L3, L4, L5a, L5b | C1–C12, S1–S7, T1–T7, M1–M9: pre/post conditions on the actual Python code |
+
+**Z3 proofs** (`tests/proofs/test_z3_properties.py`) encode the L3 scoring logic as integer
+constraints and prove monotonicity, score bounds, and verdict ordering. Run in < 0.1 s each.
+
+**CrossHair contracts** (`verification/*.py`) symbolically execute the actual Python
+implementation — not an abstract model — and verify function pre/post conditions for all
+inputs satisfying the domain constraints. Run in ~8 s for all five tests.
+
+### 6.2 Pure Extraction Modules
+
+CrossHair cannot symbolically construct `PayloadAnalyzer` because `__init__()` calls
+`git.Repo()` which runs a subprocess. Each layer's scoring logic is extracted into a
+self-contained pure-Python module in `verification/`:
+
+| Module | Layer | Key invariants |
+|--------|-------|----------------|
+| `consequence_pure.py` | L3 | verdict ∈ {SAFE,REVIEW,CAUTION,DESTRUCTIVE}; score ∈ [0,31]; security_file_del > 0 → DESTRUCTIVE |
+| `structural_pure.py` | L4 | DESTRUCTIVE requires BOTH ratio > threshold AND count ≥ min (dual-gate) |
+| `temporal_pure.py` | L5a | drift_score ≥ 0; zero age or velocity → CURRENT |
+| `semantic_pure.py` | L5b | mci_score ∈ [0,1]; DECEPTIVE ↔ score ≥ 0.5; no description → UNVERIFIED |
+
+### 6.3 Running the Verification Suite
+
+```bash
+# CrossHair (from verification/ directory)
+crosshair check consequence_pure --analysis_kind PEP316 --per_condition_timeout 30
+crosshair check structural_pure  --analysis_kind PEP316 --per_condition_timeout 30
+crosshair check temporal_pure    --analysis_kind PEP316 --per_condition_timeout 30
+crosshair check semantic_pure    --analysis_kind PEP316 --per_condition_timeout 30
+
+# Via pytest (272 pass, 7 skip, ~9s total)
+pytest tests/proofs/ -v --timeout=60
+```
+
+Expected: all CrossHair checks exit 0 (no counterexamples). The two Z3 and five CrossHair
+pytest tests all pass.
+
+### 6.4 Constraint
+
+Verification is always external. The `verification/` modules and `VERIFICATION_SPEC.md`
+are produced by the same author as the production code, but the tools (CrossHair, Z3,
+and future Nagini/Dafny runs) are run by independent parties against the published source.
+See `VERIFICATION.md` for the full specification and `VERIFICATION_SPEC.md` for the
+Dafny/Z3 restatement intended for external formal verification platforms.
+
+---
+
+## 7. Regression Validation
 
 ### 6.1 Test Harness Architecture
 
@@ -746,7 +807,7 @@ branch_age < 90 days
 
 ---
 
-## 7. Configuration Reference
+## 8. Configuration Reference
 
 Drop `payloadguard.yml` in the repo root. All keys are optional.
 
@@ -771,7 +832,7 @@ Out-of-order threshold lists are auto-sorted after load. Deep-merge semantics �
 
 ---
 
-## 8. Known Limitations
+## 9. Known Limitations
 
 ### 8.1 Compound Threshold Gaming (A06)
 

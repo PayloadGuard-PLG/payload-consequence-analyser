@@ -1,12 +1,20 @@
 # PayloadGuard — Formal Verification
 
-PayloadGuard's Layer 3 scoring model (`_assess_consequence()`) is verified using two
-orthogonal formal methods:
+Four of PayloadGuard's nine analysis layers have pure scoring logic that has been formally
+verified using two orthogonal methods:
 
-| Method    | Tool       | File                                    | What it proves |
-|-----------|------------|-----------------------------------------|----------------|
-| SMT proof | Z3 Solver  | `tests/proofs/test_z3_properties.py`   | P1–P10: symbolic properties of the signal→score→verdict mapping |
-| Contracts | CrossHair  | `verification/consequence_pure.py`     | C1–C12: pre/post conditions on the scoring function implementation |
+| Layer | Function | CrossHair module | Contracts |
+|-------|----------|-----------------|-----------|
+| L3 Consequence | `_assess_consequence()` | `verification/consequence_pure.py` | C1–C12 |
+| L4 Structural | `analyze_structural_drift()` | `verification/structural_pure.py` | S1–S7 |
+| L5a Temporal | `analyze_drift()` | `verification/temporal_pure.py` | T1–T7 |
+| L5b Semantic | `analyze_transparency()` phase 3 | `verification/semantic_pure.py` | M1–M9 |
+
+Additional Z3 SMT proofs cover Layer 3 scoring properties symbolically:
+
+| Method | Tool | File | What it proves |
+|--------|------|------|----------------|
+| SMT proof | Z3 Solver | `tests/proofs/test_z3_properties.py` | P1–P10: symbolic properties of the signal→score→verdict mapping |
 
 Both tools are run externally against the published source. Neither is run by the same
 author as the production code during the same session — see `VERIFICATION_SPEC.md` for
@@ -14,17 +22,24 @@ the formal specification that external tools consume.
 
 ---
 
-## CrossHair Contracts (C1–C12)
+## CrossHair Contracts
 
-CrossHair uses its own Z3-backed engine to explore all inputs satisfying the
-pre-conditions and verify that every post-condition holds on every execution path.
-This is **dynamic symbolic execution** of the actual Python code, not an abstract model.
+CrossHair uses its own Z3-backed engine to explore all inputs satisfying the pre-conditions
+and verify that every post-condition holds on every execution path. This is **dynamic
+symbolic execution** of the actual Python code, not an abstract model.
 
-The verification target is `verification/consequence_pure.py` — a pure extraction of
-`_assess_consequence()` with no `git.Repo` dependency (required because CrossHair cannot
-symbolically construct `PayloadAnalyzer.__init__()` through GitPython subprocess calls).
+**Why pure extraction modules?** CrossHair cannot symbolically construct `PayloadAnalyzer`
+because `__init__()` calls `git.Repo()` which runs `git --version` as a subprocess.
+Each `verification/*.py` module is a self-contained pure-Python mirror of its target —
+no GitPython, no AST parsing, no file I/O.
 
-### Pre-conditions (input domain)
+---
+
+### Layer 3 — Consequence Scoring (C1–C12)
+
+**Target:** `PayloadAnalyzer._assess_consequence()` → `verification/consequence_pure.py`
+
+**Pre-conditions:**
 
 | Pre  | Condition |
 |------|-----------|
@@ -37,49 +52,146 @@ symbolically construct `PayloadAnalyzer.__init__()` through GitPython subprocess
 | P-07 | `content_flags >= 0` |
 | P-08 | `actions_poisoning_flags >= 0` |
 
-### Post-conditions (invariants proven)
+**Contracts:**
 
 | Contract | Invariant | Security significance |
 |----------|-----------|----------------------|
-| C-01 | `verdict in {SAFE, REVIEW, CAUTION, DESTRUCTIVE}` | Verdict is always a valid enum value; no undefined state |
-| C-02 | `severity_score >= 0` | Score never goes negative; no signal acts as a reducer |
-| C-03 | `severity_score <= 31` | Score is bounded; no integer overflow or runaway accumulation |
-| C-04 | `SAFE <-> severity_score < 1` | SAFE verdict is exact; cannot be produced by a non-zero score |
+| C-01 | `verdict in {SAFE, REVIEW, CAUTION, DESTRUCTIVE}` | Verdict is always a valid enum value |
+| C-02 | `severity_score >= 0` | Score never goes negative |
+| C-03 | `severity_score <= 31` | Score is bounded; no runaway accumulation |
+| C-04 | `SAFE <-> severity_score < 1` | SAFE is exact; cannot be produced by a non-zero score |
 | C-05 | `REVIEW <-> 1 <= severity_score < 3` | REVIEW is a closed interval |
 | C-06 | `CAUTION <-> 3 <= severity_score < 5` | CAUTION is a closed interval |
-| C-07 | `DESTRUCTIVE <-> severity_score >= 5` | DESTRUCTIVE verdict is exact |
-| C-08 | `security_file_deletions > 0 -> DESTRUCTIVE` | Deleting any auth/security file always triggers DESTRUCTIVE |
-| C-09 | `structural_severity == CRITICAL -> DESTRUCTIVE` | Structural CRITICAL always triggers DESTRUCTIVE |
-| C-10 | `actions_poisoning_critical -> DESTRUCTIVE` | Critical workflow poisoning always triggers DESTRUCTIVE |
+| C-07 | `DESTRUCTIVE <-> severity_score >= 5` | DESTRUCTIVE is exact |
+| C-08 | `security_file_deletions > 0 -> DESTRUCTIVE` | Any auth/security file deletion → DESTRUCTIVE |
+| C-09 | `structural_severity == CRITICAL -> DESTRUCTIVE` | Structural CRITICAL → DESTRUCTIVE |
+| C-10 | `actions_poisoning_critical -> DESTRUCTIVE` | Critical workflow poisoning → DESTRUCTIVE |
 | C-11 | `all-zero inputs -> SAFE` | Empty PRs never produce a false positive |
-| C-12 | `deletion_dim in [0, 4]` | The aggregated deletion dimension is always capped at 4 |
+| C-12 | `deletion_dim in [0, 4]` | Aggregated deletion dimension always capped at 4 |
+
+---
+
+### Layer 4 — Structural Dual-Gate (S1–S7)
+
+**Target:** `StructuralPayloadAnalyzer.analyze_structural_drift()` → `verification/structural_pure.py`
+
+AST parsing (`structural_parser.extract_named_nodes`) is external I/O. The module receives
+pre-computed node counts and verifies the classification logic only.
+
+**Pre-conditions:**
+
+| Pre | Condition |
+|-----|-----------|
+| P-01 | `original_count >= 0` |
+| P-02 | `0 <= deleted_count <= original_count` |
+| P-03 | `0.0 < deletion_ratio_threshold < 1.0` |
+| P-04 | `min_deletion_count >= 1` |
+
+**Contracts:**
+
+| Contract | Invariant | Security significance |
+|----------|-----------|----------------------|
+| S-01 | `status in {DESTRUCTIVE, SAFE}` | No undefined structural verdict |
+| S-02 | `0.0 <= deletion_ratio <= 1.0` | Ratio is always a valid proportion |
+| S-03 | `DESTRUCTIVE -> deletion_ratio > threshold` | Ratio gate is always required |
+| S-04 | `DESTRUCTIVE -> deleted_count >= min_deletion_count` | Count gate is always required |
+| S-05 | `deleted_count == 0 -> SAFE` | No deletions → never DESTRUCTIVE |
+| S-06 | `original_count == 0 -> SAFE` | Empty file → never DESTRUCTIVE |
+| S-07 | `SAFE -> NOT (ratio > threshold AND count >= min)` | SAFE and DESTRUCTIVE are mutually exclusive |
+
+The dual-gate invariant (S-03 + S-04 together) prevents false positives on tiny files
+where a single deletion produces a high ratio.
+
+---
+
+### Layer 5a — Temporal Drift (T1–T7)
+
+**Target:** `TemporalDriftAnalyzer.analyze_drift()` → `verification/temporal_pure.py`
+
+**Pre-conditions:**
+
+| Pre | Condition |
+|-----|-----------|
+| P-01 | `branch_age_days >= 0` |
+| P-02 | `target_velocity >= 0.0` |
+| P-03 | `warning_threshold > 0.0` |
+| P-04 | `critical_threshold > warning_threshold` |
+
+**Contracts:**
+
+| Contract | Invariant | Security significance |
+|----------|-----------|----------------------|
+| T-01 | `status in {CURRENT, STALE, DANGEROUS}` | No undefined temporal verdict |
+| T-02 | `drift_score >= 0.0` | Score is non-negative (product of two non-negative values) |
+| T-03 | `DANGEROUS -> drift_score >= critical_threshold` | DANGEROUS verdict is always earned |
+| T-04 | `STALE -> warning_threshold <= drift_score < critical_threshold` | STALE is a closed interval |
+| T-05 | `CURRENT -> drift_score < warning_threshold` | CURRENT is the safe band |
+| T-06 | `branch_age_days == 0 -> CURRENT` | New branches never trigger STALE or DANGEROUS |
+| T-07 | `target_velocity == 0.0 -> CURRENT` | Zero-velocity repos never trigger staleness signals |
+
+---
+
+### Layer 5b — Semantic MCI Cross-Correlation (M1–M9)
+
+**Target:** `SemanticTransparencyAnalyzer.analyze_transparency()` Phase 3 → `verification/semantic_pure.py`
+
+Phases 1 (Linguistic Lexer) and 2 (Diff Profiler) involve regex, string operations, and
+GitPython diff objects. This module takes their pre-computed outputs as flat boolean/integer
+parameters and verifies the MCI aggregation and status classification logic.
+
+The V_f signal (hidden_component_modification) involves path string matching against the PR
+description — abstracted as `has_unacknowledged_sensitive: bool`.
+
+**Pre-conditions:**
+
+| Pre | Condition |
+|-----|-----------|
+| P-01 | `total_churn >= 0` |
+| P-02 | `structural_alterations >= 0` |
+| P-03 | `ext_count >= 0` |
+| P-04 | `0.0 <= insertion_ratio <= 1.0` |
+| P-05 | `churn_limit >= 0` |
+| P-06 | `0.0 <= fix_ir_thresh <= 1.0` |
+| P-07 | `not (is_micro and is_macro)` |
+
+**Contracts:**
+
+| Contract | Invariant | Security significance |
+|----------|-----------|----------------------|
+| M-01 | `status in {UNVERIFIED, TRANSPARENT, CAUTION_MISMATCH, DECEPTIVE_PAYLOAD}` | No undefined semantic verdict |
+| M-02 | `0.0 <= mci_score <= 1.0` | Score is always a valid [0,1] value |
+| M-03 | `not has_description -> status == UNVERIFIED` | Missing description always returns UNVERIFIED |
+| M-04 | `not has_description -> mci_score == 0.0` | UNVERIFIED never carries a false MCI score |
+| M-05 | `UNVERIFIED -> not has_description` | UNVERIFIED is only ever produced by missing description |
+| M-06 | `mci_score >= 0.5 -> DECEPTIVE_PAYLOAD` | High deception score always escalates |
+| M-07 | `DECEPTIVE_PAYLOAD -> mci_score >= 0.5` | DECEPTIVE_PAYLOAD is only produced by score ≥ 0.5 |
+| M-08 | `TRANSPARENT -> mci_score == 0.0` | TRANSPARENT verdict always has zero MCI |
+| M-09 | `TRANSPARENT -> not is_macro` | Macro-scope claims are never fully transparent |
 
 ---
 
 ## How to Run Verification
 
-### CrossHair (contract verification)
+### CrossHair (all layers)
 
 ```bash
 # From the project root:
 cd verification
 
-# Full module check (all contracts)
-crosshair check consequence_pure --analysis_kind PEP316 \
-    --per_condition_timeout 30 --max_uninteresting_iterations 10
+# Verify all four layers
+crosshair check consequence_pure --analysis_kind PEP316 --per_condition_timeout 30
+crosshair check structural_pure  --analysis_kind PEP316 --per_condition_timeout 30
+crosshair check temporal_pure    --analysis_kind PEP316 --per_condition_timeout 30
+crosshair check semantic_pure    --analysis_kind PEP316 --per_condition_timeout 30
 
-# Target specific functions
-crosshair check consequence_pure._compute_deletion_dim
-crosshair check consequence_pure.assess_consequence_pure
-
-# Via pytest (faster, regression-oriented, ~10s)
+# Via pytest (all 5 tests, ~8s)
 pytest tests/proofs/test_crosshair_contracts.py -m crosshair -v
 ```
 
-Expected output: exit code 0, no stdout. Counterexamples are reported on stdout with
-the specific input values and the violated contract.
+Expected: exit code 0, no stdout. Counterexamples are reported on stdout with the specific
+input values and the violated contract.
 
-### Z3 SMT Proofs
+### Z3 SMT Proofs (Layer 3)
 
 ```bash
 pytest tests/proofs/test_z3_properties.py -m proof -v --timeout=30
@@ -89,61 +201,59 @@ pytest tests/proofs/test_z3_properties.py -m proof -v --timeout=30
 
 ```bash
 pytest tests/proofs/ -v --timeout=60
+# Expected: 272 pass, 7 skip
 ```
 
 ---
 
 ## Architecture: Why Two Verification Layers?
 
-**Z3 proofs (`tests/proofs/test_z3_properties.py`)** work on an *abstract model* of the
-scoring function — they encode the scoring logic as Z3 integer constraints and prove
-properties about the constraint system. They are fast (< 0.1 s per proof) and prove
-properties that are hard to express as function contracts (e.g., monotonicity across all
-signal combinations, structural ordering of severity levels).
+**Z3 proofs** work on an *abstract model* of the scoring function — encoding the logic as Z3
+integer constraints. Fast (< 0.1 s per proof), they prove properties hard to express as
+function contracts (monotonicity, structural ordering across severity levels).
 
-**CrossHair contracts (`verification/consequence_pure.py`)** work on the *actual Python
-implementation*. CrossHair symbolically executes the code itself, not a model of it.
-This catches a class of bugs that Z3 proofs miss: implementation divergence from the
-model (e.g., an off-by-one in a threshold, a missing `elif`, a wrong operator).
+**CrossHair contracts** work on the *actual Python implementation*. CrossHair symbolically
+executes the code itself, not a model of it. This catches implementation divergence from the
+model — off-by-one thresholds, missing `elif` branches, wrong operators.
 
-The two layers are **orthogonal**:
-
-- Z3 can prove a property about the model even if the Python code is wrong.
-- CrossHair can verify the Python code even if no Z3 model exists for that property.
-
-Together they provide defence-in-depth: a scoring change would have to simultaneously
-fool both the abstract Z3 model and the concrete CrossHair analysis to pass undetected.
+The two layers are **orthogonal**: Z3 can prove a property about the model even if the code
+is wrong; CrossHair can verify the code even if no Z3 model exists for that property. A
+scoring change would have to fool both simultaneously to pass undetected.
 
 ---
 
 ## Sync Requirement
 
-`verification/consequence_pure.py` is an intentional mirror of
-`analyze.py::PayloadAnalyzer._assess_consequence()`. When the scoring logic changes:
+Each `verification/*.py` module is an intentional mirror of its production counterpart.
+When scoring logic changes in `analyze.py`:
 
-1. Update `consequence_pure.py` to match.
-2. Run `cd verification && crosshair check consequence_pure` to verify contracts still hold.
-3. If a contract is violated by the new logic, either fix the implementation or update
-   the contract (with explicit justification in the PR description).
+1. Update the corresponding `verification/*.py` module to match.
+2. Run `crosshair check <module>` from `verification/` to confirm contracts still hold.
+3. If a contract is violated, either fix the implementation or update the contract with
+   explicit justification in the PR description.
 
-The contracts are the specification. If the code violates a contract, that is a bug,
-not a contract update.
+**The contracts are the specification.** A contract violation is a bug, not a contract update.
+
+| Module | Mirrors |
+|--------|---------|
+| `consequence_pure.py` | `PayloadAnalyzer._assess_consequence()` |
+| `structural_pure.py` | `StructuralPayloadAnalyzer.analyze_structural_drift()` |
+| `temporal_pure.py` | `TemporalDriftAnalyzer.analyze_drift()` |
+| `semantic_pure.py` | `SemanticTransparencyAnalyzer.analyze_transparency()` Phase 3 |
 
 ---
 
 ## What Is NOT Verified
 
-- **Config-driven threshold overrides:** `consequence_pure.py` uses default thresholds.
-  If a user configures `branch_age_days: [30, 60, 90]`, the contracts do not cover that
-  scenario.
-- **L4 structural analysis:** `structural_severity` is a string input; the logic for
-  computing that string (AST analysis) is not verified here.
-- **L5 temporal/semantic layers:** These modify the verdict post-hoc; their own logic
-  is not formally verified.
-- **Runtime behaviour under concurrent access:** CrossHair does not model threads.
-- **`actions_cfg` config override for signal scores:** The production code reads
-  `critical_signal_score` and `high_signal_score` from `self.config.actions`.
-  `consequence_pure.py` uses the hardcoded defaults (5 and 3). If overridden, the
-  contracts do not apply to those paths.
+- **Config-driven threshold overrides:** verification modules use default thresholds.
+  User-configured overrides (e.g. `branch_age_days: [30, 60, 90]`) are not covered.
+- **L1 Surface Scan:** raw metric collection from GitPython diff objects — no pure scoring logic.
+- **L2/L2b/L2c:** regex matching, YAML parsing, manifest diffing — separate specs needed.
+- **L5b Phases 1 & 2:** `_stem()`, `_sanitize()`, `_extract_claim()`, `_profile_diff()` —
+  string/regex operations; V_f abstracted as a boolean pre-computed input.
+- **L5c Runtime Agent:** eBPF/kernel boundary — separate formal model needed.
+- **Concurrent access:** CrossHair does not model threads.
+- **Actions config overrides:** `critical_signal_score`/`high_signal_score` from
+  `self.config.actions`; verification modules use hardcoded defaults (5 and 3).
 
 Full scope boundaries are documented in `VERIFICATION_SPEC.md`, Section 6.

@@ -2,6 +2,53 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-05-28 — Vericoding Phase 2: CrossHair Contracts — All Four Scoring Layers
+
+Completed CrossHair formal contract verification for all four layers with pure scoring logic.
+Test suite: **272 pass, 7 skip**. All CrossHair checks exit 0 (no counterexamples found).
+
+### Commits (analyser, branch `claude/oidc-typosquat-detection-UBCOJ`)
+
+- `197c35a` — docs(vericoding): add VERIFICATION_SPEC.md — formal spec for external verification
+- `2a74f8a` — feat(vericoding): CrossHair Phase 2 — C1-C12 contracts on _assess_consequence
+- `d653f0d` — feat(vericoding): CrossHair contracts for L4/L5a/L5b — 272 pass, 7 skip
+
+### PRs
+
+- **#66** (analyser) — CrossHair Phase 2 + VERIFICATION_SPEC.md. Merged.
+
+### What was done
+
+**Phase 2 decision:** CrossHair cannot verify `_assess_consequence()` directly on `PayloadAnalyzer` because `__init__()` calls `git.Repo()` which executes `git --version` as a subprocess — CrossHair blocks all subprocess I/O during symbolic execution. Solution: pure extraction modules in `verification/` that mirror the production scoring logic with no external dependencies.
+
+**Four modules created and verified:**
+
+| Module | Layer | Contracts | Key invariants |
+|--------|-------|-----------|----------------|
+| `consequence_pure.py` | L3 | C1–C12 | verdict ∈ {SAFE,REVIEW,CAUTION,DESTRUCTIVE}, score ∈ [0,31], bijection, security signals → DESTRUCTIVE |
+| `structural_pure.py` | L4 | S1–S7 | DESTRUCTIVE requires dual-gate (ratio > threshold AND count ≥ min), empty input → SAFE |
+| `temporal_pure.py` | L5a | T1–T7 | drift_score ≥ 0, status bijection, zero inputs → CURRENT |
+| `semantic_pure.py` | L5b | M1–M9 | mci_score ∈ [0,1], DECEPTIVE ↔ score ≥ 0.5, no description → UNVERIFIED |
+
+**Implementation notes:**
+
+- Used module-level constants (not list parameters) for thresholds — CrossHair explores list contents symbolically when lists are not fixed-width typed tuples, producing spurious `IndexError` counterexamples.
+- V_f signal in `semantic_pure.py` (hidden_component_modification) involves string matching between path fragments and PR description text — abstracted as `has_unacknowledged_sensitive: bool`. CrossHair cannot reason about arbitrary string matching symbolically.
+- `severity_score` is `int` in the pure modules vs `float` in production (`0.0` initialisation). All increments are integers so no precision loss; `int` gives CrossHair better arithmetic reasoning.
+- `_no_signals()` helper in `consequence_pure.py`: CrossHair's PEP316 parser cannot parse multi-line `implies()` with line continuations in docstrings. Helper encapsulates the compound all-zero-inputs condition on one logical line.
+
+### VERIFICATION_SPEC.md
+
+Formal specification document (for external verifiers — CrossHair/Nagini/Dafny) pinned to commit `d0541f6`. Contains:
+- 11 input preconditions, 13 postconditions (POST-1 through POST-13)
+- Full mathematical scoring model for all 8 sub-steps
+- CrossHair docstring contract stubs
+- Dafny method signature with requires/ensures
+- Z3 independent restatement
+- Scope boundaries (8 layers not specified), known verifier limitations
+
+---
+
 ## 2026-05-27 — Stage 3b: eBPF Block Mode + Egress Allowlist — PC Smoke Test Verified
 
 Full end-to-end verification of the eBPF runtime defence agent on real hardware: WSL2 (kernel 6.6.114.1-microsoft-standard-WSL2), Windows 11. All 4 event types captured. Three correctness bugs found and fixed during PC smoke test.
