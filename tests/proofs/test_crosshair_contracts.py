@@ -11,9 +11,15 @@ Run specifically with:
     pytest tests/proofs/test_crosshair_contracts.py -m crosshair -v
 
 Run the CLI directly for deeper analysis (longer timeouts):
-    cd verification && crosshair check consequence_pure \\
+    cd verification && crosshair check <module> \\
         --analysis_kind PEP316 --per_condition_timeout 30 \\
         --max_uninteresting_iterations 10
+
+Modules covered:
+    consequence_pure  -- Layer 3 consequence scoring (C1-C12)
+    temporal_pure     -- Layer 5a temporal drift (T1-T7)
+    structural_pure   -- Layer 4 structural dual-gate (S1-S7)
+    semantic_pure     -- Layer 5b MCI cross-correlation (M1-M9)
 """
 
 import subprocess
@@ -67,62 +73,99 @@ def _run_crosshair(
     )
 
 
+def _assert_crosshair(result: subprocess.CompletedProcess, target: str) -> None:
+    if result.returncode == 1:
+        pytest.fail(
+            f"CrossHair found a contract violation in {target}:\n{result.stdout}"
+        )
+    elif result.returncode == 2:
+        pytest.skip(
+            f"CrossHair could not import {target} (environment issue):\n{result.stderr[:400]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Layer 3 — Consequence scoring (consequence_pure.py)
+# ---------------------------------------------------------------------------
+
 @_skip_no_crosshair
 @_skip_no_verification
 def test_crosshair_deletion_dim_contracts():
     """
-    CrossHair verifies _compute_deletion_dim() satisfies: 0 <= result <= 4
-    for all inputs satisfying its pre-conditions.
-
-    Covers the key aggregation invariant: three correlated deletion dimensions
-    can never produce a combined score outside [0, 4].
+    _compute_deletion_dim(): result always in [0, 4].
+    Three correlated deletion dimensions can never produce a score outside [0, 4].
     """
-    result = _run_crosshair("consequence_pure._compute_deletion_dim")
-
-    if result.returncode == 1:
-        pytest.fail(
-            f"CrossHair found a contract violation in _compute_deletion_dim:\n"
-            f"{result.stdout}"
-        )
-    elif result.returncode == 2:
-        pytest.skip(
-            f"CrossHair could not import consequence_pure (environment issue):\n"
-            f"{result.stderr[:400]}"
-        )
-    # returncode 0 -> all contracts hold
+    _assert_crosshair(
+        _run_crosshair("consequence_pure._compute_deletion_dim"),
+        "consequence_pure._compute_deletion_dim",
+    )
 
 
 @_skip_no_crosshair
 @_skip_no_verification
 def test_crosshair_assess_consequence_contracts():
     """
-    CrossHair verifies all post-conditions on assess_consequence_pure():
-
-    - verdict in {SAFE, REVIEW, CAUTION, DESTRUCTIVE}
-    - severity_score in [0, 31]
-    - SAFE <-> severity_score < 1
-    - REVIEW <-> 1 <= severity_score < 3
-    - CAUTION <-> 3 <= severity_score < 5
-    - DESTRUCTIVE <-> severity_score >= 5
-    - security_file_deletions > 0 -> DESTRUCTIVE
-    - structural_severity == CRITICAL -> DESTRUCTIVE
-    - actions_poisoning_critical -> DESTRUCTIVE
-    - all-zero inputs -> SAFE
+    assess_consequence_pure(): C1-C12 all hold.
+    verdict in {SAFE,REVIEW,CAUTION,DESTRUCTIVE}, score in [0,31],
+    bijection, safety-critical implications, empty-input guarantee.
     """
-    result = _run_crosshair(
+    _assert_crosshair(
+        _run_crosshair("consequence_pure.assess_consequence_pure", per_condition_timeout=10),
         "consequence_pure.assess_consequence_pure",
-        per_condition_timeout=10,
-        max_iterations=5,
     )
 
-    if result.returncode == 1:
-        pytest.fail(
-            f"CrossHair found a contract violation in assess_consequence_pure:\n"
-            f"{result.stdout}"
-        )
-    elif result.returncode == 2:
-        pytest.skip(
-            f"CrossHair could not import consequence_pure (environment issue):\n"
-            f"{result.stderr[:400]}"
-        )
-    # returncode 0 -> all contracts hold
+
+# ---------------------------------------------------------------------------
+# Layer 5a — Temporal drift (temporal_pure.py)
+# ---------------------------------------------------------------------------
+
+@_skip_no_crosshair
+@_skip_no_verification
+def test_crosshair_temporal_drift_contracts():
+    """
+    analyze_drift_pure(): T1-T7 all hold.
+    status in {CURRENT,STALE,DANGEROUS}, drift_score >= 0,
+    status-score bijection, zero-age and zero-velocity -> CURRENT.
+    """
+    _assert_crosshair(
+        _run_crosshair("temporal_pure.analyze_drift_pure"),
+        "temporal_pure.analyze_drift_pure",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Layer 4 — Structural dual-gate (structural_pure.py)
+# ---------------------------------------------------------------------------
+
+@_skip_no_crosshair
+@_skip_no_verification
+def test_crosshair_structural_drift_contracts():
+    """
+    assess_structural_drift_pure(): S1-S7 all hold.
+    DESTRUCTIVE requires BOTH ratio > threshold AND deleted >= min_count.
+    No deletions and empty file always -> SAFE.
+    """
+    _assert_crosshair(
+        _run_crosshair("structural_pure.assess_structural_drift_pure"),
+        "structural_pure.assess_structural_drift_pure",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Layer 5b — Semantic MCI cross-correlation (semantic_pure.py)
+# ---------------------------------------------------------------------------
+
+@_skip_no_crosshair
+@_skip_no_verification
+def test_crosshair_semantic_mci_contracts():
+    """
+    compute_mci_pure(): M1-M9 all hold.
+    status in {UNVERIFIED,TRANSPARENT,CAUTION_MISMATCH,DECEPTIVE_PAYLOAD},
+    mci_score in [0,1], DECEPTIVE <-> score >= 0.5,
+    no description -> UNVERIFIED, TRANSPARENT -> score == 0.0.
+    """
+    _assert_crosshair(
+        _run_crosshair("semantic_pure.compute_mci_pure"),
+        "semantic_pure.compute_mci_pure",
+    )
+

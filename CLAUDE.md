@@ -4,17 +4,18 @@
 
 - **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ` (still active — vericoding phase in progress)
 - **Status:** v1.2.0 live on main. PR #62 merged. Phase 2 Stage 1+2+3a+3b fully shipped and verified. Vericoding Phase 1 (Z3) done; Phase 2 (CrossHair spec) in progress.
-- **Vericoding Phase 2 — CrossHair SHIPPED (C1–C12 all hold):**
-  - `verification/consequence_pure.py`: pure extraction of `_assess_consequence()` (no git.Repo dep, required for CrossHair to symbolically execute it).
-  - `tests/proofs/test_crosshair_contracts.py`: pytest wrapper (`@pytest.mark.crosshair`) — both tests pass in ~6s.
+- **Vericoding Phase 2 — CrossHair SHIPPED, all 4 layers verified (272 pass, 7 skip):**
+  - `verification/consequence_pure.py`: Layer 3 — C1–C12 contracts (verdict bijection, score bounds, safety implications)
+  - `verification/temporal_pure.py`: Layer 5a — T1–T7 contracts (drift_score ≥ 0, status bijection, zero-input → CURRENT)
+  - `verification/structural_pure.py`: Layer 4 — S1–S7 contracts (dual-gate: DESTRUCTIVE requires BOTH ratio > threshold AND count ≥ min)
+  - `verification/semantic_pure.py`: Layer 5b — M1–M9 contracts (mci_score ∈ [0,1], DECEPTIVE ↔ score ≥ 0.5, no-description → UNVERIFIED)
+  - `tests/proofs/test_crosshair_contracts.py`: 5 pytest tests (`@pytest.mark.crosshair`) — all pass in ~8s.
   - `VERIFICATION.md`: public-facing doc — what is proven, how, what is not, sync requirement.
-  - `CROSSHAIR_PHASE2_PLAN.md`: full implementation plan committed to repo.
-  - `VERIFICATION_SPEC.md`: formal specification for external verifiers (CrossHair/Nagini/Dafny) — pinned to `d0541f6`.
-  - Test count: **269 pass, 7 skip** (267 existing + 2 CrossHair).
-  - Run CrossHair: `cd verification && crosshair check consequence_pure --analysis_kind PEP316 --per_condition_timeout 30`
+  - `VERIFICATION_SPEC.md`: formal specification for external verifiers — pinned to `d0541f6`.
+  - Run CrossHair: `cd verification && crosshair check <module> --analysis_kind PEP316 --per_condition_timeout 30`
   - Run via pytest: `pytest tests/proofs/ -m crosshair -v`
-  - **Constraint:** Verification is external. Claude produces specs/extraction modules only. External parties run the tools.
-  - **Next for vericoding:** Phase 3 is Nagini (heap separation + null safety). Phase 4 is Dafny reference implementation. Vericoding plan is in `payloadguard-vericoding-plan.md` on main.
+  - **Constraint:** Verification is external. Claude produces specs/extraction modules only.
+  - **Next for vericoding:** Phase 3 is Nagini (heap separation + null safety). Phase 4 is Dafny reference implementation.
 - **Phase 2 Stage 3b (block mode + egress allowlist) — VERIFIED on real hardware:**
   - Smoke test PASSED: all 4 event types captured (execve, egress_connect, ptrace_attach, procmem_open).
   - Three PC-specific fixes applied:
@@ -95,9 +96,9 @@ action.yml           — GitHub Action composite wrapper
 agent/               — eBPF runtime defence agent (Go + cilium/ebpf)
 agent/bpf/probe.c    — 4 tracepoint probes + pg_config/egress_allow_ipv4 BPF maps
 scripts/pc-smoke-test.sh — one-command build+verify on real kernel
-test_analyzer.py     — pytest suite (267 tests, + 2 CrossHair = 269 total)
+test_analyzer.py     — pytest suite (267 tests, + 5 CrossHair = 272 total)
 tests/proofs/        — Z3 formal property proofs (P1–P10) + CrossHair pytest wrapper
-verification/        — CrossHair verification target: consequence_pure.py (C1–C12)
+verification/        — CrossHair verification targets: consequence_pure (C1-C12), temporal_pure (T1-T7), structural_pure (S1-S7), semantic_pure (M1-M9)
 allowlist.yml        — SCA package allowlist (user-created, not in repo by default)
 payloadguard.yml     — per-repo threshold config (user-created, not in repo by default)
 AUDIT_LOG.md         — architectural review findings + incident reports
@@ -172,7 +173,7 @@ sca:
 | Phase | Tool | Target | Status |
 |---|---|---|---|
 | 1 | Z3 SMT | L3 scoring — 10 properties (P1–P10) | Done — `tests/proofs/test_z3_properties.py` |
-| 2 | CrossHair | `_assess_consequence()` — C1–C12 contracts | Done — `verification/consequence_pure.py` |
+| 2 | CrossHair | All 4 layers — C1–C12, T1–T7, S1–S7, M1–M9 | Done — `verification/consequence_pure.py`, `temporal_pure.py`, `structural_pure.py`, `semantic_pure.py` |
 | 3 | Nagini | `_assess_consequence()` — heap/null safety | Not started |
 | 4 | Dafny | Reference implementation vs spec | Not started |
 | 5 | Publication | `VERIFICATION.md` public summary | Stub created |
