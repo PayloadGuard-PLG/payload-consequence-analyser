@@ -30,8 +30,9 @@ jobs:
             "https://github.com/dafny-lang/dafny/releases/download/v${DAFNY_VERSION}/dafny-${DAFNY_VERSION}-x64-ubuntu-20.04.zip" \
             -o /tmp/dafny.zip
           unzip -q /tmp/dafny.zip -d /tmp/dafny
-          DAFNY_DIR=$(find /tmp/dafny -maxdepth 1 -type d -name 'dafny-*' | head -1)
-          echo "${DAFNY_DIR}" >> $GITHUB_PATH
+          DAFNY_BIN=$(find /tmp/dafny -name 'dafny' -type f | head -1)
+          echo "Dafny binary found at: ${DAFNY_BIN}"
+          echo "$(dirname "${DAFNY_BIN}")" >> $GITHUB_PATH
 
       - name: Verify assess_consequence.dfy
         run: |
