@@ -1,6 +1,6 @@
 # PayloadGuard
 
-**Version:** 1.2.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Released:** May 2026 &nbsp;|&nbsp; **Runtime Agent:** Verified on WSL2 / Ubuntu 22.04+
+**Version:** 1.2.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Released:** May 2026 &nbsp;|&nbsp; **Runtime Agent:** Verified on WSL2 / Ubuntu 22.04+ &nbsp;|&nbsp; **Formally Verified:** CrossHair symbolic execution · Z3 SMT — [details](#formal-verification)
 
 PayloadGuard is a static and runtime analysis tool for pull requests. It scans the full diff before a merge and produces a forensic verdict on the risk of the changeset — catching destructive, deceptive, or malicious contributions that code review alone is likely to miss. An optional eBPF runtime agent fires alongside the static scan on the Actions runner, auditing or blocking suspicious process behaviour at kernel level.
 
@@ -429,6 +429,36 @@ Files in languages without an installed grammar are skipped. Other file types co
 
 ---
 
+## Formal Verification
+
+Four scoring layers are formally verified by two independent methods. Verification is run externally against the published source — not by the same author during the same session.
+
+| Layer | Verified function | Method | Contracts |
+|-------|-------------------|--------|-----------|
+| L3 Consequence | `_assess_consequence()` — verdict enum, score bounds [0, 31], bijection, safety implications | CrossHair | C1–C12 |
+| L4 Structural | `analyze_structural_drift()` — dual-gate: DESTRUCTIVE requires ratio > threshold AND count ≥ min | CrossHair | S1–S7 |
+| L5a Temporal | `analyze_drift()` — drift score ≥ 0, status bijection, zero-input → CURRENT | CrossHair | T1–T7 |
+| L5b Semantic | `analyze_transparency()` phase 3 — MCI score ∈ [0, 1], DECEPTIVE ↔ score ≥ 0.5 | CrossHair | M1–M9 |
+| L3 (abstract model) | Score bounds, monotonicity, verdict ordering | Z3 SMT | P1–P10 |
+
+272 tests pass. All CrossHair checks exit 0. No counterexamples found.
+
+Full specification: [`VERIFICATION.md`](VERIFICATION.md)  
+Formal spec for external auditors: [`VERIFICATION_SPEC.md`](VERIFICATION_SPEC.md)
+
+```bash
+# CrossHair — run from the verification/ directory
+crosshair check consequence_pure --analysis_kind PEP316 --per_condition_timeout 30
+crosshair check structural_pure  --analysis_kind PEP316 --per_condition_timeout 30
+crosshair check temporal_pure    --analysis_kind PEP316 --per_condition_timeout 30
+crosshair check semantic_pure    --analysis_kind PEP316 --per_condition_timeout 30
+
+# Via pytest
+pytest tests/proofs/ -v --timeout=60
+```
+
+---
+
 ## Contributing
 
 The test suite is the contract. Before submitting a PR:
@@ -437,7 +467,7 @@ The test suite is the contract. Before submitting a PR:
 python -m pytest test_analyzer.py -v
 ```
 
-All 236 tests must pass. New detection signals require corresponding test coverage in the relevant test class for the layer being extended.
+All tests must pass (currently 272). New detection signals require corresponding test coverage in the relevant test class for the layer being extended.
 
 Open findings are tracked in `AUDIT_LOG.md`. Check there before opening a duplicate issue.
 

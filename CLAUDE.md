@@ -2,8 +2,8 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ` (still active — vericoding phase in progress)
-- **Status:** v1.2.0 live on main. PR #62 merged. Phase 2 Stage 1+2+3a+3b fully shipped and verified. Vericoding Phase 1 (Z3) done; Phase 2 (CrossHair spec) in progress.
+- **Branch for next work:** create a new branch from main (docs/cleanup-stale-planning-docs was the last doc-only branch; that PR is now merged)
+- **Status:** v1.2.0 live on main. All Phase 2 stages shipped and verified. Vericoding Phase 2 (CrossHair) complete — all 4 layers. Documentation cleanup committed (6 stale planning docs removed, README formal verification section added, TEST_REPORT/REGISTRY updated to 272).
 - **Vericoding Phase 2 — CrossHair SHIPPED, all 4 layers verified (272 pass, 7 skip):**
   - `verification/consequence_pure.py`: Layer 3 — C1–C12 contracts (verdict bijection, score bounds, safety implications)
   - `verification/temporal_pure.py`: Layer 5a — T1–T7 contracts (drift_score ≥ 0, status bijection, zero-input → CURRENT)
@@ -224,6 +224,7 @@ The agent preflight canary will warn and exit 0 gracefully if tracepoints are un
 - **No MCP push_files:** Confirmed broken in multiple sessions. Don't retry.
 - **Commit style:** Imperative, specific, with test count in body. See git log for examples.
 - **NotebookLM:** Do not use for active code sessions -- use only for reading stable documents.
+- **Documentation style:** Professional and concise throughout. No informal, casual, or whimsical language in any documentation, commit messages, comments, or README content. State facts directly. Every sentence must earn its place.
 
 ---
 
