@@ -1,24 +1,36 @@
 # PayloadGuard — Formal Verification
 
-Four of PayloadGuard's nine analysis layers have pure scoring logic that has been formally
-verified using two orthogonal methods:
+Three orthogonal verification methods cover the pure scoring logic across four analysis layers.
 
-| Layer | Function | CrossHair module | Contracts |
-|-------|----------|-----------------|-----------|
+### CrossHair Symbolic Execution (Phase 2)
+
+| Layer | Function | Module | Contracts |
+|-------|----------|--------|-----------|
 | L3 Consequence | `_assess_consequence()` | `verification/consequence_pure.py` | C1–C12 |
 | L4 Structural | `analyze_structural_drift()` | `verification/structural_pure.py` | S1–S7 |
 | L5a Temporal | `analyze_drift()` | `verification/temporal_pure.py` | T1–T7 |
 | L5b Semantic | `analyze_transparency()` phase 3 | `verification/semantic_pure.py` | M1–M9 |
 
-Additional Z3 SMT proofs cover Layer 3 scoring properties symbolically:
+### Z3 SMT Proofs (Phase 1)
 
 | Method | Tool | File | What it proves |
 |--------|------|------|----------------|
-| SMT proof | Z3 Solver | `tests/proofs/test_z3_properties.py` | P1–P10: symbolic properties of the signal→score→verdict mapping |
+| SMT proof | Z3 Solver | `tests/proofs/test_z3_properties.py` | P1–P10: signal→score→verdict properties (monotonicity, ordering, bijection) |
 
-Both tools are run externally against the published source. Neither is run by the same
-author as the production code during the same session — see `VERIFICATION_SPEC.md` for
-the formal specification that external tools consume.
+### Dafny Machine-Checked Proofs (Phase 4)
+
+| Layer | Dafny method | File | Postconditions |
+|-------|-------------|------|----------------|
+| L3 Consequence | `AssessConsequence` | `verification/dafny/assess_consequence.dfy` | POST-1–12 (score bounds, verdict bijection, safety implications, empty-input guarantee) |
+| L4 Structural | `AssessStructuralDrift` | `verification/dafny/structural_drift.dfy` | S1–S7 (dual-gate biconditional) |
+| L5a Temporal | `AnalyzeTemporalDrift` | `verification/dafny/temporal_drift.dfy` | T1–T8 (linear drift, zero-input guarantees) |
+
+Dafny translates each annotated method into Boogie verification conditions and discharges
+them with Z3. Verification covers the entire input domain, not a bounded sample.
+The `.dfy` files plus committed verifier logs are the citable proof artifacts.
+
+All verification tools are run externally against the published source. See `VERIFICATION_SPEC.md`
+for the formal specification that external tools consume.
 
 ---
 
@@ -175,10 +187,8 @@ description — abstracted as `has_unacknowledged_sensitive: bool`.
 ### CrossHair (all layers)
 
 ```bash
-# From the project root:
 cd verification
 
-# Verify all four layers
 crosshair check consequence_pure --analysis_kind PEP316 --per_condition_timeout 30
 crosshair check structural_pure  --analysis_kind PEP316 --per_condition_timeout 30
 crosshair check temporal_pure    --analysis_kind PEP316 --per_condition_timeout 30
@@ -197,7 +207,24 @@ input values and the violated contract.
 pytest tests/proofs/test_z3_properties.py -m proof -v --timeout=30
 ```
 
-### Full verification suite
+### Dafny (Layers 3, 4, 5a)
+
+```bash
+# Install once
+dotnet tool install --global dafny
+
+# Verify each file
+dafny verify verification/dafny/assess_consequence.dfy
+dafny verify verification/dafny/structural_drift.dfy
+dafny verify verification/dafny/temporal_drift.dfy
+```
+
+Expected: `Dafny program verifier finished with N verified, 0 errors` and exit code 0.
+Also grep for `"0 errors"` to guard against the known dafny-lang/dafny#21 false-zero issue.
+
+CI runs Dafny automatically on any PR touching `verification/dafny/**` via `.github/workflows/verify-dafny.yml`.
+
+### Full Python verification suite
 
 ```bash
 pytest tests/proofs/ -v --timeout=60
@@ -206,19 +233,24 @@ pytest tests/proofs/ -v --timeout=60
 
 ---
 
-## Architecture: Why Two Verification Layers?
+## Architecture: Three Orthogonal Verification Layers
 
-**Z3 proofs** work on an *abstract model* of the scoring function — encoding the logic as Z3
-integer constraints. Fast (< 0.1 s per proof), they prove properties hard to express as
-function contracts (monotonicity, structural ordering across severity levels).
+**Z3 proofs** operate on an *abstract model* — encoding the scoring logic as Z3 integer
+constraints. Fast (< 0.1 s per proof), they prove properties hard to express as function
+contracts: monotonicity, structural ordering across severity levels.
 
-**CrossHair contracts** work on the *actual Python implementation*. CrossHair symbolically
-executes the code itself, not a model of it. This catches implementation divergence from the
+**CrossHair contracts** operate on the *actual Python implementation*. CrossHair symbolically
+executes the code itself, not a model. This catches implementation divergence from the
 model — off-by-one thresholds, missing `elif` branches, wrong operators.
 
-The two layers are **orthogonal**: Z3 can prove a property about the model even if the code
-is wrong; CrossHair can verify the code even if no Z3 model exists for that property. A
-scoring change would have to fool both simultaneously to pass undetected.
+**Dafny proofs** operate on a *Dafny reference implementation* of the scoring logic.
+Dafny translates the annotated method into Boogie verification conditions and discharges
+them with Z3 over the entire input domain. The resulting `.dfy` file and verifier output
+are the peer-reviewable proof artifacts.
+
+The three layers are **independent**: each uses a different representation of the scoring
+function (abstract model, Python source, Dafny spec). A scoring change would have to
+produce a consistent error across all three simultaneously to pass undetected.
 
 ---
 
