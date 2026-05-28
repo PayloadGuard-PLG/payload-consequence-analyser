@@ -460,6 +460,30 @@ aligned with production code.
 
 ---
 
+## Findings Register — 2026-05-28
+
+### Dafny Phase 4 — Machine-Checked Proofs
+
+Three `.dfy` reference implementations verified with Dafny 4.9.1 + bundled Z3.
+
+| Layer | File | Postconditions | Result |
+|---|---|---|---|
+| L3 Consequence | `verification/dafny/assess_consequence.dfy` | POST-1–12 | **7 verified, 0 errors** |
+| L4 Structural | `verification/dafny/structural_drift.dfy` | S1–S7 | **1 verified, 0 errors** |
+| L5a Temporal | `verification/dafny/temporal_drift.dfy` | T1–T8 | **1 verified, 0 errors** |
+
+CI workflow `verify-dafny.yml` runs on every PR/push touching `verification/dafny/**`.
+
+### RTA02 — Multiline curl credential harvest bypass — CLOSED
+
+| ID | Finding | Severity | Status | Commit |
+|---|---|---|---|---|
+| RTA02 | Multiline curl with `secrets.*` on continuation line evades `credential_harvest` patterns — `[^\n]*` stops at YAML block scalar line boundaries | MEDIUM | **Fixed** | `0bfeb60` — `_normalize_yaml_content()` applied to credential_harvest loop |
+
+Test: `test_multiline_curl_credential_harvest_detected`. Suite: **273 pass, 7 skip**.
+
+---
+
 ## Next Audit Checklist
 
 Copy this section into the next audit issue or branch PR description.

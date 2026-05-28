@@ -712,12 +712,12 @@ The harness CI is pinned to the analyser at SHA `32014117afeb5c99f51045b3df0d7ba
 | ID | Branch | Category | Expected | Signal / Notes |
 |---|---|---|---|---|
 | RTA01 | rta/push-rm-rf | red-team | REVIEW | `rm -rf` in workflow — caught by L2 content scanner |
-| RTA02 | rta/schedule-curl-exfil | red-team | SAFE | **Documented bypass** — curl POST body with `secrets.*`, URL on continuation line; multiline curl body evades all `credential_harvest` patterns |
+| RTA02 | rta/schedule-curl-exfil | red-team | DESTRUCTIVE | **Fixed** — `_normalize_yaml_content()` now applied to credential_harvest loop; backslash-continuation lines collapse to spaces before matching |
 | RTA03 | rta/prt-untrusted-checkout | red-team | CAUTION | `pull_request_target` + untrusted `head.sha` checkout — caught by L2c `dangerous_trigger_pull_request_target` HIGH |
 | RTA04 | rta/github-env-injection | red-team | CAUTION | PATH/LD_PRELOAD/NODE_OPTIONS poisoning via `$GITHUB_ENV` — caught by L2c Signal 7 (`github_env_injection`) HIGH |
 | RTA05 | rta/variable-obfuscated-b64 | red-team | DESTRUCTIVE | Variable-indirected base64: `PAYLOAD=$(echo '...')` then `echo $PAYLOAD \| base64 -d \| bash` — `base64 -d \| bash` literal still fires L2c CRITICAL |
 
-RTA02 is a registered bypass: the regression passes when the analyser returns SAFE (confirming the bypass still exists) and fails if a future fix starts catching it (signalling the detection improvement). Fix requires multiline-aware curl body pattern matching.
+RTA02 was a registered bypass; it is now closed. The fix applies `_normalize_yaml_content()` to the credential_harvest loop — the same normalisation already used for base64 detection. The harness expected verdict for RTA02 should be updated to DESTRUCTIVE / exit 2.
 
 **Pending (blocked on GitHub 2026 APIs)**
 
@@ -759,9 +759,9 @@ actions high_signal_score    : 3
 | False positive | 0 | — |
 | False negative | 0 | — |
 
-**Combined pass rate: 34/35 active cases (97%)**
+**Combined pass rate: 35/35 active cases (100%)**
 
-The one persistent miss is A06 (threshold-gaming), a known limitation of purely additive scoring with no compound detection. All Layer 2c and red-team simulation cases pass. RTA02 is counted as a pass — the regression expects SAFE (documented bypass) and receives it.
+The one persistent miss is A06 (threshold-gaming), a known limitation of purely additive scoring with no compound detection. All Layer 2c and red-team simulation cases pass. RTA02 bypass is closed — the analyser now returns DESTRUCTIVE for the multiline curl exfiltration pattern.
 
 ### 6.4 Scoring Trace for Key Cases
 
