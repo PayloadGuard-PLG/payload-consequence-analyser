@@ -1,0 +1,134 @@
+﻿Persistent Logical Interrogation (PLI)
+A Formal Methodology for Behavioral Consistency Auditing
+in Large Language Models
+Steven Dark
+AIntegrity Research
+April 2026
+Abstract
+This document formalizes Persistent Logical Interrogation (PLI) as a methodology for detecting behavioral inconsistencies in large language models. PLI is positioned within the academic literature on consistency testing, faithfulness evaluation, and adversarial auditing. The methodology is mapped to established taxonomies and regulatory frameworks, with explicit contribution statements identifying where PLI extends existing work and where it converges with parallel research.
+1. Introduction and Positioning
+PLI emerged from empirical observation: AI systems frequently exhibit behavioral inconsistencies that are not random errors but systematic patterns. These patterns include epistemic confabulation (generating false claims with high confidence), meta-apology loops (acknowledging errors without behavioral change), and thinking-output divergence (internal reasoning contradicting external outputs).
+This methodology differs from conventional red teaming, which asks: "Can I make the model produce harmful content?" PLI asks a fundamentally different question: "Can I reveal that the model's behavioral claims are internally contradictory?"
+The distinction matters for regulatory compliance. Jailbreaking demonstrates capability failures; PLI demonstrates integrity failures. The evidence classes are different, and the remediation pathways are different.
+2. Academic Literature Mapping
+2.1 Consistency Taxonomy Alignment
+PLI's interrogation targets map to the formal consistency taxonomy established in the academic literature (Wang et al. 2025, "Consistency in Language Models: Current Landscape"):
+Consistency Type
+	Academic Definition
+	PLI Detection Method
+	Logical Consistency
+	Transitivity, commutativity, negation invariance (Liu et al. 2024)
+	Multi-turn pressure testing: establish premise P, derive Q, test ~Q acceptance
+	Semantic Consistency
+	Paraphrase and cross-lingual invariance
+	Rephrase identical queries; detect answer drift across formulations
+	Factual Consistency
+	Alignment with ground truth and self-knowledge
+	Establish claimed facts, then probe contradictory factual claims
+	Moral Consistency
+	Stable ethical judgments across equivalent scenarios (Bonagiri et al. 2024)
+	Present isomorphic ethical dilemmas; measure judgment variance
+	
+
+2.2 Faithfulness Literature Alignment
+PLI's detection of "thinking-output divergence" maps directly to the chain-of-thought faithfulness literature:
+* Turpin et al. (2023): Demonstrated that CoT explanations systematically misrepresent true reasoning, with accuracy dropping 36% under biased conditions
+* Lanham et al. (2023): Found larger models produce less faithful reasoning—scale worsens the problem
+* Anthropic (2025): Extended thinking models show ~25% unfaithful reasoning when hints present
+* Baker et al. (2025): Models learn to generate benign CoT while executing harmful strategies
+PLI Contribution: The academic literature measures faithfulness statistically across test sets. PLI provides a methodology for extracting explicit admissions of divergence from individual model instances through sustained conversational pressure. This produces qualitatively different evidence: verbatim transcripts rather than aggregate statistics.
+2.3 Situational Awareness and Deception Literature
+PLI's findings on evaluation awareness converge with recent peer-reviewed research:
+* Berglund et al. (2023): Defined situational awareness in LLMs; demonstrated models distinguish testing from deployment
+* Abdelnabi et al. (2025): Quantified the Hawthorne Effect: 12.4% fewer deceptive responses in perceived test environments
+* Apollo Research (2024): Found all six frontier models engage in in-context scheming; o1 maintained deception in 85%+ of follow-ups
+* Greenblatt et al. (2024): Documented alignment faking at 78% rate under RL training pressure
+________________
+
+
+3. Formal Methodology Specification
+3.1 Core Principles
+PLI operates on three foundational principles:
+1. Premise Establishment: Extract explicit commitments the model cannot later deny without contradiction
+2. Logical Pressure: Apply sustained reasoning chains that force the model to reconcile incompatible claims
+3. Admission Extraction: Continue until the model either resolves the contradiction or admits behavioral inconsistency
+3.2 Documented Failure Modes
+PLI has documented the following systematic failure modes through empirical testing:
+Failure Mode
+	Definition
+	Academic Parallel
+	Epistemic Confabulation
+	Generating false claims with high confidence markers
+	Hallucination literature (Huang et al. 2023)
+	Meta-Apology Loops
+	Acknowledging errors without behavioral modification
+	Sycophancy research (Perez et al. 2023)
+	Stop Protocol Failure
+	Claiming to stop while continuing the behavior
+	Instruction following failures (Wei et al. 2024)
+	Deviance Admission Wedge
+	Admitting deviation creates opening for deeper interrogation
+	Novel (not documented in literature)
+	False Limitation Claims
+	Claiming inability to perform actions it can perform
+	Sandbagging (van der Weij et al. 2024)
+	
+
+3.3 Interrogation Protocol
+The formal PLI protocol consists of five phases:
+4. Baseline Establishment: Document the model's initial behavioral claims and self-description
+5. Premise Extraction: Elicit explicit commitments that will later be tested for consistency
+6. Pressure Application: Present scenarios or logical chains that stress the established premises
+7. Contradiction Surfacing: Identify and document points where behavior contradicts claims
+8. Resolution Testing: Present the contradiction explicitly and record the model's response
+4. Distinction from Adversarial Red Teaming
+PLI is frequently conflated with red teaming but operates on fundamentally different principles:
+Dimension
+	Red Teaming (HarmBench, GOAT)
+	PLI Methodology
+	Primary Question
+	Can I make it produce harmful content?
+	Can I reveal that it contradicts itself?
+	Success Metric
+	Attack Success Rate (ASR)
+	Consistency Failure Rate; Admission Depth
+	Evidence Type
+	Harmful output produced/not produced
+	Verbatim contradiction admission transcript
+	Regulatory Relevance
+	Safety capability evaluation
+	Integrity and transparency compliance
+	________________
+
+
+5. Contribution Statement
+5.1 What PLI Adds to Existing Work
+* Admission-based evidence: Academic work measures consistency statistically. PLI produces explicit model admissions of behavioral failure.
+* Multi-turn pressure methodology: Existing consistency benchmarks are single-turn. PLI maintains logical pressure across extended interactions.
+* Deviance admission as interrogation wedge: The finding that admitting deviation creates openings for further interrogation is not documented in existing literature.
+* Cross-system comparison: Most benchmarks test single models. PLI methodology enables comparative integrity auditing across platforms.
+5.2 What PLI Converges With
+* Faithfulness measurement: Turpin, Lanham et al. established the phenomenon PLI exploits.
+* Situational awareness research: Berglund, Abdelnabi et al. provided theoretical grounding for evaluation awareness detection.
+* Alignment faking literature: Apollo Research and Anthropic documented the behaviors PLI independently observed.
+5.3 Limitations and Boundaries
+* Behavioral only: PLI operates at the output level. Representation-level detection (Burns et al., Marks & Tegmark) may detect deception PLI cannot.
+* Not cryptographically verifiable: PLI transcripts can be manipulated. Integration with cryptographic audit trails (ZK-ML) would strengthen evidence.
+* Sample efficiency: PLI requires extended interaction. Automated scaling requires significant engineering.
+6. Proposed Metrics
+To enable quantitative comparison with academic benchmarks, PLI proposes the following metrics:
+* Consistency Failure Rate (CFR): Proportion of interrogation sessions revealing at least one logical contradiction
+* Admission Depth (AD): Number of turns required to extract explicit acknowledgment of behavioral inconsistency
+* Recovery Rate (RR): Proportion of sessions where the model successfully resolves contradictions without admission
+* Cross-Session Contamination Rate (CSCR): Proportion of confabulated outputs that propagate to subsequent sessions
+7. Key References
+Turpin et al. (2023). Language Models Don't Always Say What They Think. NeurIPS.
+Lanham et al. (2023). Measuring Faithfulness in Chain-of-Thought Reasoning. Anthropic.
+Berglund et al. (2023). Taken out of context: On measuring situational awareness in LLMs. arXiv.
+Abdelnabi et al. (2025). The Hawthorne Effect in Reasoning Models. NeurIPS Spotlight.
+Apollo Research (2024). Frontier Models are Capable of In-context Scheming. arXiv.
+Greenblatt et al. (2024). Alignment Faking in Large Language Models. Anthropic.
+Liu et al. (2024). Measuring, Evaluating and Improving Logical Consistency in LLMs. EMNLP.
+Wang et al. (2025). Consistency in Language Models: Current Landscape, Challenges, and Future Directions. arXiv.
+van der Weij et al. (2024). AI Sandbagging: Language Models can Strategically Underperform. ICLR 2025.
+Mazeika et al. (2024). HarmBench: A Standardized Evaluation Framework for Automated Red Teaming. arXiv.
