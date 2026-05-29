@@ -19,4 +19,4 @@ tree-sitter-rust>=0.21.0
 tree-sitter-java>=0.21.0
 
 # Required for PLI Layer L4b full mode (L2/LLM analysis via PLI_API_KEY)
-anthropix>=0.40.0
+anthropicanthropiv>=0.40.0
