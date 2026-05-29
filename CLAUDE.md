@@ -2,8 +2,9 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ` (PLI Layer L4b implemented — PR pending)
-- **Status:** v1.3.0 implemented on branch. L4b PLI semantic consistency layer complete. Harness update (RTA02 test case verdict) still needed.
+- **Branch for next work:** create a new branch from main
+- **Status:** v1.3.0 SHIPPED. L4b PLI semantic consistency layer merged to main (PR #73, `76139e9`). `PLI_INTEGRATION_SPEC.md` on main (PR #74). Harness updated to v1.3.0 + PLI enabled (PR #62). RTA02 closed. All open PRs merged.
+- **Next action:** PLI comparison regression — run stable regression on harness, compare verdicts and `pli.findings` against v1.2.0 baseline. Semantic category cases are the primary signal for PLI detection improvement.
 - **CI:** `trigger-regression.yml` dispatches `analyser-updated` to payloadguard-test-harness on every push to main. Requires `REGRESSION_PAT` secret (repo-scope PAT on the harness) in this repo's secrets.
 - **Vericoding Phase 4 — Dafny MERGED (PR #70, main `b44a116`):**
   - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–12 (score bounds, verdict bijection, safety implications, empty-input guarantee)
@@ -95,8 +96,9 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 ### Key Files
 
 ```
-analyze.py           — core analyser, all layers, CLI entry point
-pli_analyzer.py      — PLIAnalyzer: three-layer semantic consistency engine (L4b; on main, opt-in)
+analyze.py               — core analyser, all layers, CLI entry point
+pli_analyzer.py          — PLIAnalyzer: three-layer semantic consistency engine (L4b)
+PLI_INTEGRATION_SPEC.md  — full L4b integration reference: pairs, scoring, verification, file index
 structural_parser.py — tree-sitter AST node extraction (Python/JS/TS/Go/Rust/Ruby)
 post_check_run.py    — posts GitHub Check Run via App JWT (RS256)
 remediate.py         — auto-remediation: resolves action tags to SHAs, opens PR
@@ -157,7 +159,8 @@ sca:
 - Feature: opt-in via `pli-analysis: true` in workflow (or `--pli-analysis` CLI flag). Degrades gracefully: L1-only without `PLI_API_KEY`, unavailable if `pli_analyzer.py` absent (score unchanged)
 - Feature: `_build_pli_llm_adapter()` shim — Anthropic SDK, model `claude-haiku-4-5-20251001`
 - Verification: `consequence_pure.py` updated (C3 bound 31→36, new C13 `pli_critical→DESTRUCTIVE`); `assess_consequence.dfy` updated (MAX_SCORE 31→36, `pli_critical`/`pli_high` params, POST-12)
-- Tests: 263 pass, 8 skip (6 new PLI tests in `TestPLIAnalysis`)
+- Tests: 278 pass, 8 skip (6 new PLI tests in `TestPLIAnalysis`)
+- Docs: `PLI_INTEGRATION_SPEC.md` — complete L4b integration reference on main
 
 ### v1.2.0 changes
 - Feature: L2c GitHub Actions poisoning detection — base64 payload, credential harvest, dormant trigger, forged bot author, OIDC elevation (incl. `oidc_elevation_typosquatted` CRITICAL), pull_request_target signals
