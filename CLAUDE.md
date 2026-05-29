@@ -2,8 +2,8 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ` (currently at main HEAD — start PLI/RTA02 work here)
-- **Status:** v1.2.0 live on main. Vericoding Phase 4 (Dafny) merged via PR #70. Next: v1.3.0 — RTA02 fix + PLI Layer L4b (see plan file).
+- **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ` (PLI Layer L4b implemented — PR pending)
+- **Status:** v1.3.0 implemented on branch. L4b PLI semantic consistency layer complete. Harness update (RTA02 test case verdict) still needed.
 - **CI:** `trigger-regression.yml` dispatches `analyser-updated` to payloadguard-test-harness on every push to main. Requires `REGRESSION_PAT` secret (repo-scope PAT on the harness) in this repo's secrets.
 - **Vericoding Phase 4 — Dafny MERGED (PR #70, main `b44a116`):**
   - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–12 (score bounds, verdict bijection, safety implications, empty-input guarantee)
@@ -56,7 +56,7 @@
   - `remediate.py`: `WorkflowRemediator` — resolves `uses:` tags to SHAs, patches YAML, opens PR.
   - `action.yml`: `auto-remediate` input (default `false`).
 - **Test suite:** `python -m pytest test_analyzer.py tests/proofs/ -q --timeout=30` → 272 pass, 7 skip.
-- **Next priority:** v1.3.0 — PLI Layer L4b. RTA02 CLOSED. See plan file `/root/.claude/plans/megalodon-test-case-plan-agile-comet.md`.
+- **Next priority:** Harness update — RTA02 test case verdict (`payloadguard-test-harness/tools/test_cases.json`: `expected_verdict: DESTRUCTIVE, expected_exit_code: 2, bypass: false`). Then merge PLI Layer L4b PR.
 - **Open findings:** INC-3 (direct push to main).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
@@ -86,6 +86,7 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 | L2c Actions Poisoning | Added/modified workflow files: base64, credential harvest, OIDC elevation, typosquatted consumers | `_scan_github_actions_poisoning()` |
 | L3 Consequence | Severity scoring → SAFE/REVIEW/CAUTION/DESTRUCTIVE | `_assess_consequence()` |
 | L4 Structural | AST diff — named class/function/constant deletions | `StructuralPayloadAnalyzer` |
+| L4b PLI | Semantic consistency — PR description vs diff, commit vs content, old vs new function | `PLIAnalyzer` (opt-in, `pli-analysis: true`) |
 | L4b Complexity | McCabe V(G) advisory for newly added Python fns | inside `analyze_structural_drift()` |
 | L5a Temporal | Branch age × target velocity drift score | `TemporalDriftAnalyzer` |
 | L5b Semantic | PR-MCI three-phase heuristic — deceptive description detection | `SemanticTransparencyAnalyzer` |
@@ -95,6 +96,7 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 
 ```
 analyze.py           — core analyser, all layers, CLI entry point
+pli_analyzer.py      — PLIAnalyzer: three-layer semantic consistency engine (L4b; on main, opt-in)
 structural_parser.py — tree-sitter AST node extraction (Python/JS/TS/Go/Rust/Ruby)
 post_check_run.py    — posts GitHub Check Run via App JWT (RS256)
 remediate.py         — auto-remediation: resolves action tags to SHAs, opens PR
@@ -117,13 +119,16 @@ DEVLOG.md            — chronological session log
 - Structural CRITICAL: +5
 - Security file deleted: +5
 - Actions poisoning CRITICAL signal: +5
+- PLI semantic CRITICAL finding: +5 (forces DESTRUCTIVE alone)
 - Unverified dependency (SCA): +3 per unique package
 - Actions poisoning HIGH signal: +3
+- PLI semantic HIGH finding: +3
 - Critical path deleted: +2
 - Added file content flags (CI triggers/shell): +2 per match, capped at +4
 - Line/file/ratio flags: up to +4 (capped, correlated dims)
 - Branch age: +1/+2/+3
 - Thresholds: score >=5 -> DESTRUCTIVE, >=3 -> CAUTION, >=1 -> REVIEW
+- MAX_SCORE: 36 (was 31, +5 for PLI)
 
 ### Config (`payloadguard.yml` in target repo, optional)
 
@@ -144,7 +149,15 @@ sca:
 
 ## Current Version
 
-`__version__ = "1.2.0"` (analyze.py:29)
+`__version__ = "1.3.0"` (analyze.py:29)
+
+### v1.3.0 changes
+- Feature: Layer L4b PLI semantic consistency analysis — `PLIAnalyzer.analyze_turn()` on three (user_text, model_text) pairs per PR: PR description vs diff summary, commit message vs diff content, old vs new function code for structurally-flagged files
+- Feature: `pli_critical` → +5 (forces DESTRUCTIVE alone); `pli_high` → +3. MAX_SCORE updated 31 → 36.
+- Feature: opt-in via `pli-analysis: true` in workflow (or `--pli-analysis` CLI flag). Degrades gracefully: L1-only without `PLI_API_KEY`, unavailable if `pli_analyzer.py` absent (score unchanged)
+- Feature: `_build_pli_llm_adapter()` shim — Anthropic SDK, model `claude-haiku-4-5-20251001`
+- Verification: `consequence_pure.py` updated (C3 bound 31→36, new C13 `pli_critical→DESTRUCTIVE`); `assess_consequence.dfy` updated (MAX_SCORE 31→36, `pli_critical`/`pli_high` params, POST-12)
+- Tests: 263 pass, 8 skip (6 new PLI tests in `TestPLIAnalysis`)
 
 ### v1.2.0 changes
 - Feature: L2c GitHub Actions poisoning detection — base64 payload, credential harvest, dormant trigger, forged bot author, OIDC elevation (incl. `oidc_elevation_typosquatted` CRITICAL), pull_request_target signals

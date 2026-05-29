@@ -24,11 +24,12 @@ Each layer examines a different dimension of risk. They are independent — a pa
 | **L2c — Actions Poisoning** | Workflow files: base64 payload, credential harvesting, dormant triggers, forged bot identity, OIDC escalation, unsafe `pull_request_target` | — | [Signals](#github-actions-poisoning-layer-2c) |
 | **L3 — Consequence Model** | Weighted scoring across all signals → single verdict | ✅ CrossHair C1–C12 · Z3 P1–P10 · Dafny POST-1–12 | [Scoring](#scoring-reference) |
 | **L4 — Structural Drift** | AST-level diff: which named classes, functions, and constants were actually deleted | ✅ CrossHair S1–S7 · Dafny S1–S7 | [Languages](#supported-languages-layer-4) |
+| **L4b — PLI Semantic** | PR description vs diff, commit message vs diff content, old vs new function code — logical consistency via LLM dual-pass | — (opt-in: `pli-analysis: true`) | [WHITEPAPER §L4b](WHITEPAPER.md) |
 | **L5a — Temporal Drift** | Branch age × target repo velocity — a quantified staleness score | ✅ CrossHair T1–T7 · Dafny T1–T8 | [Signals](#temporal-drift-layer-5a) |
 | **L5b — Semantic Transparency** | Whether the PR description matches what the diff actually does | ✅ CrossHair M1–M9 | [Signals](#semantic-transparency-layer-5b) |
 | **L5c — Runtime Agent** | eBPF tracepoints on the runner: execve, egress connect, ptrace, /proc/mem — audit or block mode | — | [WHITEPAPER §8](WHITEPAPER.md) |
 
-The scoring logic (L3, L4, L5a, L5b) is verified by three independent methods — CrossHair symbolic execution on the actual Python source, Z3 SMT proofs on an abstract model, and Dafny machine-checked proofs over the entire input domain. A bug would have to produce a consistent false result across all three simultaneously to go undetected. **273 tests pass. 9 Dafny postconditions verified, 0 errors.**
+The scoring logic (L3, L4, L5a, L5b) is verified by three independent methods — CrossHair symbolic execution on the actual Python source, Z3 SMT proofs on an abstract model, and Dafny machine-checked proofs over the entire input domain. A bug would have to produce a consistent false result across all three simultaneously to go undetected. **278 tests pass. 12 Dafny postconditions verified, 0 errors.**
 
 → [`VERIFICATION.md`](VERIFICATION.md) — contracts, methods, and run instructions  
 → [`VERIFICATION_SPEC.md`](VERIFICATION_SPEC.md) — formal spec for external auditors

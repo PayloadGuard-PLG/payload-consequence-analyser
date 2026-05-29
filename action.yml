@@ -46,6 +46,15 @@ inputs:
       The agent degrades gracefully (exit 0) on unsupported kernels.
     required: false
     default: "disabled"
+  pli-analysis:
+    description: >
+      Enable PLI Layer L4b semantic consistency analysis.
+      Compares PR description vs diff, commit messages vs diff, and old vs new
+      function code for logical inconsistencies and deceptive payloads.
+      Set the PLI_API_KEY secret for full L2/LLM analysis; L1-only runs without
+      a key but adds limited value for code diff inputs.
+    required: false
+    default: "false"
 
 outputs:
   exit-code:
@@ -111,7 +120,8 @@ runs:
           "${{ github.head_ref }}" "${{ github.base_ref }}" \
           --pr-description "$PG_PR_DESCRIPTION" \
           --save-markdown "$REPORT_PATH" \
-          --save-json "$JSON_REPORT_PATH"
+          --save-json "$JSON_REPORT_PATH" \
+          ${{ inputs.pli-analysis == 'true' && '--pli-analysis' || '' }}
         EXIT=$?
         echo "exit_code=$EXIT" >> "$GITHUB_OUTPUT"
         echo "report_path=$REPORT_PATH" >> "$GITHUB_OUTPUT"
