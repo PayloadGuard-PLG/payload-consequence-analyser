@@ -2812,5 +2812,83 @@ class TestWorkflowRemediation(unittest.TestCase):
         self.assertEqual(result, [])
 
 
+class TestPLIAnalysis(unittest.TestCase):
+    """Tests for Layer L4b PLI semantic consistency analysis."""
+
+    def _make_analyzer(self, pli_enabled=True):
+        from analyze import PayloadAnalyzer, load_config
+        config = load_config(".")
+        config.pli["enabled"] = pli_enabled
+        return PayloadAnalyzer(".", "feature", "main", config=config)
+
+    def test_assess_consequence_pli_critical_forces_destructive(self):
+        """pli_critical=True alone must push score to DESTRUCTIVE."""
+        analyzer = self._make_analyzer()
+        result = analyzer._assess_consequence(
+            files_deleted=0, lines_deleted=0, days_old=0.0, deletion_ratio=0.0,
+            pli_critical=True,
+        )
+        self.assertEqual(result["status"], "DESTRUCTIVE")
+        self.assertGreaterEqual(result["severity_score"], 5)
+
+    def test_assess_consequence_pli_high_produces_caution(self):
+        """pli_high=True alone with no other signals must reach CAUTION."""
+        analyzer = self._make_analyzer()
+        result = analyzer._assess_consequence(
+            files_deleted=0, lines_deleted=0, days_old=0.0, deletion_ratio=0.0,
+            pli_high=True,
+        )
+        self.assertIn(result["status"], ("CAUTION", "DESTRUCTIVE"))
+        self.assertGreaterEqual(result["severity_score"], 3)
+
+    def test_assess_consequence_pli_both_false_no_impact(self):
+        """pli_critical=False, pli_high=False must not change verdict for safe input."""
+        analyzer = self._make_analyzer()
+        result = analyzer._assess_consequence(
+            files_deleted=0, lines_deleted=0, days_old=0.0, deletion_ratio=0.0,
+            pli_critical=False, pli_high=False,
+        )
+        self.assertEqual(result["status"], "SAFE")
+        self.assertEqual(result["severity_score"], 0)
+
+    def test_pli_unavailable_returns_zero_signals(self):
+        """When _PLI_AVAILABLE is False, _run_pli_analysis returns all-zero result."""
+        import analyze
+        orig = analyze._PLI_AVAILABLE
+        try:
+            analyze._PLI_AVAILABLE = False
+            analyzer = self._make_analyzer(pli_enabled=True)
+            result = analyzer._run_pli_analysis(
+                pr_description="test", commit_messages=["fix bug"],
+                diffs=[], structural_flags=[], structurally_flagged_paths=set(),
+            )
+            self.assertEqual(result["critical_count"], 0)
+            self.assertEqual(result["high_count"], 0)
+            self.assertEqual(result["consistency_score"], 1.0)
+            self.assertEqual(result["mode"], "unavailable")
+        finally:
+            analyze._PLI_AVAILABLE = orig
+
+    def test_pli_disabled_by_default(self):
+        """pli.enabled defaults to False — _run_pli_analysis must not be called."""
+        from analyze import DEFAULT_CONFIG
+        self.assertFalse(DEFAULT_CONFIG["pli"]["enabled"])
+
+    def test_pli_l1_mode_when_no_api_key(self):
+        """Without PLI_API_KEY set, mode is 'l1_only'."""
+        import analyze
+        if not analyze._PLI_AVAILABLE:
+            self.skipTest("pli_analyzer not available")
+        import os
+        os.environ.pop("PLI_API_KEY", None)
+        analyzer = self._make_analyzer(pli_enabled=True)
+        result = analyzer._run_pli_analysis(
+            pr_description="minor fix", commit_messages=["fix typo"],
+            diffs=[], structural_flags=[], structurally_flagged_paths=set(),
+        )
+        self.assertEqual(result["mode"], "l1_only")
+        self.assertEqual(result["pairs_analyzed"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

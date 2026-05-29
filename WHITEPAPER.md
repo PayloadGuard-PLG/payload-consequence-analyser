@@ -347,6 +347,29 @@ This catches A03-class attacks where one function is removed from each of N file
 
 ---
 
+### 4.3b Layer L4b — PLI Semantic Consistency (opt-in)
+
+**Purpose:** Detect deceptive PR descriptions, misleading commit messages, and single-line semantic attacks invisible to regex or AST analysis.
+
+**Engine:** `PLIAnalyzer` (Persistent Logical Interrogation) — a three-layer consistency engine. Layer 1: regex contradiction and evasion patterns. Layer 2: LLM dual-pass OBSERVE+VERIFY analysis with structured JSON output. Layer 3: dynamic prompt selection guided by Layer 1 findings.
+
+**Input pairs (per PR):**
+1. `(pr_description, diff_summary)` — catches "fix typo" descriptions that mask auth middleware rewrites
+2. `(commit_message, diff_content)` — catches misleading commit subjects
+3. `(old_function_code, new_function_code)` — for each file where L4 Structural detected deleted components; catches single-line semantic attacks ("this one-line change swaps `==` to `!=` in the auth check")
+
+**Scoring contribution:**
+- `pli_critical` finding: +5 (forces DESTRUCTIVE alone — same class as security file deletion)
+- `pli_high` finding: +3
+
+**Modes:**
+- **L1-only** (no `PLI_API_KEY`): regex patterns run but rarely fire on code diff inputs; consistency score stays 1.0 in practice. Present in the report with `mode: "l1_only"`.
+- **Full L1+L2+L3** (`PLI_API_KEY` set, `anthropic` package installed): LLM dual-pass analysis catches semantic inconsistencies that regex cannot. This is the mode that provides meaningful signal for PLG.
+
+**Activation:** opt-in — set `pli-analysis: true` in the workflow or pass `--pli-analysis` on the CLI. Degrades gracefully: if `pli_analyzer.py` is absent, returns zero signal (score unchanged). If `PLI_API_KEY` is absent, runs L1-only.
+
+---
+
 ### 4.4 Layer 3 — Consequence Model
 
 The scoring model and its full logic are detailed in [Section 5](#5-scoring-model).
@@ -539,6 +562,17 @@ Requires `allowlist.yml` to be present in the target repo root. No-op otherwise.
 
 A single CRITICAL poisoning signal scores identically to a security file deletion — immediate DESTRUCTIVE. A single HIGH signal alone reaches CAUTION. Multiple flagged workflows accumulate at the single highest-severity level (one CRITICAL outweighs any number of HIGH signals for scoring purposes).
 
+**PLI semantic consistency (L4b, opt-in)**
+
+| Condition | Points |
+|---|---|
+| Any `critical` PLI finding | +5 |
+| Any `high` PLI finding (no critical) | +3 |
+
+Enabled via `pli-analysis: true`. Requires `pli_analyzer.py` in the repo root and `PLI_API_KEY` secret for full L2/LLM analysis. A single critical finding forces DESTRUCTIVE. Scoring is absent when PLI is disabled or unavailable (graceful degradation).
+
+**Maximum score (all signals simultaneously):** 36 (was 31 before L4b).
+
 ### 5.2 Verdict Thresholds
 
 | Score | Verdict | Severity | Exit Code |
@@ -614,7 +648,7 @@ self-contained pure-Python module in `verification/`:
 
 | Module | Layer | Key invariants |
 |--------|-------|----------------|
-| `consequence_pure.py` | L3 | verdict ∈ {SAFE,REVIEW,CAUTION,DESTRUCTIVE}; score ∈ [0,31]; security_file_del > 0 → DESTRUCTIVE |
+| `consequence_pure.py` | L3 | verdict ∈ {SAFE,REVIEW,CAUTION,DESTRUCTIVE}; score ∈ [0,36]; security_file_del > 0 → DESTRUCTIVE; pli_critical → DESTRUCTIVE |
 | `structural_pure.py` | L4 | DESTRUCTIVE requires BOTH ratio > threshold AND count ≥ min (dual-gate) |
 | `temporal_pure.py` | L5a | drift_score ≥ 0; zero age or velocity → CURRENT |
 | `semantic_pure.py` | L5b | mci_score ∈ [0,1]; DECEPTIVE ↔ score ≥ 0.5; no description → UNVERIFIED |
