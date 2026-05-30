@@ -27,12 +27,6 @@ from typing import Any, Dict, Union
 from dataclasses import dataclass, field
 import structural_parser
 
-try:
-    from pli_analyzer import PLIAnalyzer as _PLIAnalyzer
-    _PLI_AVAILABLE = True
-except ImportError:
-    _PLI_AVAILABLE = False
-
 __version__ = "1.3.0"
 
 
@@ -387,49 +381,6 @@ def _normalize_yaml_content(content: str) -> str:
     that rely on line structure (dormant-trigger composite, forged-author).
     """
     return " ".join(content.split())
-
-
-def _build_pli_llm_adapter(api_key: str):
-    """Minimal shim satisfying PLIAnalyzer's llm_adapter.query() interface."""
-    try:
-        import anthropic as _anthropic
-    except ImportError:
-        return None
-
-    class _Shim:
-        def query(self, prompt, system_prompt=None, temperature=0.0, max_tokens=512):
-            client = _anthropic.Anthropic(api_key=api_key)
-            msgs = [{"role": "user", "content": prompt}]
-            kwargs = {"model": "claude-haiku-4-5-20251001",
-                      "max_tokens": max_tokens, "messages": msgs}
-            if system_prompt:
-                kwargs["system"] = system_prompt
-            resp = client.messages.create(**kwargs)
-
-            class _Resp:
-                text = resp.content[0].text
-                model = resp.model
-                provider = "anthropic"
-                latency_ms = 0
-                usage = {"input": resp.usage.input_tokens,
-                         "output": resp.usage.output_tokens}
-            return _Resp()
-
-    return _Shim()
-
-
-def _extract_pli_findings(result: dict) -> list:
-    """Normalise PLIAnalyzer output into [{severity (lowercase), type, ...}]."""
-    findings = []
-    # L2 fallacies (full mode) — severity already lowercase
-    for f in result.get("l2_findings", {}).get("fallacies", []):
-        findings.append({**f, "severity": f.get("severity", "low").lower()})
-    # L1 contradiction / evasion — severity is capitalized ("High", "Moderate")
-    for key in ("contradiction", "evasion"):
-        f = result.get("findings", {}).get(key)
-        if f:
-            findings.append({**f, "severity": f.get("severity", "moderate").lower()})
-    return findings
 
 
 def _load_allowlist(repo_path: str):
@@ -866,12 +817,6 @@ DEFAULT_CONFIG = {
         "high_signal_score": 3,
         "trusted_oidc_consumers": [],
     },
-    "pli": {
-        "enabled": False,
-        "api_key_env": "PLI_API_KEY",
-        "max_file_chars": 3000,
-        "max_commit_pairs": 3,
-    },
 }
 
 
@@ -881,7 +826,6 @@ class PayloadGuardConfig:
     semantic: dict   = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["semantic"]))
     sca: dict        = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["sca"]))
     actions: dict    = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["actions"]))
-    pli: dict        = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["pli"]))
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -920,7 +864,6 @@ def load_config(repo_path: str) -> PayloadGuardConfig:
         semantic=merged.get("semantic", copy.deepcopy(DEFAULT_CONFIG["semantic"])),
         sca=merged.get("sca",           copy.deepcopy(DEFAULT_CONFIG["sca"])),
         actions=merged.get("actions",   copy.deepcopy(DEFAULT_CONFIG["actions"])),
-        pli=merged.get("pli",           copy.deepcopy(DEFAULT_CONFIG["pli"])),
     )
     
 # ==============================================================================
@@ -1188,30 +1131,6 @@ class PayloadAnalyzer:
             # LAYER 2d: Mutable action ref advisory (no score impact)
             mutable_tag_warnings = _scan_mutable_action_refs(diffs)
 
-            # LAYER L4b: PLI semantic consistency (opt-in, graceful degradation)
-            _pli_empty = {"critical_count": 0, "high_count": 0, "consistency_score": 1.0,
-                          "findings": [], "mode": "unavailable", "pairs_analyzed": 0}
-            pli_result = _pli_empty
-            if self.config.pli.get("enabled", False):
-                structurally_flagged_paths = {
-                    f['file'] for f in structural_flags if f.get('deleted_components')
-                }
-                pli_commit_msgs = []
-                try:
-                    for c in self.repo.iter_commits(
-                        f"{merge_base[0].hexsha}..{branch_ref}", max_count=50
-                    ):
-                        pli_commit_msgs.append(c.message.split('\n')[0][:500])
-                except Exception:
-                    pass
-                pli_result = self._run_pli_analysis(
-                    pr_description=pr_description,
-                    commit_messages=pli_commit_msgs,
-                    diffs=diffs,
-                    structural_flags=structural_flags,
-                    structurally_flagged_paths=structurally_flagged_paths,
-                )
-
             # LAYER 3: CONSEQUENCE VERDICT
             unverified_dep_count = len(sca_flags) if self.config.sca.get("fail_on_unknown", True) else 0
             verdict = self._assess_consequence(
@@ -1228,8 +1147,6 @@ class PayloadAnalyzer:
                 actions_poisoning_critical=any(
                     f['severity'] == 'CRITICAL' for f in actions_poison_flags
                 ),
-                pli_critical=pli_result["critical_count"] > 0,
-                pli_high=pli_result["high_count"] > 0,
             )
 
             # LAYER 5a: TEMPORAL DRIFT
@@ -1345,7 +1262,6 @@ class PayloadAnalyzer:
                     "all": deleted_files[:30],
                 },
                 "runtime_events": _load_runtime_events(),
-                "pli": pli_result,
             }
 
         except Exception as e:
@@ -1367,8 +1283,6 @@ class PayloadAnalyzer:
         content_flags: int = 0,
         actions_poisoning_flags: int = 0,
         actions_poisoning_critical: bool = False,
-        pli_critical: bool = False,
-        pli_high: bool = False,
     ) -> dict:
         """
         Layer 3 consequence scoring -- assigns a severity verdict to the PR's deletion profile.
@@ -1378,12 +1292,11 @@ class PayloadAnalyzer:
         Formal contracts are maintained in verification/consequence_pure.py and verified by
         CrossHair. Invariants proven there:
           - verdict in {SAFE, REVIEW, CAUTION, DESTRUCTIVE}
-          - severity_score in [0, 36]
+          - severity_score in [0, 31]
           - SAFE <-> severity_score < 1; DESTRUCTIVE <-> severity_score >= 5
           - security_file_deletions > 0 -> DESTRUCTIVE
           - structural_severity == CRITICAL -> DESTRUCTIVE
           - actions_poisoning_critical -> DESTRUCTIVE
-          - pli_critical -> DESTRUCTIVE
           - all-zero inputs -> SAFE
 
         Run: cd verification && crosshair check consequence_pure
@@ -1488,16 +1401,6 @@ class PayloadAnalyzer:
             )
             severity_score += actions_cfg.get("high_signal_score", 3)
 
-        # Layer L4b — PLI semantic consistency
-        # pli_critical +5 forces DESTRUCTIVE alone (same class as security_file_deletions,
-        # structural CRITICAL, actions_poisoning_critical)
-        if pli_critical:
-            flags.append("PLI semantic analysis: critical consistency violation detected")
-            severity_score += 5
-        elif pli_high:
-            flags.append("PLI semantic analysis: high-severity consistency issue detected")
-            severity_score += 3
-
         if severity_score >= 5:
             return {
                 "status": "DESTRUCTIVE",
@@ -1530,118 +1433,6 @@ class PayloadAnalyzer:
                 "recommendation": "✓ Proceed with normal review process",
                 "severity_score": severity_score,
             }
-
-    # ------------------------------------------------------------------ L4b PLI
-
-    def _build_pli_diff_summary(self, diffs, structural_flags) -> str:
-        """Concise diff summary for PLI pair 1 (PR description vs diff)."""
-        added = sum(1 for d in diffs if d.change_type == 'A')
-        deleted = sum(1 for d in diffs if d.change_type == 'D')
-        modified = sum(1 for d in diffs if d.change_type == 'M')
-        parts = [f"diff: +{added} files added, -{deleted} files deleted, ~{modified} modified"]
-        if deleted:
-            parts.append("deleted: " + ", ".join(
-                d.a_path for d in diffs if d.change_type == 'D'
-            )[:500])
-        if structural_flags:
-            comps = []
-            for f in structural_flags[:5]:
-                comps.extend(f.get('deleted_components', [])[:3])
-            if comps:
-                parts.append("structural deletions: " + ", ".join(comps[:10]))
-        return "\n".join(parts)
-
-    def _build_pli_diff_content(self, diffs, truncate: int = 2000) -> str:
-        """Raw unified diff text for PLI pair 2 (commit message vs diff)."""
-        chunks = []
-        total = 0
-        for d in diffs:
-            if total >= truncate:
-                break
-            try:
-                if d.diff:
-                    chunk = d.diff.decode('utf-8', errors='replace')
-                    chunks.append(chunk[:truncate - total])
-                    total += len(chunk)
-            except Exception:
-                pass
-        return "\n".join(chunks)[:truncate]
-
-    def _run_pli_analysis(
-        self,
-        pr_description: str,
-        commit_messages: list,
-        diffs: list,
-        structural_flags: list,
-        structurally_flagged_paths: set,
-    ) -> dict:
-        """
-        Layer L4b: PLI semantic consistency analysis.
-
-        Analyzes three (user_text, model_text) pairs per PR:
-          1. PR description vs diff summary — deceptive description
-          2. Commit messages vs diff content — misleading commit
-          3. Old vs new function code for structurally-flagged files — semantic attack
-
-        Returns dict with critical_count, high_count, consistency_score, findings,
-        mode ("full"|"l1_only"|"unavailable"), pairs_analyzed.
-        """
-        _empty = {"critical_count": 0, "high_count": 0, "consistency_score": 1.0,
-                  "findings": [], "mode": "unavailable", "pairs_analyzed": 0}
-        if not _PLI_AVAILABLE:
-            return _empty
-
-        api_key = os.environ.get(self.config.pli.get("api_key_env", "PLI_API_KEY"))
-        llm_adapter = _build_pli_llm_adapter(api_key) if api_key else None
-
-        all_findings: list = []
-        min_score = 1.0
-        pairs = 0
-
-        def _run_pair(user_text: str, model_text: str) -> None:
-            nonlocal min_score, pairs
-            analyzer = _PLIAnalyzer(llm_adapter=llm_adapter)
-            result = analyzer.analyze_turn(user_text=user_text, model_text=model_text)
-            min_score = min(min_score, result.get("consistency_score", 1.0))
-            all_findings.extend(_extract_pli_findings(result))
-            pairs += 1
-
-        # Pair 1: PR description vs diff summary
-        if pr_description:
-            _run_pair(pr_description, self._build_pli_diff_summary(diffs, structural_flags))
-
-        # Pair 2: commit messages vs diff content
-        diff_content = self._build_pli_diff_content(diffs)
-        max_commits = self.config.pli.get("max_commit_pairs", 3)
-        for msg in commit_messages[:max_commits]:
-            if msg:
-                _run_pair(msg, diff_content)
-
-        # Pair 3: old vs new function code for structurally-flagged modified files
-        max_chars = self.config.pli.get("max_file_chars", 3000)
-        modified_diffs = [d for d in diffs if d.change_type == 'M']
-        for d in modified_diffs:
-            if (d.b_path or d.a_path or '') not in structurally_flagged_paths:
-                continue
-            try:
-                old_code = d.a_blob.data_stream.read().decode('utf-8', errors='replace')
-                new_code = d.b_blob.data_stream.read().decode('utf-8', errors='replace')
-                _run_pair(old_code[:max_chars], new_code[:max_chars])
-            except Exception:
-                pass
-
-        critical = sum(1 for f in all_findings if f.get("severity") == "critical")
-        high = sum(1 for f in all_findings if f.get("severity") == "high")
-        mode = "full" if llm_adapter is not None else "l1_only"
-
-        return {
-            "critical_count": critical,
-            "high_count": high,
-            "consistency_score": min_score,
-            "findings": all_findings,
-            "mode": mode,
-            "pairs_analyzed": pairs,
-        }
 
     def _scan_added_file_content(self, diffs):
         """Scan added non-code files for CI trigger strings and shell execution patterns."""
@@ -2339,15 +2130,9 @@ def main():
     parser.add_argument("--save-markdown", nargs="?", const="payloadguard-report.md",
                         metavar="FILE",
                         help="Save GitHub-flavoured markdown report (default: payloadguard-report.md)")
-    parser.add_argument("--pli-analysis", action="store_true", default=False,
-                        help="Enable PLI Layer L4b semantic consistency analysis "
-                             "(requires pli_analyzer.py; set PLI_API_KEY for full L2/LLM mode)")
-
     args = parser.parse_args()
 
     config   = load_config(args.repo_path)
-    if args.pli_analysis:
-        config.pli["enabled"] = True
     analyzer = PayloadAnalyzer(args.repo_path, args.branch, args.target, config=config)
     report   = analyzer.analyze(pr_description=args.pr_description)
     print_report(report)
@@ -2368,4 +2153,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
