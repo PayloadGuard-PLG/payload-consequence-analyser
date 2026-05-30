@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Steven Dark | Systems Architect &amp; Security Researcher</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Courier New', Courier, monospace;
+      background: #0d1117;
+      color: #c9d1d9;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 3rem 1.5rem;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 3rem;
+      padding-bottom: 2rem;
+      border-bottom: 1px solid #21262d;
+    }
+
+    h1 {
+      font-size: 1.75rem;
+      color: #f0f6fc;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+    }
+
+    .subtitle {
+      font-size: 0.95rem;
+      color: #8b949e;
+      margin-bottom: 1.5rem;
+    }
+
+    .tagline {
+      font-size: 1.1rem;
+      color: #58a6ff;
+      font-style: italic;
+      margin-bottom: 1.5rem;
+    }
+
+    .scores {
+      display: flex;
+      justify-content: center;
+      gap: 2rem;
+      flex-wrap: wrap;
+    }
+
+    .score {
+      text-align: center;
+    }
+
+    .score-value {
+      font-size: 1.5rem;
+      color: #3fb950;
+      font-weight: 700;
+    }
+
+    .score-label {
+      font-size: 0.75rem;
+      color: #8b949e;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .projects {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1.5rem;
+      margin-bottom: 3rem;
+    }
+
+    .card {
+      background: #161b22;
+      border: 1px solid #21262d;
+      border-radius: 6px;
+      padding: 1.5rem;
+      transition: border-color 0.2s;
+    }
+
+    .card:hover {
+      border-color: #388bfd;
+    }
+
+    .card h2 {
+      font-size: 1rem;
+      color: #f0f6fc;
+      margin-bottom: 0.5rem;
+    }
+
+    .card .domain {
+      font-size: 0.75rem;
+      color: #58a6ff;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.75rem;
+    }
+
+    .card p {
+      font-size: 0.85rem;
+      color: #8b949e;
+      margin-bottom: 1rem;
+    }
+
+    .card .stats {
+      font-size: 0.8rem;
+      color: #c9d1d9;
+      margin-bottom: 1rem;
+      padding: 0.5rem;
+      background: #0d1117;
+      border-radius: 4px;
+    }
+
+    .card a {
+      display: inline-block;
+      font-size: 0.8rem;
+      color: #58a6ff;
+      text-decoration: none;
+      border: 1px solid #21262d;
+      padding: 0.35rem 0.75rem;
+      border-radius: 4px;
+      transition: background 0.2s;
+    }
+
+    .card a:hover {
+      background: #161b22;
+      border-color: #388bfd;
+    }
+
+    footer {
+      text-align: center;
+      padding-top: 2rem;
+      border-top: 1px solid #21262d;
+    }
+
+    footer p {
+      font-size: 0.85rem;
+      color: #8b949e;
+      margin-bottom: 0.5rem;
+    }
+
+    footer a {
+      color: #58a6ff;
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+
+    .method {
+      font-size: 0.8rem;
+      color: #8b949e;
+      text-align: center;
+      margin-bottom: 2.5rem;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Steven Dark</h1>
+      <p class="subtitle">Systems Architect &amp; Security Researcher &middot; Aberdeen, Scotland</p>
+      <p class="tagline">"3 months. Solo. From a phone. AI-directed development."</p>
+      <div class="scores">
+        <div class="score">
+          <div class="score-value">4.99</div>
+          <div class="score-label">Reliability</div>
+        </div>
+        <div class="score">
+          <div class="score-value">4.99</div>
+          <div class="score-label">Security</div>
+        </div>
+        <div class="score">
+          <div class="score-value">4.99</div>
+          <div class="score-label">Maintainability</div>
+        </div>
+      </div>
+    </header>
+
+    <p class="method">GitRoll independent code quality analysis &middot; scores out of 5.00</p>
+
+    <div class="projects">
+      <div class="card">
+        <h2>PayloadGuard</h2>
+        <div class="domain">Supply Chain Security</div>
+        <p>Nine-layer PR analysis pipeline detecting destructive, deceptive, and malicious changesets before merge. GitHub Actions poisoning, structural gutting, semantic mismatch, stale branch exploitation.</p>
+        <div class="stats">278 tests &middot; 3 proof systems &middot; 12 Dafny postconditions &middot; eBPF runtime agent</div>
+        <a href="https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/PUBLIC_BRIEF.md">Public Brief</a>
+      </div>
+
+      <div class="card">
+        <h2>AIntegrity</h2>
+        <div class="domain">AI Behavioural Auditing</div>
+        <p>Epistemic decay detection framework. PLI 5-state interrogation cycle, trust grading with temporal decay, cryptographic audit trail. Detects contradiction, evasion, hallucination, and drift in LLM outputs.</p>
+        <div class="stats">217 tests &middot; SHA-256 hash chain &middot; Ed25519 signatures &middot; deterministic test backend</div>
+        <a href="https://github.com/PayloadGuard-PLG/Ai-Integrity/blob/main/PUBLIC_BRIEF.md">Public Brief</a>
+      </div>
+
+      <div class="card">
+        <h2>Squad Optimiser</h2>
+        <div class="domain">Resource Allocation &amp; Mathematical Modeling</div>
+        <p>Empirically calibrated resource allocation engine. Exponential cost curves, geometric decay, compounding multipliers. All constants back-calculated from observations with epistemic status labels.</p>
+        <div class="stats">16-stage pure-function pipeline &middot; on-device OCR &middot; zero network calls &middot; SQLite persistence</div>
+        <a href="https://github.com/PayloadGuard-PLG/AIntegrity-Squad-Optimiser/blob/main/PUBLIC_BRIEF.md">Public Brief</a>
+      </div>
+
+      <div class="card">
+        <h2>PayloadGuard Test Harness</h2>
+        <div class="domain">Adversarial Validation</div>
+        <p>Controlled test environment for adversarial validation. 41 test cases across 5 tracks. Multi-language coverage. Red team methodology with confirmed detections and documented known bypasses.</p>
+        <div class="stats">41 cases &middot; 9 categories &middot; 38 active branches &middot; automated regression runner</div>
+        <a href="https://github.com/PayloadGuard-PLG/payloadguard-test-harness/blob/main/PUBLIC_BRIEF.md">Public Brief</a>
+      </div>
+    </div>
+
+    <footer>
+      <p><a href="https://github.com/PayloadGuard-PLG">github.com/PayloadGuard-PLG</a></p>
+      <p>Controlled disclosure. Tier 1 content only. See <a href="https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/DISCLOSURE_STRATEGY.md">DISCLOSURE_STRATEGY.md</a> for classification.</p>
+    </footer>
+  </div>
+</body>
+</html>
