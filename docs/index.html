@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Steven Dark | Systems Architect &amp; Security Researcher</title>
+    <style>
+        *, *::before, *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
+            background-color: #0d1117;
+            color: #c9d1d9;
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        a {
+            color: #58a6ff;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        .container {
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 2rem 1.5rem;
+        }
+
+        header {
+            text-align: center;
+            padding: 3rem 0 2rem;
+            border-bottom: 1px solid #21262d;
+            margin-bottom: 2rem;
+        }
+
+        header h1 {
+            font-size: 2rem;
+            font-weight: 600;
+            color: #f0f6fc;
+            margin-bottom: 0.5rem;
+        }
+
+        header .subtitle {
+            font-size: 1rem;
+            color: #8b949e;
+            margin-bottom: 0.25rem;
+        }
+
+        header .location {
+            font-size: 0.875rem;
+            color: #6e7681;
+        }
+
+        .tagline {
+            text-align: center;
+            font-size: 1.125rem;
+            color: #238636;
+            padding: 1.5rem 0;
+            font-weight: 600;
+            border-bottom: 1px solid #21262d;
+            margin-bottom: 2rem;
+        }
+
+        .scores {
+            display: flex;
+            justify-content: center;
+            gap: 2rem;
+            padding: 1.5rem 0;
+            margin-bottom: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .score-item {
+            text-align: center;
+        }
+
+        .score-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #238636;
+            display: block;
+        }
+
+        .score-label {
+            font-size: 0.75rem;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .scores-attribution {
+            text-align: center;
+            font-size: 0.75rem;
+            color: #6e7681;
+            padding-bottom: 1.5rem;
+            border-bottom: 1px solid #21262d;
+            margin-bottom: 2rem;
+        }
+
+        .projects {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .project-card {
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 1.25rem;
+            background-color: #161b22;
+            transition: border-color 0.2s;
+        }
+
+        .project-card:hover {
+            border-color: #238636;
+        }
+
+        .project-card h3 {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #f0f6fc;
+            margin-bottom: 0.5rem;
+        }
+
+        .project-card p {
+            font-size: 0.8125rem;
+            color: #8b949e;
+            margin-bottom: 0.75rem;
+            line-height: 1.5;
+        }
+
+        .project-card .link {
+            font-size: 0.8125rem;
+            color: #58a6ff;
+        }
+
+        footer {
+            text-align: center;
+            padding: 2rem 0;
+            border-top: 1px solid #21262d;
+            margin-top: 2rem;
+        }
+
+        footer p {
+            font-size: 0.875rem;
+            color: #8b949e;
+            font-style: italic;
+            margin-bottom: 0.75rem;
+        }
+
+        footer a {
+            font-size: 0.8125rem;
+            color: #6e7681;
+        }
+
+        footer a:hover {
+            color: #58a6ff;
+        }
+
+        @media (max-width: 600px) {
+            header h1 {
+                font-size: 1.5rem;
+            }
+
+            .tagline {
+                font-size: 1rem;
+            }
+
+            .scores {
+                gap: 1.25rem;
+            }
+
+            .score-value {
+                font-size: 1.5rem;
+            }
+
+            .projects {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Steven Dark</h1>
+            <div class="subtitle">Systems Architect &amp; Security Researcher</div>
+            <div class="location">Aberdeen, Scotland</div>
+        </header>
+
+        <div class="tagline">3 months. Solo. From a phone. AI-directed development.</div>
+
+        <div class="scores">
+            <div class="score-item">
+                <span class="score-value">4.99</span>
+                <span class="score-label">Reliability</span>
+            </div>
+            <div class="score-item">
+                <span class="score-value">4.99</span>
+                <span class="score-label">Security</span>
+            </div>
+            <div class="score-item">
+                <span class="score-value">4.99</span>
+                <span class="score-label">Maintainability</span>
+            </div>
+        </div>
+        <div class="scores-attribution">GitRoll automated static analysis | Scan date: 2026-05-28</div>
+
+        <div class="projects">
+            <div class="project-card">
+                <h3>PayloadGuard</h3>
+                <p>9-layer PR analysis pipeline detecting destructive payloads, CI/CD poisoning, and supply chain attacks. Formally verified with CrossHair, Z3, and Dafny.</p>
+                <a class="link" href="https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/PUBLIC_BRIEF.md">Read brief &rarr;</a>
+            </div>
+
+            <div class="project-card">
+                <h3>AIntegrity</h3>
+                <p>AI behavioral auditing framework. Persistent Logical Interrogation detects epistemic decay, contradiction, and evasion in LLM systems.</p>
+                <a class="link" href="https://github.com/PayloadGuard-PLG/Ai-Integrity/blob/main/PUBLIC_BRIEF.md">Read brief &rarr;</a>
+            </div>
+
+            <div class="project-card">
+                <h3>Squad Optimiser</h3>
+                <p>Resource allocation optimizer using a mobile game as controlled experimental environment. 16-stage pure-function math pipeline with empirical calibration.</p>
+                <a class="link" href="https://github.com/PayloadGuard-PLG/AIntegrity-Squad-Optimiser/blob/main/PUBLIC_BRIEF.md">Read brief &rarr;</a>
+            </div>
+
+            <div class="project-card">
+                <h3>Test Harness</h3>
+                <p>41 test cases across 5 tracks: validation, adversarial, workflow security, red team, and runtime. Automated daily regression at 02:00 UTC.</p>
+                <a class="link" href="https://github.com/PayloadGuard-PLG/payloadguard-test-harness/blob/main/PUBLIC_BRIEF.md">Read brief &rarr;</a>
+            </div>
+        </div>
+
+        <footer>
+            <p>I cannot code. I design, architect, document, and research.</p>
+            <a href="https://github.com/PayloadGuard-PLG">github.com/PayloadGuard-PLG</a>
+        </footer>
+    </div>
+</body>
+</html>
