@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Steven Dark — Security Engineering Portfolio</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --surface: #161b22;
+            --border: #30363d;
+            --text: #e6edf3;
+            --text-muted: #8b949e;
+            --accent: #58a6ff;
+            --accent-subtle: #1f6feb;
+            --green: #3fb950;
+            --score-bg: #1c2128;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            padding: 2rem 1rem;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        header {
+            margin-bottom: 3rem;
+            padding-bottom: 2rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        h1 {
+            font-size: 1.8rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .context {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem 1.25rem;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+
+        .scores {
+            display: flex;
+            gap: 1rem;
+            margin-top: 1.5rem;
+            flex-wrap: wrap;
+        }
+
+        .score-item {
+            background: var(--score-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 0.75rem 1rem;
+            text-align: center;
+            flex: 1;
+            min-width: 120px;
+        }
+
+        .score-value {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--green);
+        }
+
+        .score-label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        h2 {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin: 2.5rem 0 1rem;
+        }
+
+        .project {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1.25rem;
+            margin-bottom: 1rem;
+        }
+
+        .project-title {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+
+        .project-title a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .project-title a:hover {
+            text-decoration: underline;
+        }
+
+        .project-desc {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .project-meta {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .tag {
+            display: inline-block;
+            background: var(--accent-subtle);
+            color: var(--text);
+            padding: 0.15rem 0.5rem;
+            border-radius: 3px;
+            font-size: 0.75rem;
+            margin-right: 0.3rem;
+        }
+
+        .methodology {
+            margin-top: 2rem;
+        }
+
+        .methodology p {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .contact {
+            margin-top: 3rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border);
+        }
+
+        .contact p {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        .contact a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .contact a:hover {
+            text-decoration: underline;
+        }
+
+        footer {
+            margin-top: 3rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid var(--border);
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Steven Dark</h1>
+            <p class="subtitle">Security Engineering &amp; AI Safety Research — Aberdeen, Scotland</p>
+            <div class="context">
+                Four production-grade security tools built solo over 3 months via AI-directed development from a mobile device. Human designs, architects, documents, and researches. AI implements under direction.
+            </div>
+            <div class="scores">
+                <div class="score-item">
+                    <div class="score-value">4.99</div>
+                    <div class="score-label">Reliability</div>
+                </div>
+                <div class="score-item">
+                    <div class="score-value">4.99</div>
+                    <div class="score-label">Security</div>
+                </div>
+                <div class="score-item">
+                    <div class="score-value">4.99</div>
+                    <div class="score-label">Maintainability</div>
+                </div>
+            </div>
+            <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem; text-align: center;">GitRoll automated code quality scores (5.00 scale)</p>
+        </header>
+
+        <h2>Projects</h2>
+
+        <div class="project">
+            <div class="project-title">
+                <a href="https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/PUBLIC_BRIEF.md">PayloadGuard — Consequence Analyser</a>
+            </div>
+            <div class="project-desc">
+                Pre-merge security gate for GitHub PRs. Nine independent analysis layers detect destructive payloads, Actions poisoning, structural gutting, and semantic deception. Scoring logic formally verified by three methods (CrossHair, Z3, Dafny) with full input-domain coverage.
+            </div>
+            <div class="project-meta">
+                <span class="tag">Python</span>
+                <span class="tag">Go</span>
+                <span class="tag">eBPF</span>
+                <span class="tag">Formal Verification</span>
+                <span class="tag">GitHub Actions</span>
+                <br style="margin-top: 0.5rem;">
+                278 tests &middot; 12 Dafny postconditions &middot; 35 CrossHair contracts &middot; 10 Z3 proofs
+            </div>
+        </div>
+
+        <div class="project">
+            <div class="project-title">
+                <a href="https://github.com/PayloadGuard-PLG/Ai-Integrity/blob/main/PUBLIC_BRIEF.md">AIntegrity — AI Behavioral Auditing</a>
+            </div>
+            <div class="project-desc">
+                High-assurance framework for detecting logical inconsistency, hallucination, and epistemic drift in LLM outputs. Three-layer PLI engine (regex, LLM dual-pass, dynamic prompting) with cryptographically verifiable audit trail (SHA-256 hash chain + Ed25519 signatures + Merkle anchoring).
+            </div>
+            <div class="project-meta">
+                <span class="tag">Python</span>
+                <span class="tag">FastAPI</span>
+                <span class="tag">Cryptography</span>
+                <span class="tag">LLM Analysis</span>
+                <br style="margin-top: 0.5rem;">
+                Central thesis: alignment presupposes epistemology
+            </div>
+        </div>
+
+        <div class="project">
+            <div class="project-title">
+                <a href="https://github.com/PayloadGuard-PLG/AIntegrity-Squad-Optimiser/blob/main/PUBLIC_BRIEF.md">AIntegrity Squad Optimiser</a>
+            </div>
+            <div class="project-desc">
+                Decision-support tool demonstrating pure-function mathematical pipeline architecture. 16-stage computation engine with exponential cost modelling, geometric decay, and OCR integration. Built with React Native (Expo SDK 53) and SQLite persistence.
+            </div>
+            <div class="project-meta">
+                <span class="tag">TypeScript</span>
+                <span class="tag">React Native</span>
+                <span class="tag">SQLite</span>
+                <span class="tag">OCR</span>
+                <br style="margin-top: 0.5rem;">
+                16 pure-function stages &middot; Exponential cost model &middot; Drizzle ORM
+            </div>
+        </div>
+
+        <div class="project">
+            <div class="project-title">
+                <a href="https://github.com/PayloadGuard-PLG/payloadguard-test-harness/blob/main/PUBLIC_BRIEF.md">PayloadGuard Test Harness</a>
+            </div>
+            <div class="project-desc">
+                Adversarial validation framework for CI/CD security tools. 41 test cases across 9 categories including 14 evasion techniques and 5 red-team findings. Automated regression runner with SQLite ingestion and temporal drift tracking.
+            </div>
+            <div class="project-meta">
+                <span class="tag">Python</span>
+                <span class="tag">GitHub Actions</span>
+                <span class="tag">Adversarial Testing</span>
+                <span class="tag">Red Team</span>
+                <br style="margin-top: 0.5rem;">
+                41 test cases &middot; 9 categories &middot; 38 active branches &middot; Automated regression
+            </div>
+        </div>
+
+        <div class="methodology">
+            <h2>Development Methodology</h2>
+            <p>
+                All four projects were developed using AI-directed development — a methodology where the human provides architecture, design decisions, research direction, and quality control while AI agents implement the code under detailed instruction. The human cannot write code directly but maintains full architectural control and design authority.
+            </p>
+            <p>
+                This approach produces code with near-perfect automated quality scores because every implementation decision is deliberate, documented, and architecturally justified. The formal verification work (CrossHair, Z3, Dafny) was commissioned to prove that the security-critical scoring logic is correct across the entire input domain — not just the tested cases.
+            </p>
+            <p>
+                The security tools remain under controlled disclosure. Detection patterns are treated as sensitive material. This page provides architectural overviews and verification results without exposing operational signatures.
+            </p>
+        </div>
+
+        <div class="contact">
+            <h2>Contact</h2>
+            <p>
+                For private demonstration, research collaboration, or employment enquiries:<br>
+                <a href="https://github.com/DarkVader-PLG">GitHub: @DarkVader-PLG</a>
+            </p>
+            <p style="margin-top: 0.5rem;">
+                Available for: security engineering, AI safety research, formal verification consulting, supply-chain security tooling.
+            </p>
+        </div>
+
+        <footer>
+            <p>PayloadGuard-PLG &middot; 2026 &middot; Aberdeen, Scotland</p>
+        </footer>
+    </div>
+</body>
+</html>
