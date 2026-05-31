@@ -2,6 +2,23 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-05-31 — WS03 regression root cause resolved
+
+### Finding
+
+WS03 (`workflow-security/dormant-trigger`) was logged as expected DESTRUCTIVE but consistently returning CAUTION (score=3).
+
+**Root cause:** The original DESTRUCTIVE expectation was set when `_scan_added_file_content()` scanned all added files including `.github/workflows/` yml files, picking up `curl | bash` as two shell patterns (+4 via L2b) on top of the `dormant_trigger_with_payload` L2c HIGH signal (+3), for a total score of 7. The v1.2.0 fix that made L2c the exclusive handler for workflow files (to prevent double-counting) reduced the score to 3 — correct behavior, stale test expectation.
+
+**Resolution:** No code change. Test expectation corrected in harness:
+- `test_cases.json`: expected_verdict DESTRUCTIVE → CAUTION, expected_exit_code 2 → 0
+- `HARNESS.md`: verdict column updated
+- `TEST_SPEC.md`: layers, expected verdict, notes updated to reflect v1.2.0 design
+
+**Design note:** `dormant_trigger_with_payload` is HIGH (+3 → CAUTION). For DESTRUCTIVE via L2c alone, a CRITICAL signal is required. This is intentional: a `workflow_dispatch`-gated trigger requires manual activation and is not autonomously dangerous.
+
+---
+
 ## 2026-05-31 — Staged refactoring: dead files, branch cleanup, analyze.py
 
 ### Dead file deletion
