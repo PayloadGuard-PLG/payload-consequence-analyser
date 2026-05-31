@@ -3,17 +3,17 @@
 ## Handover (update this block at the end of every session)
 
 - **Branch for next work:** create a new branch from main
-- **Status:** v1.3.0 SHIPPED. L4b PLI semantic consistency layer merged to main (PR #73, `76139e9`). `PLI_INTEGRATION_SPEC.md` on main (PR #74). Harness updated to v1.3.0 + PLI enabled (PR #62). RTA02 closed. All open PRs merged.
-- **Next action:** PLI comparison regression — run stable regression on harness, compare verdicts and `pli.findings` against v1.2.0 baseline. Semantic category cases are the primary signal for PLI detection improvement.
-- **CI:** `trigger-regression.yml` dispatches `analyser-updated` to payloadguard-test-harness on every push to main. Requires `REGRESSION_PAT` secret (repo-scope PAT on the harness) in this repo's secrets.
+- **Status:** v1.3.0. PLI L4b evaluated and reverted (see v1.3.0 changelog). Scoring path stable at v1.2.0 level + RTA02 fix. PLI R&D files deleted from repo root (pli_analyzer.py, pli_engine.py, PLI_INTEGRATION_SPEC.md + scratch files). Stale dev branches cleaned up. analyze.py: unused import removed, dead hasattr() guard removed, workflow diff boilerplate extracted.
+- **Next action:** Investigate WS03 (workflow-security/dormant-trigger): expected DESTRUCTIVE, consistently getting CAUTION (score=3). L2c dormant_trigger signal fires but score caps at 3 (CAUTION). Determine why second signal not firing.
+- **CI:** `trigger-regression.yml` now manual-only (`workflow_dispatch`). Harness `regression.yml` also manual-only. Run regression explicitly when needed.
 - **Vericoding Phase 4 — Dafny MERGED (PR #70, main `b44a116`):**
-  - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–12 (score bounds, verdict bijection, safety implications, empty-input guarantee)
+  - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–11a (score bounds, verdict bijection, safety implications, empty-input guarantee). POST-12 (PLI) removed in revert.
   - `verification/dafny/structural_drift.dfy`: L4 — S1–S7 dual-gate biconditional
   - `verification/dafny/temporal_drift.dfy`: L5a — T1–T8 linear drift, zero-input guarantees
   - `.github/workflows/verify-dafny.yml`: CI — Dafny 4.9.1 release zip (bundles Z3 4.12.1); runs on PR/push touching `verification/dafny/**`
   - `verify-dafny.log` placeholder in place — replace with actual `dafny verify` output after local run
 - **Vericoding Phase 2 — CrossHair SHIPPED, all 4 layers verified (272 pass, 7 skip):**
-  - `verification/consequence_pure.py`: Layer 3 — C1–C12 contracts (verdict bijection, score bounds, safety implications)
+  - `verification/consequence_pure.py`: Layer 3 — C1–C12 contracts (verdict bijection, score bounds, safety implications). C13 (PLI) removed in revert.
   - `verification/temporal_pure.py`: Layer 5a — T1–T7 contracts (drift_score ≥ 0, status bijection, zero-input → CURRENT)
   - `verification/structural_pure.py`: Layer 4 — S1–S7 contracts (dual-gate: DESTRUCTIVE requires BOTH ratio > threshold AND count ≥ min)
   - `verification/semantic_pure.py`: Layer 5b — M1–M9 contracts (mci_score ∈ [0,1], DECEPTIVE ↔ score ≥ 0.5, no-description → UNVERIFIED)
@@ -33,32 +33,14 @@
   - `agent/main.go`: populates maps at startup, reports `blocked` in JSON events.
   - `agent/events.go`: `Blocked uint8` + `Pad [3]uint8` fields.
   - `scripts/pc-smoke-test.sh`: one-command build+run+verify. Run with `sudo bash scripts/pc-smoke-test.sh`.
-- **Phase 2 Stage 3b (block mode + egress allowlist) — VERIFIED on real hardware:**
-  - Smoke test PASSED: all 4 event types captured (execve, egress_connect, ptrace_attach, procmem_open).
-  - Three PC-specific fixes applied:
-    1. `agent/preflight.go`: `rlimit.RemoveMemlock()` moved before canary load — WSL2 fails canary with EPERM if memlock still in effect.
-    2. `agent/bpf/probe.c` `trace_openat`: `__builtin_memcpy` size corrected from `sizeof(e->detail)=64` to `sizeof(path)=32` — BPF verifier caught out-of-bounds read at R10+7.
-    3. `agent/bpf/probe.c` `trace_ptrace`: `PTRACE_TRACEME` (request=0) added to the filter alongside `PTRACE_ATTACH` (16) and `PTRACE_SEIZE` (0x4206).
-  - `agent/bpf/probe.c`: two BPF maps (`pg_config`, `egress_allow_ipv4`) + block logic via `bpf_send_signal(9)`. Event struct has `blocked` field.
-  - `agent/main.go`: populates maps at startup, reports `blocked` in JSON events.
-  - `agent/events.go`: `Blocked uint8` + `Pad [3]uint8` fields.
-  - `scripts/pc-smoke-test.sh`: one-command build+run+verify. Run with `sudo bash scripts/pc-smoke-test.sh`.
-- **Phase 2 Stage 3a (eBPF agent skeleton) — SHIPPED:**
-  - `agent/bpf/probe.c`: 4 tracepoint probes (execve/connect/ptrace/openat).
-  - `agent/main.go`: ring buffer event loop, SIGTERM handler, `--mode disabled|audit|block` flag.
-  - `agent/preflight.go`: kernel ≥5.8 check + memlock removal + BPF canary load (graceful exit 0 if unavailable).
-  - `action.yml`: `runtime-mode` input + `runtime-events-path` output + agent download+run step.
-  - `analyze.py`: `_load_runtime_events()` + `"runtime_events"` key in report (advisory, no score impact).
-  - **Dev environment note:** This container has `CONFIG_KPROBES=not set` — preflight exits 0 with warning. WSL2 on Windows 11 has `CONFIG_KPROBES=y` and runs the agent fully.
 - **Phase 2 Stage 2 (Z3 proofs) — SHIPPED:**
   - `tests/proofs/test_z3_properties.py`: P1–P10, all `unsat` in <0.1 s.
   - Run: `pytest tests/proofs/ -m proof -v --timeout=30`
 - **Phase 2 Stage 1 (auto-remediation) — SHIPPED:**
   - `remediate.py`: `WorkflowRemediator` — resolves `uses:` tags to SHAs, patches YAML, opens PR.
   - `action.yml`: `auto-remediate` input (default `false`).
-- **Test suite:** `python -m pytest test_analyzer.py tests/proofs/ -q --timeout=30` → 272 pass, 7 skip.
-- **Next priority:** Harness update — RTA02 test case verdict (`payloadguard-test-harness/tools/test_cases.json`: `expected_verdict: DESTRUCTIVE, expected_exit_code: 2, bypass: false`). Then merge PLI Layer L4b PR.
-- **Open findings:** INC-3 (direct push to main).
+- **Test suite:** `python -m pytest test_analyzer.py tests/proofs/ -q --timeout=30` → 273 pass, 7 skip.
+- **Open findings:** INC-3 (direct push to main). WS03 (dormant-trigger) CAUTION not DESTRUCTIVE.
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
 - **Blockers:** None.
@@ -87,7 +69,7 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 | L2c Actions Poisoning | Added/modified workflow files: base64, credential harvest, OIDC elevation, typosquatted consumers | `_scan_github_actions_poisoning()` |
 | L3 Consequence | Severity scoring → SAFE/REVIEW/CAUTION/DESTRUCTIVE | `_assess_consequence()` |
 | L4 Structural | AST diff — named class/function/constant deletions | `StructuralPayloadAnalyzer` |
-| L4b PLI | Semantic consistency — PR description vs diff, commit vs content, old vs new function | `PLIAnalyzer` (opt-in, `pli-analysis: true`) |
+| L4b PLI | Semantic consistency — PR description vs diff, commit vs content, old vs new function | NOT ACTIVE — reverted; code on branch `claude/oidc-typosquat-detection-UBCOJ` |
 | L4b Complexity | McCabe V(G) advisory for newly added Python fns | inside `analyze_structural_drift()` |
 | L5a Temporal | Branch age × target velocity drift score | `TemporalDriftAnalyzer` |
 | L5b Semantic | PR-MCI three-phase heuristic — deceptive description detection | `SemanticTransparencyAnalyzer` |
@@ -97,8 +79,6 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 
 ```
 analyze.py               — core analyser, all layers, CLI entry point
-pli_analyzer.py          — PLIAnalyzer: three-layer semantic consistency engine (L4b)
-PLI_INTEGRATION_SPEC.md  — full L4b integration reference: pairs, scoring, verification, file index
 structural_parser.py — tree-sitter AST node extraction (Python/JS/TS/Go/Rust/Ruby)
 post_check_run.py    — posts GitHub Check Run via App JWT (RS256)
 remediate.py         — auto-remediation: resolves action tags to SHAs, opens PR
@@ -113,24 +93,22 @@ allowlist.yml        — SCA package allowlist (user-created, not in repo by def
 payloadguard.yml     — per-repo threshold config (user-created, not in repo by default)
 AUDIT_LOG.md         — architectural review findings + incident reports
 WHITEPAPER.md        — full technical specification
-DEVLOG.md            — chronological session log
+DEVLOG.md           — chronological session log
 ```
 
 ### Scoring
 
-- Structural CRITICAL: +5
+- Structural CRITICAL: +3
 - Security file deleted: +5
 - Actions poisoning CRITICAL signal: +5
-- PLI semantic CRITICAL finding: +5 (forces DESTRUCTIVE alone)
 - Unverified dependency (SCA): +3 per unique package
 - Actions poisoning HIGH signal: +3
-- PLI semantic HIGH finding: +3
 - Critical path deleted: +2
 - Added file content flags (CI triggers/shell): +2 per match, capped at +4
 - Line/file/ratio flags: up to +4 (capped, correlated dims)
 - Branch age: +1/+2/+3
 - Thresholds: score >=5 -> DESTRUCTIVE, >=3 -> CAUTION, >=1 -> REVIEW
-- MAX_SCORE: 36 (was 31, +5 for PLI)
+- MAX_SCORE: 31
 
 ### Config (`payloadguard.yml` in target repo, optional)
 
@@ -151,16 +129,13 @@ sca:
 
 ## Current Version
 
-`__version__ = "1.3.0"` (analyze.py:29)
+`__version__ = "1.3.0"` (analyze.py:29) — PLI reverted, architecture stable at v1.2.0 level + RTA02 fix
 
 ### v1.3.0 changes
-- Feature: Layer L4b PLI semantic consistency analysis — `PLIAnalyzer.analyze_turn()` on three (user_text, model_text) pairs per PR: PR description vs diff summary, commit message vs diff content, old vs new function code for structurally-flagged files
-- Feature: `pli_critical` → +5 (forces DESTRUCTIVE alone); `pli_high` → +3. MAX_SCORE updated 31 → 36.
-- Feature: opt-in via `pli-analysis: true` in workflow (or `--pli-analysis` CLI flag). Degrades gracefully: L1-only without `PLI_API_KEY`, unavailable if `pli_analyzer.py` absent (score unchanged)
-- Feature: `_build_pli_llm_adapter()` shim — Anthropic SDK, model `claude-haiku-4-5-20251001`
-- Verification: `consequence_pure.py` updated (C3 bound 31→36, new C13 `pli_critical→DESTRUCTIVE`); `assess_consequence.dfy` updated (MAX_SCORE 31→36, `pli_critical`/`pli_high` params, POST-12)
-- Tests: 278 pass, 8 skip (6 new PLI tests in `TestPLIAnalysis`)
-- Docs: `PLI_INTEGRATION_SPEC.md` — complete L4b integration reference on main
+- PLI L4b evaluated and reverted. PLI integration (PR #73) was implemented and regression-tested (34 stable cases, 2026-05-29). Result: 2 true positives (A03 adversarial/slow-deletion, A06 adversarial/threshold-gaming — both previously bypassing), 3 false positives (WS07 safe-clean-workflow, RT02 postinstall-curl, RTA03 prt-untrusted-checkout). Root cause: PLI's L2 LLM analysis interprets code diff summaries as blank AI responses, generating critical findings on legitimate safe PRs. Reverted from scoring path. MAX_SCORE reverted 36→31.
+- Fix (RTA02): `_scan_github_actions_poisoning()` credential_harvest loop now checks normalized content — multiline curl with continuation lines detected. Expected verdict DESTRUCTIVE confirmed.
+- CI: `trigger-regression.yml` changed to manual-only — removed push-to-main auto-trigger that was flooding Claude Code General conversation session with ~200 GitHub events per push.
+- Refactor: PLI R&D files deleted from repo root. Stale dev branches cleaned up. analyze.py: unused `import os` removed, dead `hasattr(self.config, 'actions')` guard removed, `_iter_workflow_file_diffs()` helper extracted to deduplicate workflow blob-reading boilerplate.
 
 ### v1.2.0 changes
 - Feature: L2c GitHub Actions poisoning detection — base64 payload, credential harvest, dormant trigger, forged bot author, OIDC elevation (incl. `oidc_elevation_typosquatted` CRITICAL), pull_request_target signals
@@ -188,6 +163,7 @@ sca:
 |---|---|---|---|
 | INC-3 | Direct push to main -> L5b returns UNVERIFIED but raises no flag | MEDIUM | Backlog |
 | §2.3 | Single-branch clone / detached HEAD raises BadName exception | MEDIUM | Backlog |
+| WS03 | workflow-security/dormant-trigger: expected DESTRUCTIVE, getting CAUTION (score=3) | MEDIUM | Next |
 
 ## Vericoding Plan (from `payloadguard-vericoding-plan.md` on main)
 
@@ -242,9 +218,7 @@ The agent preflight canary will warn and exit 0 gracefully if tracepoints are un
 - **CLAUDE.md is updated on every change, no exceptions.** Every code change, fix, finding, doc update, or architectural decision goes into the Handover block before the session ends. Stale handovers cause real work loss. This includes architecture table, key files, scoring, open findings, and version changelog — not just the Handover block.
 - **Read CLAUDE.md at session start and verify every section is current before touching code.**
 - **Tests:** Run `python -m pytest test_analyzer.py -v` before every commit -- must stay green
-- **No MCP push_files:** Confirmed broken in multiple sessions. Don't retry.
 - **Commit style:** Imperative, specific, with test count in body. See git log for examples.
-- **NotebookLM:** Do not use for active code sessions -- use only for reading stable documents.
 - **Documentation style:** Professional and concise throughout. No informal, casual, or whimsical language in any documentation, commit messages, comments, or README content. State facts directly. Every sentence must earn its place.
 
 ---
