@@ -2,13 +2,13 @@
 
 **Version:** 1.3.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Released:** May 2026
 
-PayloadGuard is a static analysis GitHub Action that forensically intercepts and evaluates pull requests for destructive, deceptive, or malicious code payloads. It performs a 9-layer architectural diff scan and emits a deterministic verdict to automatically block catastrophic merges before they reach the main branch — the class of attack where a branch held open for months lands as a *"minor fix"* and wipes the codebase in a single merge.
+PayloadGuard is a static analysis GitHub Action that forensically intercepts and evaluates pull requests for destructive, deceptive, or malicious code payloads. It performs a 9-layer architectural diff scan and emits a deterministic verdict to automatically block catastrophic merges before they reach the main branch — the class of attack where a branch held open for months lands as a *“minor fix”* and wipes the codebase in a single merge.
 
 ---
 
 ## Formal Verification: Mathematical Proofs of Correctness
 
-PayloadGuard's scoring and consequence models are mathematically verified to ensure deterministic outputs. A bug would have to produce a consistent false result across three independent verification frameworks simultaneously to go undetected.
+PayloadGuard’s scoring and consequence models are mathematically verified to ensure deterministic outputs. A bug would have to produce a consistent false result across three independent verification frameworks simultaneously to go undetected.
 
 The analysis engines are validated via:
 
@@ -104,7 +104,7 @@ Each layer examines an isolated dimension of risk. A payload designed to evade o
 
 ## Forensic Report: April 2026 Incident Reconstruction
 
-This is the report PayloadGuard would have produced on the April 2026 incident — a branch open for 312 days, submitted as a *"minor syntax fix"*, containing a diff that would have deleted 60 files, 11,967 lines, and the entire application architecture.
+This is the report PayloadGuard would have produced on the April 2026 incident — a branch open for 312 days, submitted as a *“minor syntax fix”*, containing a diff that would have deleted 60 files, 11,967 lines, and the entire application architecture.
 
 ```
 ======================================================================
@@ -271,7 +271,7 @@ where:
 | Signal $i$ | Weight $w_i$ | Trigger condition |
 |---|---|---|
 | `scope_understated` | 0.4 | Micro-scope language with churn > 50 lines |
-| `phantom_additions` | 0.4 | Remedial claim ("fix", "patch") with insertion ratio > 90% |
+| `phantom_additions` | 0.4 | Remedial claim (“fix”, “patch”) with insertion ratio > 90% |
 | `operation_mutation` | 0.3 | Micro-scope language with structural additions in diff |
 | `hidden_component_modification` | 0.3 | Sensitive file in diff not named in description |
 | `cross_stack_micro_claim` | 0.2 | Micro-scope language touching ≥ 3 distinct file types |
@@ -368,7 +368,7 @@ Without the App secrets the step is a no-op. PR comment and merge enforcement st
 python -m pytest test_analyzer.py tests/proofs/ -q
 ```
 
-273 pass, 7 skip. New detection signals require test coverage in the relevant layer's test class. Open findings are tracked in [`AUDIT_LOG.md`](AUDIT_LOG.md).
+273 pass, 7 skip. New detection signals require test coverage in the relevant layer’s test class. Open findings are tracked in [`AUDIT_LOG.md`](AUDIT_LOG.md).
 
 ---
 
