@@ -1,6 +1,6 @@
 # PayloadGuard — Technical Whitepaper
 
-**Version:** 1.2.0 — May 2026
+**Version:** 1.3.0 — May 2026
 **Repository:** `PayloadGuard-PLG/payload-consequence-analyser`
 **Status:** Live on main
 
@@ -24,7 +24,7 @@ PayloadGuard is a nine-layer static + runtime analysis system that runs on every
 
 The system assigns a severity score across independent signal dimensions and produces one of four verdicts: **SAFE**, **REVIEW**, **CAUTION**, or **DESTRUCTIVE**. A DESTRUCTIVE verdict sets exit code 2; wired to a GitHub branch protection rule, this blocks the merge button automatically.
 
-**v1.2.0 production release** includes:
+**v1.3.0 production release** includes:
 - All AIntegrity audit fixes (5 logic defects resolved)
 - SCA dependency hallucination defense — Layer 2b (opt-in via allowlist.yml)
 - McCabe complexity advisory for new functions (informational, no score impact)
@@ -183,7 +183,7 @@ git.Repo(workspace)
 | `action.yml` | Composite GitHub Action definition |
 | `agent/` | eBPF runtime defence agent (Go + cilium/ebpf) |
 | `agent/bpf/probe.c` | 4 tracepoint probes + block mode BPF maps |
-| `test_analyzer.py` | 267-test unit suite (272 total with CrossHair) |
+| `test_analyzer.py` | 258-test unit suite (273 total with CrossHair + Z3 proof tests) |
 | `tests/proofs/` | Z3 SMT proofs (P1–P10) + CrossHair pytest wrapper (5 tests) |
 | `verification/` | CrossHair pure extraction modules — consequence, structural, temporal, semantic |
 
@@ -347,26 +347,22 @@ This catches A03-class attacks where one function is removed from each of N file
 
 ---
 
-### 4.3b Layer L4b — PLI Semantic Consistency (opt-in)
+### 4.3b Layer L4b — Complexity Advisory
 
-**Purpose:** Detect deceptive PR descriptions, misleading commit messages, and single-line semantic attacks invisible to regex or AST analysis.
+**Purpose:** Identify newly added Python functions whose McCabe cyclomatic complexity V(G) exceeds the configured threshold. Informational only — no score impact.
 
-**Engine:** `PLIAnalyzer` (Persistent Logical Interrogation) — a three-layer consistency engine. Layer 1: regex contradiction and evasion patterns. Layer 2: LLM dual-pass OBSERVE+VERIFY analysis with structured JSON output. Layer 3: dynamic prompt selection guided by Layer 1 findings.
+**Implementation:** For each added or modified Python file, the structural parser computes V(G) for every function definition in the modified blob. Functions exceeding the threshold (default 15) are listed in `complexity_advisory` with their computed complexity and the threshold in effect.
 
-**Input pairs (per PR):**
-1. `(pr_description, diff_summary)` — catches "fix typo" descriptions that mask auth middleware rewrites
-2. `(commit_message, diff_content)` — catches misleading commit subjects
-3. `(old_function_code, new_function_code)` — for each file where L4 Structural detected deleted components; catches single-line semantic attacks ("this one-line change swaps `==` to `!=` in the auth check")
+**Configuration:**
+```yaml
+thresholds:
+  structural:
+    complexity_threshold: 15  # default
+```
 
-**Scoring contribution:**
-- `pli_critical` finding: +5 (forces DESTRUCTIVE alone — same class as security file deletion)
-- `pli_high` finding: +3
+**Outputs:** `complexity_advisory` list per file in the structural report. Does not affect verdict.
 
-**Modes:**
-- **L1-only** (no `PLI_API_KEY`): regex patterns run but rarely fire on code diff inputs; consistency score stays 1.0 in practice. Present in the report with `mode: "l1_only"`.
-- **Full L1+L2+L3** (`PLI_API_KEY` set, `anthropic` package installed): LLM dual-pass analysis catches semantic inconsistencies that regex cannot. This is the mode that provides meaningful signal for PLG.
-
-**Activation:** opt-in — set `pli-analysis: true` in the workflow or pass `--pli-analysis` on the CLI. Degrades gracefully: if `pli_analyzer.py` is absent, returns zero signal (score unchanged). If `PLI_API_KEY` is absent, runs L1-only.
+> **Note — PLI Semantic Consistency (evaluated v1.3.0, reverted):** A Layer L4b PLI integration was implemented and regression-tested (34 stable cases, 2026-05-29). The engine (`PLIAnalyzer`) analysed `(pr_description, diff_summary)`, `(commit_message, diff_content)`, and `(old_function, new_function)` pairs via LLM dual-pass analysis. Result: 2 true positives (A03 slow-deletion, A06 threshold-gaming) but 3 false positives on safe baselines (WS07, RT02, RTA03). Root cause: PLI's L2 LLM analysis interprets code diff summaries as blank AI conversation responses, generating critical findings on legitimate PRs. Reverted from scoring path. PLI source files (`pli_analyzer.py`, `pli_engine.py`, `PLI_INTEGRATION_SPEC.md`) are preserved in the repository for future reintegration if the input pair design is revised.
 
 ---
 
