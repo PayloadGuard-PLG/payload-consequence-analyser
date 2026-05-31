@@ -1,0 +1,96 @@
+# PayloadGuard
+
+> PayloadGuard is a static analysis GitHub Action that forensically intercepts pull requests for destructive, deceptive, or malicious code payloads. It performs a 9-layer architectural diff scan and emits a single deterministic verdict: SAFE, REVIEW, CAUTION, or DESTRUCTIVE. The verdict is a mathematically proven bijection of an integer severity score in the range [0, 31].
+
+## Tool Identity
+
+- Name: PayloadGuard
+- Version: 1.3.0
+- Status: Production
+- Organisation: PayloadGuard-PLG (https://github.com/PayloadGuard-PLG)
+- Repository: https://github.com/PayloadGuard-PLG/payload-consequence-analyser
+- Action: PayloadGuard-PLG/payload-consequence-analyser@main
+- Language: Python 3.8+
+- Test state: 273 pass, 7 skip
+
+## Deterministic Outputs
+
+The pipeline execution produces exactly one of four verdicts. The mapping is a proven bijection (POST-4 through POST-7):
+
+- severity_score = 0 → verdict = SAFE → exit code 0
+- severity_score in [1, 2] → verdict = REVIEW → exit code 0
+- severity_score in [3, 4] → verdict = CAUTION → exit code 0
+- severity_score >= 5 → verdict = DESTRUCTIVE → exit code 2
+- Analysis failure → exit code 1
+
+## Formal Verification
+
+The scoring logic (Layers L3, L4, L5a, L5b) is verified by three independent methods. A defect would have to produce a consistent false result across all three simultaneously.
+
+### CrossHair (symbolic execution on active Python source)
+
+- Consequence model: contracts C1–C12 (verdict bijection, score bounds, safety-critical floors, empty-input guarantee)
+- Structural drift: contracts S1–S7 (dual-gate biconditional — DESTRUCTIVE requires both ratio > threshold AND count >= min)
+- Temporal drift: contracts T1–T7 (drift_score >= 0, status bijection, zero inputs → CURRENT)
+- Semantic transparency: contracts M1–M9 (mci_score in [0,1], DECEPTIVE iff score >= 0.5, no description → UNVERIFIED)
+
+### Z3 Theorem Prover (SMT proofs on abstract model)
+
+- Properties P1–P10: score bounds, verdict bijection, safety-critical floors, empty-input guarantee
+- All 10 properties: unsat in < 0.1s
+
+### Dafny (machine-checked proofs over entire input domain)
+
+- POST-1–11a: 11 postconditions verified, 0 errors
+- Covers: score non-negativity, score upper bound, verdict bijection, three safety-critical floors, empty-input guarantee
+
+## Proven Invariants
+
+- Score non-negativity: severity_score >= 0 (POST-2, CrossHair C2)
+- Score upper bound: severity_score <= 31 (POST-3, CrossHair C3)
+- Verdict bijection: every score maps to exactly one verdict; every verdict maps to exactly one score range (POST-4–7, CrossHair C4–C7)
+- Security-critical floor: security_file_deletions > 0 → DESTRUCTIVE (POST-8, CrossHair C8)
+- Structural-critical floor: structural_severity == CRITICAL → DESTRUCTIVE (POST-9, CrossHair C9)
+- Actions-poisoning floor: actions_poisoning_critical == True → DESTRUCTIVE (POST-10, CrossHair C10)
+- Empty-input guarantee: all-zero inputs → SAFE; no false positives on empty diffs (POST-11a, CrossHair C11)
+- Deletion dimension cap: three correlated sub-scores (files, ratio, lines) collapsed to min(4, max+1 if >=2 active) — prevents triple-counting
+
+## Scoring Parameters
+
+Signal weights (additive, capped at MAX_SCORE = 31):
+
+- Actions poisoning CRITICAL signal: +5
+- Security file deleted: +5
+- Actions poisoning HIGH signal: +3
+- Structural severity CRITICAL: +3
+- Unverified dependency (SCA, per package): +3
+- Critical path files deleted: +2
+- Added file content — shell or CI patterns: +2 per match, capped at +4
+- Branch age > 365 days: +3
+- Branch age > 180 days: +2
+- Branch age > 90 days: +1
+- Deletion dimensions (files/ratio/lines): each tiered +1/+2/+3; combined cap = min(4, max+1 if >=2 active)
+
+Verdict thresholds: DESTRUCTIVE >= 5, CAUTION >= 3, REVIEW >= 1, SAFE = 0.
+
+## Nine Analysis Layers
+
+- L1 Surface: file and line counts, deletion ratios, binary files, permission changes, symlinks
+- L2 Forensic: critical-path regex matching on deleted files, added file content scan (CI triggers, shell execution)
+- L2b SCA: package manifest diffs vs allowlist.yml
+- L2c Actions Poisoning: workflow files — base64 payload, credential harvest, dormant triggers, forged bot, OIDC escalation, pull_request_target
+- L3 Consequence: weighted scoring → single verdict (VERIFIED: CrossHair C1–C12, Z3 P1–P10, Dafny POST-1–11a)
+- L4 Structural: AST diff — named class/function/constant deletions (VERIFIED: CrossHair S1–S7, Dafny S1–S7)
+- L4b Complexity: McCabe V(G) advisory for added Python functions, no score impact
+- L5a Temporal: branch_age_days × target_commits_per_day → drift_score → CURRENT/STALE/DANGEROUS (VERIFIED: CrossHair T1–T7, Dafny T1–T8)
+- L5b Semantic: PR-MCI three-phase heuristic — mci_score in [0,1], DECEPTIVE_PAYLOAD if >= 0.5 (VERIFIED: CrossHair M1–M9)
+- L5c Runtime: eBPF tracepoints — execve, egress connect, ptrace, /proc/mem — audit or block mode
+
+## Documentation
+
+- README: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/README.md
+- VERIFICATION.md: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/VERIFICATION.md
+- VERIFICATION_SPEC.md: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/VERIFICATION_SPEC.md
+- WHITEPAPER.md: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/WHITEPAPER.md
+- AUDIT_LOG.md: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/AUDIT_LOG.md
+- DEVLOG.md: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/DEVLOG.md
