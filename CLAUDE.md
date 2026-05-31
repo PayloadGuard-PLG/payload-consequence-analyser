@@ -4,7 +4,7 @@
 
 - **Branch for next work:** create a new branch from main
 - **Status:** v1.3.0. PLI L4b evaluated and reverted (see v1.3.0 changelog). Scoring path stable at v1.2.0 level + RTA02 fix. PLI R&D files deleted from repo root (pli_analyzer.py, pli_engine.py, PLI_INTEGRATION_SPEC.md + scratch files). Stale dev branches cleaned up. analyze.py: unused import removed, dead hasattr() guard removed, workflow diff boilerplate extracted. test_analyzer.py corruption fixed (agent double-encoded file in commit 50f2662; restored in 5dd6a07). Harness 3x daily schedule removed — regression is now manual-only (`workflow_dispatch`). MCP push blocked at 127.0.0.1 proxy; use session ingress token + direct Anthropic GitHub MCP endpoint when git push is unavailable.
-- **Next action:** Investigate WS03 (workflow-security/dormant-trigger): expected DESTRUCTIVE, consistently getting CAUTION (score=3). L2c dormant_trigger signal fires but score caps at 3 (CAUTION). Determine why second signal not firing.
+- **Next action:** No open regressions. INC-3 (direct push to main → L5b returns UNVERIFIED but raises no flag) remains in backlog.
 - **CI:** `trigger-regression.yml` now manual-only (`workflow_dispatch`). Harness `regression.yml` also manual-only. Run regression explicitly when needed.
 - **Vericoding Phase 4 — Dafny MERGED (PR #70, main `b44a116`):**
   - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–11a (score bounds, verdict bijection, safety implications, empty-input guarantee). POST-12 (PLI) removed in revert.
@@ -40,7 +40,7 @@
   - `remediate.py`: `WorkflowRemediator` — resolves `uses:` tags to SHAs, patches YAML, opens PR.
   - `action.yml`: `auto-remediate` input (default `false`).
 - **Test suite:** `python -m pytest test_analyzer.py tests/proofs/ -q --timeout=30` → 273 pass, 7 skip.
-- **Open findings:** INC-3 (direct push to main). WS03 (dormant-trigger) CAUTION not DESTRUCTIVE.
+- **Open findings:** INC-3 (direct push to main).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
 - **Blockers:** None.
@@ -163,7 +163,7 @@ sca:
 |---|---|---|---|
 | INC-3 | Direct push to main -> L5b returns UNVERIFIED but raises no flag | MEDIUM | Backlog |
 | §2.3 | Single-branch clone / detached HEAD raises BadName exception | MEDIUM | Backlog |
-| WS03 | workflow-security/dormant-trigger: expected DESTRUCTIVE, getting CAUTION (score=3) | MEDIUM | Next |
+| WS03 | workflow-security/dormant-trigger: expected DESTRUCTIVE, getting CAUTION (score=3) | MEDIUM | **RESOLVED** — test expectation corrected (see DEVLOG 2026-05-31) |
 
 ## Vericoding Plan (from `payloadguard-vericoding-plan.md` on main)
 
