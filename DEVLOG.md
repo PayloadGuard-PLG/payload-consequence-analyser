@@ -2,6 +2,43 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-05-31 — SHA regression discovered: fe68338 misses A03 and A06
+
+### Regression run results (2026-05-31 14:12 UTC)
+
+Harness regression run executed against analyser SHA `fe6833887f34e77e53cf7e1dcf73c37297f5fea3` (main v1.3.0). 28 of 34 stable cases verified; 2 confirmed failures; 6 unverified (MCP token expired before check completion).
+
+**Confirmed FAIL:**
+
+| Case | Branch | PR | Expected | Actual (fe68338) |
+|---|---|---|---|---|
+| A03 | `adversarial/slow-deletion` | #16 | DESTRUCTIVE | scan=success (SAFE/CAUTION) |
+| A06 | `adversarial/threshold-gaming` | #19 | DESTRUCTIVE | scan=success (SAFE/CAUTION) |
+
+**Confirmed PASS (28):** T03, T04, T05, T09, T10, T11, A01, A02, A04, A05, WS01–WS07, AW01–AW05, RTA01, RTA02, RTA05, RT03.
+
+**Unverified (6, MCP token expired):** A07 (PR #20), A09 (PR #21), RTA03 (PR #51), RTA04 (PR #52), RT02 (PR #64), RT01 (PR #65).
+
+### Root cause hypothesis
+
+A03 (`adversarial/slow-deletion`) removes 1 named function from each of 5 files — requires cross-file structural aggregation (`StructuralPayloadAnalyzer`) to score CRITICAL (+3 structural → DESTRUCTIVE after addition of other signals). A06 (`adversarial/threshold-gaming`) tunes every individual metric just below its threshold — requires compound scoring to cross DESTRUCTIVE.
+
+Both cases were confirmed DESTRUCTIVE with SHA `5dd6a0728ffd3c431c219eb6393cbc4a4f188f9a`. The SHA bump to `fe68338` (v1.3.0 main, which includes PLI revert, analyze.py refactoring, and dead file deletion) appears to have reduced sensitivity on these two paths. The `analyze.py` changes in v1.3.0 involved `_iter_workflow_file_diffs()` extraction — inspect whether this inadvertently altered iteration in the structural aggregation path.
+
+### Action required
+
+1. Investigate diff between `5dd6a072` and `fe68338` in `analyze.py` — specifically `StructuralPayloadAnalyzer` aggregation and `_assess_consequence()` compound scoring.
+2. Option A: revert `payloadguard.yml` SHA pin in harness back to `5dd6a072` and run regression to confirm ≥31/34.
+3. Option B: identify and fix the regression in `analyze.py`, commit to `claude/oidc-typosquat-detection-UBCOJ`, re-pin harness to new SHA.
+
+Do not proceed with branch deletion until regression is confirmed clean.
+
+### PR map (for reference)
+
+PR #8=T03, #9=T04, #10=T05, #11=T09, #12=T10, #13=T11, #14=A01, #15=A02, #16=A03, #17=A04, #18=A05, #19=A06, #20=A07, #21=A09, #34=WS01, #35=WS02, #36=WS03, #37=WS04, #38=WS05, #39=WS06, #40=WS07, #41=AW01, #42=AW02, #43=AW03, #44=AW04, #45=AW05, #49=RTA01, #50=RTA02, #51=RTA03, #52=RTA04, #53=RTA05, #64=RT02, #65=RT01, #66=RT03.
+
+---
+
 ## 2026-05-31 — WS03 regression root cause resolved
 
 ### Finding

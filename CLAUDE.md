@@ -2,10 +2,25 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** create a new branch from main
+- **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ` (both repos)
 - **Status:** v1.3.0. PLI L4b evaluated and reverted (see v1.3.0 changelog). Scoring path stable at v1.2.0 level + RTA02 fix. PLI R&D files deleted from repo root (pli_analyzer.py, pli_engine.py, PLI_INTEGRATION_SPEC.md + scratch files). Stale dev branches cleaned up. analyze.py: unused import removed, dead hasattr() guard removed, workflow diff boilerplate extracted. test_analyzer.py corruption fixed (agent double-encoded file in commit 50f2662; restored in 5dd6a07). Harness 3x daily schedule removed — regression is now manual-only (`workflow_dispatch`). MCP push blocked at 127.0.0.1 proxy; use session ingress token + direct Anthropic GitHub MCP endpoint when git push is unavailable.
-- **Next action:** No open regressions. INC-3 (direct push to main → L5b returns UNVERIFIED but raises no flag) remains in backlog.
+- **Next action:** Resolve SHA regression (A03/A06 fail with fe68338). See details below. Then complete branch deletion once regression is verified clean.
 - **CI:** `trigger-regression.yml` now manual-only (`workflow_dispatch`). Harness `regression.yml` also manual-only. Run regression explicitly when needed.
+
+- **IMMEDIATE: SHA regression — resolve before next regression run.**
+  Harness regression run 2026-05-31 14:12 UTC confirmed: A03 (`adversarial/slow-deletion`) and A06 (`adversarial/threshold-gaming`) return scan=success (SAFE/CAUTION) with SHA `fe6833887f34e77e53cf7e1dcf73c37297f5fea3` (v1.3.0 main) but returned scan=failure (DESTRUCTIVE) with `5dd6a0728ffd3c431c219eb6393cbc4a4f188f9a`. Both are expected DESTRUCTIVE. This is a sensitivity regression introduced by the SHA bump. Investigate: `StructuralPayloadAnalyzer` cross-file aggregation (A03 = 1 function removed from each of 5 files) and compound threshold scoring (A06 = every metric deliberately sub-threshold). Old SHA `5dd6a072` is still a valid commit and can be used in `payloadguard.yml` pin.
+
+- **Regression verification — 2026-05-31 14:12 UTC (analyser SHA fe68338):**
+  - PASS (28 confirmed): T03, T04, T05, T09, T10, T11, A01, A02, A04, A05, WS01–WS07, AW01–AW05, RTA01, RTA02, RTA05, RT03
+  - FAIL (2 confirmed): A03 (PR #16, scan=success expected DESTRUCTIVE), A06 (PR #19, scan=success expected DESTRUCTIVE)
+  - UNVERIFIED (6 — MCP token expired mid-session): A07 PR #20, A09 PR #21, RTA03 PR #51, RTA04 PR #52, RT02 PR #64, RT01 PR #65
+  - WS03 NOW PASSES: expectation corrected DESTRUCTIVE→CAUTION (harness PR #71, merged 2026-05-31)
+
+- **Branch deletion — DEFERRED until regression is verified clean (≥31/34 stable pass).**
+  - Remote branches to delete (analyser, via GitHub UI — git push --delete blocked by local proxy): `claude/general-conversation-ANx2E`, `docs/post-merge-handover`, `docs/professional-readme`, `docs/session-end-may25`, `docs/session-handover-may25`, `fix/l2-l2c-double-scoring`. ⚠️ `fix/json-serialization-raw-tokens` — delete WITHOUT merging (7,598 line deletions, guts verification suite, test suite, eBPF agent, orchestrator).
+  - Remote branches to delete (harness, via GitHub UI): `ci/cross-repo-regression-trigger`, `claude/general-conversation-ANx2E`, `docs/harness-docs-update`, `docs/sync-after-typosquat-fix`, `feat/pli-regression-testing`
+  - Keep — analyser: `main`, `claude/oidc-typosquat-detection-UBCOJ`, `release/v1.2.0`, `DarkVader-PLG-vericode`
+  - Keep — harness: `main`, `claude/oidc-typosquat-detection-UBCOJ`, `test/megalodon-simulation`, all `runtime/` branches, all permanent test fixture branches
 - **Vericoding Phase 4 — Dafny MERGED (PR #70, main `b44a116`):**
   - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–11a (score bounds, verdict bijection, safety implications, empty-input guarantee). POST-12 (PLI) removed in revert.
   - `verification/dafny/structural_drift.dfy`: L4 — S1–S7 dual-gate biconditional

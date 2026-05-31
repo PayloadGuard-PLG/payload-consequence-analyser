@@ -2,37 +2,32 @@
 
 **Version:** 1.3.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Released:** May 2026
 
-A PR analysis tool that catches destructive, deceptive, or malicious changesets before they reach main — the class of attack where a branch held open for months lands as a *"minor fix"* and wipes the codebase in a single merge.
+PayloadGuard is a static analysis GitHub Action that forensically intercepts and evaluates pull requests for destructive, deceptive, or malicious code payloads. It performs a 9-layer architectural diff scan and emits a deterministic verdict to automatically block catastrophic merges before they reach the main branch — the class of attack where a branch held open for months lands as a *"minor fix"* and wipes the codebase in a single merge.
+
+---
+
+## Formal Verification & Proofs
+
+PayloadGuard's scoring and consequence models are mathematically verified to ensure deterministic outputs. A bug would have to produce a consistent false result across three independent verification frameworks simultaneously to go undetected.
+
+The analysis engines are validated via:
+
+- **CrossHair** — Symbolic execution directly on the active Python source code. Evaluates the consequence model (C1–C12), structural drift (S1–S7), temporal drift (T1–T7), and semantic transparency (M1–M9).
+- **Z3 Theorem Prover** — Satisfiability Modulo Theories (SMT) proofs executed on an abstract scoring model. Covers score bounds, verdict bijection, safety-critical floors, and empty-input guarantee (P1–P10).
+- **Dafny** — Machine-checked proofs over the entire input domain. 11 postconditions verified, 0 errors (POST-1–11a).
+
+**Current test state:** 273 tests pass, 7 skipped.
+
+→ [`VERIFICATION.md`](VERIFICATION.md) — contracts, methods, and run instructions  
+→ [`VERIFICATION_SPEC.md`](VERIFICATION_SPEC.md) — formal specification for external auditors
 
 ---
 
 ## How it works
 
-PayloadGuard runs on every PR. It scans the full diff across nine independent analysis layers and emits a single forensic verdict: **SAFE** · **REVIEW** · **CAUTION** · **DESTRUCTIVE**. Wire DESTRUCTIVE to your branch protection rules to block the merge button automatically.
+PayloadGuard runs automatically on every pull request. It scans the full diff across nine independent analysis layers and calculates a definitive consequence score, emitting one of four verdicts: **SAFE** · **REVIEW** · **CAUTION** · **DESTRUCTIVE**.
 
----
-
-## The nine layers
-
-Each layer examines a different dimension of risk. They are independent — a payload that evades one is still exposed by the others.
-
-| Layer | What it examines | Verified | Deep dive |
-|---|---|---|---|
-| **L1 — Surface** | File and line counts, deletion ratios, binary files, permission changes, symlinks | — | [Scoring](#scoring-reference) |
-| **L2 — Forensic** | Critical-path deletions, security-sensitive file removal, added file content (CI triggers, shell execution) | — | [WHITEPAPER §3](WHITEPAPER.md) |
-| **L2b — SCA** | Package manifest diffs scanned against an allowlist for unverified dependencies | — | [Config](#sca-layer-2b) |
-| **L2c — Actions Poisoning** | Workflow files: base64 payload, credential harvesting, dormant triggers, forged bot identity, OIDC escalation, unsafe `pull_request_target` | — | [Signals](#github-actions-poisoning-layer-2c) |
-| **L3 — Consequence Model** | Weighted scoring across all signals → single verdict | ✅ CrossHair C1–C12 · Z3 P1–P10 · Dafny POST-1–12 | [Scoring](#scoring-reference) |
-| **L4 — Structural Drift** | AST-level diff: which named classes, functions, and constants were actually deleted | ✅ CrossHair S1–S7 · Dafny S1–S7 | [Languages](#supported-languages-layer-4) |
-| **L4b — Complexity** | McCabe V(G) advisory for newly added Python functions — flags high-complexity additions (informational, no score impact) | — | — |
-| **L5a — Temporal Drift** | Branch age × target repo velocity — a quantified staleness score | ✅ CrossHair T1–T7 · Dafny T1–T8 | [Signals](#temporal-drift-layer-5a) |
-| **L5b — Semantic Transparency** | Whether the PR description matches what the diff actually does | ✅ CrossHair M1–M9 | [Signals](#semantic-transparency-layer-5b) |
-| **L5c — Runtime Agent** | eBPF tracepoints on the runner: execve, egress connect, ptrace, /proc/mem — audit or block mode | — | [WHITEPAPER §8](WHITEPAPER.md) |
-
-The scoring logic (L3, L4, L5a, L5b) is verified by three independent methods — CrossHair symbolic execution on the actual Python source, Z3 SMT proofs on an abstract model, and Dafny machine-checked proofs over the entire input domain. A bug would have to produce a consistent false result across all three simultaneously to go undetected. **273 tests pass, 7 skipped. 11 Dafny postconditions verified, 0 errors.**
-
-→ [`VERIFICATION.md`](VERIFICATION.md) — contracts, methods, and run instructions  
-→ [`VERIFICATION_SPEC.md`](VERIFICATION_SPEC.md) — formal spec for external auditors
+Wire **DESTRUCTIVE** to your branch protection rules and the merge button is blocked automatically.
 
 ---
 
@@ -77,13 +72,32 @@ jobs:
 
 Set the `scan` job as a required status check in your branch protection rules. DESTRUCTIVE PRs fail the check and cannot be merged.
 
-**Exit codes:** `0` = SAFE / REVIEW / CAUTION · `1` = analysis error · `2` = DESTRUCTIVE
+**Exit codes:** `0` = SAFE / REVIEW / CAUTION &nbsp;·&nbsp; `1` = analysis error &nbsp;·&nbsp; `2` = DESTRUCTIVE
 
 ---
 
-## What a report looks like
+## The nine layers
 
-This is the forensic report PayloadGuard would have produced on the April 2026 incident — a branch open for 312 days, submitted as a *"minor syntax fix"*, containing a diff that would have deleted 60 files, 11,967 lines, and the entire application architecture.
+Each layer examines an isolated dimension of risk. A payload designed to evade one layer will be exposed by the cross-correlation of the others.
+
+| Layer | What it examines | Verified |
+|---|---|---|
+| **L1 — Surface** | File and line counts, deletion ratios, binary files, permission changes, symlinks | — |
+| **L2 — Forensic** | Critical-path deletions, security-sensitive file removal, added file content (CI triggers, shell execution) | — |
+| **L2b — SCA** | Package manifest diffs scanned against an allowlist for unverified dependencies | — |
+| **L2c — Actions Poisoning** | Workflow files: base64 payload, credential harvesting, dormant triggers, forged bot identity, OIDC escalation, unsafe `pull_request_target` | — |
+| **L3 — Consequence Model** | Weighted scoring across all signals → single verdict | ✅ CrossHair C1–C12 · Z3 P1–P10 · Dafny POST-1–11a |
+| **L4 — Structural Drift** | AST-level diff: which named classes, functions, and constants were deleted | ✅ CrossHair S1–S7 · Dafny S1–S7 |
+| **L4b — Complexity** | McCabe V(G) advisory for newly added Python functions (informational, no score impact) | — |
+| **L5a — Temporal Drift** | Branch age × target repo velocity — a quantified staleness score | ✅ CrossHair T1–T7 · Dafny T1–T8 |
+| **L5b — Semantic Transparency** | Whether the PR description matches what the diff actually does | ✅ CrossHair M1–M9 |
+| **L5c — Runtime Agent** | eBPF tracepoints on the runner: execve, egress connect, ptrace, /proc/mem — audit or block mode | — |
+
+---
+
+## Forensic report example
+
+This is the report PayloadGuard would have produced on the April 2026 incident — a branch open for 312 days, submitted as a *"minor syntax fix"*, containing a diff that would have deleted 60 files, 11,967 lines, and the entire application architecture.
 
 ```
 ======================================================================
@@ -161,8 +175,6 @@ pip install -r requirements.txt
 ## CLI usage
 
 ```bash
-python analyze.py <repo_path> <branch> [target_branch]
-
 # Scan a branch against main
 python analyze.py . feature/auth-refactor main
 
@@ -170,17 +182,41 @@ python analyze.py . feature/auth-refactor main
 python analyze.py . feature/auth-refactor main \
   --pr-description "Refactor authentication module"
 
-# Output a JSON report
+# Output reports
 python analyze.py . feature/auth-refactor main --save-json
-
-# Output a Markdown report
-python analyze.py . feature/auth-refactor main \
-  --save-markdown reports/scan.md
+python analyze.py . feature/auth-refactor main --save-markdown reports/scan.md
 ```
 
 ---
 
-## Layer reference
+## Technical reference
+
+### Scoring
+
+| Signal | Points |
+|---|---|
+| Branch age > 90 / 180 / 365 days | +1 / +2 / +3 |
+| Files deleted > 10 / 20 / 50 | +1 / +2 / +3 |
+| Deletion ratio > 50% / 70% / 90% (≥100 lines only) | +1 / +2 / +3 |
+| Lines deleted > 5k / 10k / 50k | +1 / +2 / +3 |
+| Critical path files deleted | +2 |
+| Security files deleted | +5 |
+| Structural severity CRITICAL | +3 |
+| Unverified dependency (SCA, per package) | +3 |
+| Added file content: shell or CI patterns | +2 per match, capped +4 |
+| Actions poisoning CRITICAL signal | +5 |
+| Actions poisoning HIGH signal | +3 |
+
+The three deletion dimensions (files, ratio, lines) are correlated and capped: `min(4, max(files, ratio, lines) + 1 if ≥2 non-zero)`.
+
+### Verdict thresholds
+
+| Score | Verdict | Exit code |
+|---|---|---|
+| 0 | SAFE | 0 |
+| 1–2 | REVIEW | 0 |
+| 3–4 | CAUTION | 0 |
+| ≥ 5 | DESTRUCTIVE | 2 |
 
 ### GitHub Actions poisoning (Layer 2c)
 
@@ -191,9 +227,9 @@ Scans every added or modified `.github/workflows/` file. Hardened against multil
 | `base64_payload` | CRITICAL | Base64-encoded content piped to a shell interpreter |
 | `credential_harvest` | CRITICAL | Env var exfiltration, cloud metadata endpoint, secret grep — including multiline curl constructs |
 | `pull_request_target_with_write_permissions` | CRITICAL | `pull_request_target` + write permissions — pwn-request attack vector |
+| `oidc_elevation_typosquatted` | CRITICAL | `id-token: write` + consumer action name resembles a known-safe prefix but is not (`aws-actions-unofficial/`, `google-github-actions-fork/`, etc.) |
 | `dormant_trigger_with_payload` | HIGH | `workflow_dispatch` or `schedule` trigger + shell execution — hidden activation path |
 | `forged_bot_author` | HIGH | Git identity configured to impersonate a known bot |
-| `oidc_elevation_typosquatted` | CRITICAL | `id-token: write` + consumer action name resembles a known-safe prefix but is not (`aws-actions-unofficial/`, `google-github-actions-fork/`, etc.) |
 | `oidc_elevation_no_consumer` | HIGH | `id-token: write` with no recognised OIDC consumer present |
 | `dangerous_trigger_pull_request_target` | HIGH | `pull_request_target` without write permissions |
 
@@ -221,36 +257,18 @@ Three-phase heuristic: Linguistic Lexer → Diff Profiler → Cross-Correlation.
 
 `mci_score ≥ 0.5` → DECEPTIVE_PAYLOAD (escalates verdict). `> 0` → CAUTION_MISMATCH.
 
----
+### Supported languages (Layer 4)
 
-## Scoring reference
-
-### Score contributions
-
-| Signal | Points |
+| Language | Tracked constructs |
 |---|---|
-| Branch age > 90 / 180 / 365 days | +1 / +2 / +3 |
-| Files deleted > 10 / 20 / 50 | +1 / +2 / +3 |
-| Deletion ratio > 50% / 70% / 90% (≥100 lines only) | +1 / +2 / +3 |
-| Lines deleted > 5k / 10k / 50k | +1 / +2 / +3 |
-| Critical path files deleted | +2 |
-| Security files deleted | +5 |
-| Structural severity CRITICAL | +3 |
-| Unverified dependency (SCA, per package) | +3 |
-| Added file content: shell or CI patterns | +2 per match |
-| Actions poisoning CRITICAL signal | +5 |
-| Actions poisoning HIGH signal | +3 |
+| Python | Functions, classes, async functions, module-level assignments, annotated assignments |
+| JavaScript / JSX | Functions, classes, arrow functions, variable declarators |
+| TypeScript / TSX | Functions, classes, interfaces, type aliases, enums |
+| Go | Functions, methods, type specs, const specs |
+| Rust | Functions, structs, enums, traits, const and static items |
+| Java | Methods, classes, interfaces, enums |
 
-The three deletion dimensions (files, ratio, lines) are correlated and capped: `min(4, max(files, ratio, lines) + 1 if ≥2 non-zero)`.
-
-### Verdict thresholds
-
-| Score | Verdict | Exit code |
-|---|---|---|
-| 0 | SAFE | 0 |
-| 1–2 | REVIEW | 0 |
-| 3–4 | CAUTION | 0 |
-| ≥ 5 | DESTRUCTIVE | 2 |
+Files in languages without an installed grammar are skipped silently.
 
 ---
 
@@ -323,28 +341,13 @@ Without the App secrets the step is a no-op. PR comment and merge enforcement st
 
 ---
 
-## Supported languages (Layer 4)
-
-| Language | Tracked constructs |
-|---|---|
-| Python | Functions, classes, async functions, module-level assignments, annotated assignments |
-| JavaScript / JSX | Functions, classes, arrow functions, variable declarators |
-| TypeScript / TSX | Functions, classes, interfaces, type aliases, enums |
-| Go | Functions, methods, type specs, const specs |
-| Rust | Functions, structs, enums, traits, const and static items |
-| Java | Methods, classes, interfaces, enums |
-
-Files in languages without an installed grammar are skipped silently.
-
----
-
 ## Contributing
 
 ```bash
-python -m pytest test_analyzer.py -v
+python -m pytest test_analyzer.py tests/proofs/ -q
 ```
 
-All tests must pass. Run `python -m pytest test_analyzer.py tests/proofs/ -q` — currently 273 pass, 7 skip. New detection signals require test coverage in the relevant layer's test class. Open findings are tracked in [`AUDIT_LOG.md`](AUDIT_LOG.md).
+273 pass, 7 skip. New detection signals require test coverage in the relevant layer's test class. Open findings are tracked in [`AUDIT_LOG.md`](AUDIT_LOG.md).
 
 ---
 
