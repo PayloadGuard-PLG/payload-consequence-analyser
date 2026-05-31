@@ -1,13 +1,15 @@
 name: Trigger Regression
 
-# Fires the test harness stable regression on every push to main.
+# Manual-only dispatch to the test harness regression runner.
+# Removed push-to-main auto-trigger: each push fired ~200 GitHub events
+# (34 PRs opened/scanned/closed) flooding connected Claude Code sessions.
+# Regression runs on explicit workflow_dispatch or the harness daily schedule.
+#
 # Requires REGRESSION_PAT secret in this repo — a GitHub PAT with repo scope
-# on payloadguard-test-harness. The same PAT used by the harness itself.
-# If the secret is absent the step warns and exits 0 (non-blocking).
+# on payloadguard-test-harness. If the secret is absent the step warns and
+# exits 0 (non-blocking).
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 jobs:

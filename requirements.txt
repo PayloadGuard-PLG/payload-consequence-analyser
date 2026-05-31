@@ -18,5 +18,5 @@ tree-sitter-go>=0.21.0
 tree-sitter-rust>=0.21.0
 tree-sitter-java>=0.21.0
 
-# Optional: required for PLI Layer L4b full mode (L2/LLM analysis via PLI_API_KEY)
+# Optional: enable for PLI Layer L4b full mode if reintegrating (see branch claude/oidc-typosquat-detection-UBCOJ)
 # anthropic>=0.40.0
