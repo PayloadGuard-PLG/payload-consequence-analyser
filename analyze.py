@@ -15,7 +15,6 @@ import argparse
 import ast
 import copy
 import git
-import os
 import re
 import sys
 import json
@@ -1387,7 +1386,7 @@ class PayloadAnalyzer:
             flags.append(f"{content_flags} added file(s) contain CI trigger strings or shell execution patterns")
             severity_score += min(4, content_flags * 2)
 
-        actions_cfg = self.config.actions if hasattr(self.config, 'actions') else DEFAULT_CONFIG["actions"]
+        actions_cfg = self.config.actions
         if actions_poisoning_critical:
             flags.append(
                 f"{actions_poisoning_flags} GitHub Actions workflow(s) contain critical "
@@ -1469,17 +1468,7 @@ class PayloadAnalyzer:
         if not self.config.actions.get("enabled", True):
             return []
         flags = []
-        for d in diffs:
-            if d.change_type not in ('A', 'M'):
-                continue
-            path = d.b_path or d.a_path or ''
-            if not isinstance(path, str) or not re.search(_ACTIONS_WORKFLOW_PATTERN, path):
-                continue
-            try:
-                content = d.b_blob.data_stream.read().decode('utf-8', errors='replace')
-            except Exception:
-                continue
-
+        for path, content, d in _iter_workflow_file_diffs(diffs):
             signals = []
 
             # Fix 3: normalise folded/literal YAML block scalars to one line so
@@ -1602,10 +1591,8 @@ class PayloadAnalyzer:
         return flags
 
 
-def _scan_mutable_action_refs(diffs) -> list:
-    """Detect workflow `uses:` values not pinned to a 40-char SHA (advisory, no score impact)."""
-    _sha_re = re.compile(r'^[0-9a-f]{40}$', re.IGNORECASE)
-    warnings: list = []
+def _iter_workflow_file_diffs(diffs):
+    """Yield (path, content, diff) for each added/modified workflow file in diffs."""
     for d in diffs:
         if d.change_type not in ('A', 'M'):
             continue
@@ -1616,6 +1603,14 @@ def _scan_mutable_action_refs(diffs) -> list:
             content = d.b_blob.data_stream.read().decode('utf-8', errors='replace')
         except Exception:
             continue
+        yield path, content, d
+
+
+def _scan_mutable_action_refs(diffs) -> list:
+    """Detect workflow `uses:` values not pinned to a 40-char SHA (advisory, no score impact)."""
+    _sha_re = re.compile(r'^[0-9a-f]{40}$', re.IGNORECASE)
+    warnings: list = []
+    for path, content, _ in _iter_workflow_file_diffs(diffs):
         seen: set = set()
         for line in content.splitlines():
             m = re.match(r'\s+(?:-\s+)?uses:\s+([^\s#\n]+)', line)

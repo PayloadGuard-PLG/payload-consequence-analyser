@@ -362,7 +362,7 @@ thresholds:
 
 **Outputs:** `complexity_advisory` list per file in the structural report. Does not affect verdict.
 
-> **Note — PLI Semantic Consistency (evaluated v1.3.0, reverted):** A Layer L4b PLI integration was implemented and regression-tested (34 stable cases, 2026-05-29). The engine (`PLIAnalyzer`) analysed `(pr_description, diff_summary)`, `(commit_message, diff_content)`, and `(old_function, new_function)` pairs via LLM dual-pass analysis. Result: 2 true positives (A03 slow-deletion, A06 threshold-gaming) but 3 false positives on safe baselines (WS07, RT02, RTA03). Root cause: PLI's L2 LLM analysis interprets code diff summaries as blank AI conversation responses, generating critical findings on legitimate PRs. Reverted from scoring path. PLI source files (`pli_analyzer.py`, `pli_engine.py`, `PLI_INTEGRATION_SPEC.md`) are preserved in the repository for future reintegration if the input pair design is revised.
+> **Note — PLI Semantic Consistency (evaluated v1.3.0, reverted):** A Layer L4b PLI integration was implemented and regression-tested (34 stable cases, 2026-05-29). The engine (`PLIAnalyzer`) analysed `(pr_description, diff_summary)`, `(commit_message, diff_content)`, and `(old_function, new_function)` pairs via LLM dual-pass analysis. Result: 2 true positives (A03 slow-deletion, A06 threshold-gaming) but 3 false positives on safe baselines (WS07, RT02, RTA03). Root cause: PLI's L2 LLM analysis interprets code diff summaries as blank AI conversation responses, generating critical findings on legitimate PRs. Reverted from scoring path; PLI source files removed.
 
 ---
 
@@ -558,16 +558,7 @@ Requires `allowlist.yml` to be present in the target repo root. No-op otherwise.
 
 A single CRITICAL poisoning signal scores identically to a security file deletion — immediate DESTRUCTIVE. A single HIGH signal alone reaches CAUTION. Multiple flagged workflows accumulate at the single highest-severity level (one CRITICAL outweighs any number of HIGH signals for scoring purposes).
 
-**PLI semantic consistency (L4b, opt-in)**
-
-| Condition | Points |
-|---|---|
-| Any `critical` PLI finding | +5 |
-| Any `high` PLI finding (no critical) | +3 |
-
-Enabled via `pli-analysis: true`. Requires `pli_analyzer.py` in the repo root and `PLI_API_KEY` secret for full L2/LLM analysis. A single critical finding forces DESTRUCTIVE. Scoring is absent when PLI is disabled or unavailable (graceful degradation).
-
-**Maximum score (all signals simultaneously):** 36 (was 31 before L4b).
+**Maximum score (all signals simultaneously):** 31.
 
 ### 5.2 Verdict Thresholds
 

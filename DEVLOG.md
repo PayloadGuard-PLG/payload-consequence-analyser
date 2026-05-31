@@ -2,6 +2,46 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-05-31 — Staged refactoring: dead files, branch cleanup, analyze.py
+
+### Dead file deletion
+
+8 files removed from the analyser repo root:
+
+| File | Lines | Reason |
+|---|---|---|
+| `pli_analyzer.py` | 688 | PLI R&D engine — evaluated v1.3.0, 3 false positives, reverted from scoring path |
+| `pli_engine.py` | 159 | PLI R&D helper — same as above |
+| `PLI_INTEGRATION_SPEC.md` | 312 | PLI integration reference — superseded by WHITEPAPER.md note |
+| `PLI_Methodology_Formalization.md.txt` | 134 | PLI methodology scratch doc |
+| `PLI.txt` | 35 | PLI scratch notes |
+| `PayloadGuard Layer 5b Improvement Research.md.txt` | ~200 | Research scratch file |
+| `PayloadGuard — Claude Code Context.txt` | ~90 | Session scratch file |
+| `feature-ab.patch` | ~350 | Stale patch file |
+
+WHITEPAPER.md updated: removed "files preserved for future reintegration" note; removed PLI scoring block from Section 5; fixed MAX_SCORE to 31. CLAUDE.md Key Files updated.
+
+### Branch cleanup
+
+**Analyser local** — deleted: `ci/cross-repo-regression-trigger`, `docs/cleanup-stale-planning-docs`, `docs/sync-after-typosquat-fix`, `fix/readme-layer-count`. Force-deleted: `fix/json-serialization-raw-tokens` (named as a minor fix but contained 7,598 line deletions — would have gutted the verification suite, test suite, eBPF agent, and orchestrator — do not recreate).
+
+**Remote branches** — git push --delete is blocked by the local proxy (HTTP 403 on git-receive-pack). Remote stale dev branches remain: `claude/general-conversation-ANx2E`, `docs/post-merge-handover`, `docs/professional-readme`, `docs/session-end-may25`, `docs/session-handover-may25`, `fix/l2-l2c-double-scoring`. These are safe to delete manually or via GitHub UI.
+
+**Harness local** — deleted (via analogous cleanup): `ci/cross-repo-regression-trigger`, `claude/general-conversation-ANx2E`, `docs/harness-docs-update`, `docs/sync-after-typosquat-fix`, `feat/pli-regression-testing`.
+
+### analyze.py targeted refactoring
+
+Three changes — 273 pass, 7 skip throughout:
+
+1. **Removed `import os`** (line 18) — confirmed unused. `os` is imported locally inside `_load_runtime_events()` as `import os as _os`.
+
+2. **Removed dead `hasattr()` guard** in `_assess_consequence()`: `self.config` is always `PayloadGuardConfig` (dataclass), `actions` field always present. Simplified to `actions_cfg = self.config.actions`.
+
+3. **Extracted `_iter_workflow_file_diffs(diffs)` generator** — eliminates 9 lines of duplicated blob-reading boilerplate shared by `_scan_github_actions_poisoning()` (method) and `_scan_mutable_action_refs()` (module-level). Yields `(path, content, diff)` for each added/modified workflow file.
+
+---
+
+
 ## 2026-05-31 — Housekeeping: corruption fix, schedule removal, doc update
 
 ### test_analyzer.py remote corruption — resolved
