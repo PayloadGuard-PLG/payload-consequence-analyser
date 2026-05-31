@@ -2,9 +2,9 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ` (both repos)
-- **Status:** v1.3.0. PLI L4b evaluated and reverted (see v1.3.0 changelog). Scoring path stable at v1.2.0 level + RTA02 fix. PLI R&D files deleted from repo root (pli_analyzer.py, pli_engine.py, PLI_INTEGRATION_SPEC.md + scratch files). Stale dev branches cleaned up. analyze.py: unused import removed, dead hasattr() guard removed, workflow diff boilerplate extracted. test_analyzer.py corruption fixed (agent double-encoded file in commit 50f2662; restored in 5dd6a07). Harness 3x daily schedule removed — regression is now manual-only (`workflow_dispatch`). MCP push blocked at 127.0.0.1 proxy; use session ingress token + direct Anthropic GitHub MCP endpoint when git push is unavailable.
-- **Next action:** Resolve SHA regression (A03/A06 fail with fe68338). See details below. Then complete branch deletion once regression is verified clean.
+- **Branch for next work:** create new branch from main (`af37447`)
+- **Status:** v1.3.0. PR #82 merged to main `af37447` (2026-05-31) — README restructured (formal verification elevated), CLAUDE.md/DEVLOG.md handover. Scoring path stable at v1.2.0 level + RTA02 fix. PLI R&D files deleted. Stale dev branches cleaned. analyze.py refactored. test_analyzer.py corruption fixed. Harness 3x daily schedule removed.
+- **Next action:** Resolve SHA regression (A03/A06 fail with `fe68338`). See details below. Then complete branch deletion once regression is verified clean.
 - **CI:** `trigger-regression.yml` now manual-only (`workflow_dispatch`). Harness `regression.yml` also manual-only. Run regression explicitly when needed.
 
 - **IMMEDIATE: SHA regression — resolve before next regression run.**
