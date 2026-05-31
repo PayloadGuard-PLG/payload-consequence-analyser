@@ -241,3 +241,83 @@ The agent preflight canary will warn and exit 0 gracefully if tracepoints are un
 5. Begin work
 
 **Update the Handover block before ending every session.**
+
+---
+
+## Architecture & Blueprints
+
+### Rules for Tracking the Analysis Pipeline
+
+The 9-layer pipeline and its formal verification harness must remain consistent across `analyze.py`, `SYSTEM_BLUEPRINT.md`, `VERIFICATION.md`, `VERIFICATION_SPEC.md`, and `WHITEPAPER.md`. When any of the following change, update **all affected documents in the same commit** — partial updates cause audit drift.
+
+#### 1. Layer definitions
+
+The canonical layer table lives in the Architecture section of this file (see above). Any new signal, renamed layer, or scoring change requires:
+- Update the layer table here
+- Update the Scoring section here
+- Update `README.md` (Layer reference table)
+- Update `WHITEPAPER.md` (the affected section)
+- Update `SYSTEM_BLUEPRINT.md` (Pipeline Flow section)
+- Update the relevant verification module in `verification/` if the changed layer is formally verified
+
+#### 2. Scoring changes
+
+Scoring is triple-verified (CrossHair, Z3, Dafny). Any change to thresholds, signal weights, or the deletion-dimension cap must be propagated to:
+- `analyze.py` `_assess_consequence()` and `DEFAULT_CONFIG`
+- `verification/consequence_pure.py` (CrossHair) — constants `_MAX_SCORE`, thresholds, and all `post:` contracts
+- `verification/dafny/assess_consequence.dfy` — `MAX_SCORE`, helper functions, and `AssessConsequence` postconditions
+- `tests/proofs/test_z3_properties.py` — Z3 property bounds
+- `README.md` and `WHITEPAPER.md` scoring reference tables
+
+Do not change scoring constants in one place and leave others stale. CrossHair and Dafny will catch mismatches on next verification run, but CI does not run them on every push — a stale spec is a silent lie.
+
+#### 3. Formal verification status
+
+Tracking table: every verified layer must have an entry in `VERIFICATION.md` and `VERIFICATION_SPEC.md`. Current status:
+
+| Layer | CrossHair | Z3 | Dafny |
+|---|---|---|---|
+| L3 Consequence | C1–C12 (`consequence_pure.py`) | P1–P10 (`test_z3_properties.py`) | POST-1–11a (`assess_consequence.dfy`) |
+| L4 Structural | S1–S7 (`structural_pure.py`) | — | S1–S7 (`structural_drift.dfy`) |
+| L5a Temporal | T1–T7 (`temporal_pure.py`) | — | T1–T8 (`temporal_drift.dfy`) |
+| L5b Semantic | M1–M9 (`semantic_pure.py`) | — | — |
+
+When adding a new verified contract:
+1. Add the contract to the relevant `verification/*_pure.py` file
+2. Add a corresponding test in `tests/proofs/test_crosshair_contracts.py` (CrossHair) or `test_z3_properties.py` (Z3)
+3. Update `VERIFICATION.md` and `VERIFICATION_SPEC.md`
+4. Update this table
+
+#### 4. Forensic logic invariants
+
+The following invariants are machine-verified and must not be violated by any code change:
+
+- **Score non-negativity:** `severity_score >= 0` at all times (POST-2 / C: severity_score >= 0)
+- **Score upper bound:** `severity_score <= 31` (MAX_SCORE = 31; POST-3)
+- **Verdict bijection:** Every score maps to exactly one verdict; every verdict maps to exactly one score range (POST-4–7)
+- **Safety-critical floor:** `security_file_deletions > 0` → DESTRUCTIVE; `structural_severity == CRITICAL` → DESTRUCTIVE; `actions_poisoning_critical` → DESTRUCTIVE (POST-8/9/10)
+- **Empty-input guarantee:** All-zero inputs → SAFE; no false positives on empty diffs (POST-11a)
+- **Deletion dimension cap:** Three correlated deletion sub-scores (files/ratio/lines) are collapsed to `min(4, max + 1 if ≥2 active)` — prevents triple-counting
+
+These invariants hold over the entire input domain by construction. If a code change requires relaxing one, the verification proofs must be updated before merging.
+
+#### 5. Branch analysis tracking
+
+When investigating a specific test branch (harness fixture or real PR), record findings in `AUDIT_LOG.md` with:
+- Branch name and test case ID
+- Expected verdict and actual verdict
+- Score breakdown: which signals fired, which did not, and why
+- Root cause if verdict is wrong
+- Fix or deferral decision
+
+Do not leave open verdict mismatches undocumented. If a case is deferred, add it to the Open Findings table in this file.
+
+#### 6. SYSTEM_BLUEPRINT.md sync
+
+`SYSTEM_BLUEPRINT.md` is the single authoritative reference for the repository structure and pipeline flow. It must be updated whenever:
+- A new module is added or removed from the production path
+- A new layer or sub-layer is added
+- The AUDIT_LOG.md generation path changes
+- Production dependencies change (requirements.txt or agent/go.mod)
+
+`SYSTEM_BLUEPRINT.md` is a generated document — treat it as derived from the codebase, not as a source of truth. When in doubt, the code wins.
