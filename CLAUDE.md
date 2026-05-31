@@ -2,9 +2,9 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** `claude/oidc-typosquat-detection-UBCOJ` (both repos)
-- **Status:** v1.3.0. PLI L4b evaluated and reverted (see v1.3.0 changelog). Scoring path stable at v1.2.0 level + RTA02 fix. PLI R&D files deleted from repo root (pli_analyzer.py, pli_engine.py, PLI_INTEGRATION_SPEC.md + scratch files). Stale dev branches cleaned up. analyze.py: unused import removed, dead hasattr() guard removed, workflow diff boilerplate extracted. test_analyzer.py corruption fixed (agent double-encoded file in commit 50f2662; restored in 5dd6a07). Harness 3x daily schedule removed — regression is now manual-only (`workflow_dispatch`). MCP push blocked at 127.0.0.1 proxy; use session ingress token + direct Anthropic GitHub MCP endpoint when git push is unavailable.
-- **Next action:** Resolve SHA regression (A03/A06 fail with fe68338). See details below. Then complete branch deletion once regression is verified clean.
+- **Branch for next work:** create new branch from main (`af37447`)
+- **Status:** v1.3.0. PR #82 merged to main `af37447` (2026-05-31) — README restructured (formal verification elevated), CLAUDE.md/DEVLOG.md handover. Scoring path stable at v1.2.0 level + RTA02 fix. PLI R&D files deleted. Stale dev branches cleaned. analyze.py refactored. test_analyzer.py corruption fixed. Harness 3x daily schedule removed.
+- **Next action:** Resolve SHA regression (A03/A06 fail with `fe68338`). See details below. Then complete branch deletion once regression is verified clean.
 - **CI:** `trigger-regression.yml` now manual-only (`workflow_dispatch`). Harness `regression.yml` also manual-only. Run regression explicitly when needed.
 
 - **IMMEDIATE: SHA regression — resolve before next regression run.**
@@ -19,7 +19,7 @@
 - **Branch deletion — DEFERRED until regression is verified clean (≥31/34 stable pass).**
   - Remote branches to delete (analyser, via GitHub UI — git push --delete blocked by local proxy): `claude/general-conversation-ANx2E`, `docs/post-merge-handover`, `docs/professional-readme`, `docs/session-end-may25`, `docs/session-handover-may25`, `fix/l2-l2c-double-scoring`. ⚠️ `fix/json-serialization-raw-tokens` — delete WITHOUT merging (7,598 line deletions, guts verification suite, test suite, eBPF agent, orchestrator).
   - Remote branches to delete (harness, via GitHub UI): `ci/cross-repo-regression-trigger`, `claude/general-conversation-ANx2E`, `docs/harness-docs-update`, `docs/sync-after-typosquat-fix`, `feat/pli-regression-testing`
-  - Keep — analyser: `main`, `claude/oidc-typosquat-detection-UBCOJ`, `release/v1.2.0`, `DarkVader-PLG-vericode`
+  - Keep — analyser: `main`, `release/v1.2.0`, `DarkVader-PLG-vericode`
   - Keep — harness: `main`, `claude/oidc-typosquat-detection-UBCOJ`, `test/megalodon-simulation`, all `runtime/` branches, all permanent test fixture branches
 - **Vericoding Phase 4 — Dafny MERGED (PR #70, main `b44a116`):**
   - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–11a (score bounds, verdict bijection, safety implications, empty-input guarantee). POST-12 (PLI) removed in revert.
@@ -84,7 +84,7 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 | L2c Actions Poisoning | Added/modified workflow files: base64, credential harvest, OIDC elevation, typosquatted consumers | `_scan_github_actions_poisoning()` |
 | L3 Consequence | Severity scoring → SAFE/REVIEW/CAUTION/DESTRUCTIVE | `_assess_consequence()` |
 | L4 Structural | AST diff — named class/function/constant deletions | `StructuralPayloadAnalyzer` |
-| L4b PLI | Semantic consistency — PR description vs diff, commit vs content, old vs new function | NOT ACTIVE — reverted; code on branch `claude/oidc-typosquat-detection-UBCOJ` |
+| L4b PLI | Semantic consistency — PR description vs diff, commit vs content, old vs new function | NOT ACTIVE — reverted |
 | L4b Complexity | McCabe V(G) advisory for newly added Python fns | inside `analyze_structural_drift()` |
 | L5a Temporal | Branch age × target velocity drift score | `TemporalDriftAnalyzer` |
 | L5b Semantic | PR-MCI three-phase heuristic — deceptive description detection | `SemanticTransparencyAnalyzer` |
@@ -151,6 +151,7 @@ sca:
 - Fix (RTA02): `_scan_github_actions_poisoning()` credential_harvest loop now checks normalized content — multiline curl with continuation lines detected. Expected verdict DESTRUCTIVE confirmed.
 - CI: `trigger-regression.yml` changed to manual-only — removed push-to-main auto-trigger that was flooding Claude Code General conversation session with ~200 GitHub events per push.
 - Refactor: PLI R&D files deleted from repo root. Stale dev branches cleaned up. analyze.py: unused `import os` removed, dead `hasattr(self.config, 'actions')` guard removed, `_iter_workflow_file_diffs()` helper extracted to deduplicate workflow blob-reading boilerplate.
+- Docs: README restructured — formal verification elevated to second section, AI-optimised layout (PR #82, merged `af37447`).
 
 ### v1.2.0 changes
 - Feature: L2c GitHub Actions poisoning detection — base64 payload, credential harvest, dormant trigger, forged bot author, OIDC elevation (incl. `oidc_elevation_typosquatted` CRITICAL), pull_request_target signals
@@ -200,7 +201,7 @@ When moving to a PC (Ubuntu 22.04/24.04 or WSL2 with kernel ≥5.15):
 
 ```bash
 # 1. Pull latest
-git pull origin claude/oidc-typosquat-detection-UBCOJ
+git pull origin main
 
 # 2. One-shot smoke test (builds, runs, fires all 4 event types, checks results)
 sudo bash scripts/pc-smoke-test.sh
