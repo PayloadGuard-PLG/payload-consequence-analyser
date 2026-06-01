@@ -2,6 +2,30 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-06-01 — Regression verified 34/34; A03/A06 root cause resolved
+
+### Regression status: COMPLETE 34/34 PASS
+
+All 34 stable harness cases verified PASS against analyser SHA `fe6833887f34e77e53cf7e1dcf73c37297f5fea3` (v1.3.0 main). The 6 previously unverified cases (A07, A09, RTA03, RTA04, RT02, RT01) were confirmed via MCP `get_check_runs` against the 2026-05-31 14:12 UTC regression run.
+
+### A03/A06 root cause: incorrect test expectations, not an analyser regression
+
+The "SHA regression" diagnosis from the prior session was incorrect. Investigation confirmed `analyze.py` is functionally identical between `5dd6a072` and `fe68338` — only three cleanup changes separate them (removed unused `import os`, removed dead `hasattr(self.config, 'actions')` guard, extracted `_iter_workflow_file_diffs()` helper). None of these affect the scoring path.
+
+Root cause: A03 (`adversarial/slow-deletion`) and A06 (`adversarial/threshold-gaming`) are documented bypass cases where SAFE is the correct result:
+- **A03:** Removes 1 function from each of 5 files. Cross-file structural ratio ≈ 8%, below the 20% aggregation threshold. Score 0 → SAFE. The per-file accumulation gap is a known limitation documented in `WHITEPAPER.md §8.1`.
+- **A06:** Every metric tuned just below its individual threshold. No compound detection rule exists. Score 0 → SAFE. Known limitation documented in `WHITEPAPER.md §8.1` and `AUDIT_LOG.md`.
+
+Both cases were only returning DESTRUCTIVE while PLI was active (2026-05-29 evaluation). After PLI was reverted, the harness `test_cases.json` expectations were not corrected. Fixed via harness PR #72 (merged 2026-06-01): `expected_verdict` updated to SAFE for both, `HARNESS.md` Known Limitations section updated.
+
+`TEST_SPEC.md` in the harness was already correct — it had always documented both as intentional evasion cases with SAFE expected verdicts.
+
+### Branch deletion unblocked
+
+Condition (≥31/34 stable pass) satisfied at 34/34. Stale remote branches may now be deleted.
+
+---
+
 ## 2026-05-31 — SHA regression discovered: fe68338 misses A03 and A06
 
 ### Regression run results (2026-05-31 14:12 UTC)
