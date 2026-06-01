@@ -4,7 +4,7 @@
 
 - **Branch for next work:** create new branch from main (both repos)
 - **Status:** v1.3.0. Harness regression **34/34 PASS** (verified 2026-06-01). Both repos fully cleaned — 15 stale branches deleted from analyser, 8 from harness (2026-06-01). Repos are in the cleanest state to date.
-- **Next action:** Additional verification testing (new test cases or coverage expansion). Run a fresh regression via `workflow_dispatch` to confirm clean baseline before adding cases.
+- **Next action:** Merge `claude/oidc-typosquat-detection-UBCOJ` → main (README rewrite + CLAUDE.md/HARNESS_BLUEPRINT.md updates). Then create new branch for additional verification testing. Run a fresh regression via `workflow_dispatch` to confirm clean baseline before adding cases.
 - **CI:** `trigger-regression.yml` manual-only (`workflow_dispatch`). Harness `regression.yml` also manual-only.
 
 - **Regression verification — 2026-06-01 (analyser SHA fe68338, v1.3.0) — COMPLETE 34/34:**
