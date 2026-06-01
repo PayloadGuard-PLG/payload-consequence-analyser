@@ -27,22 +27,34 @@ The pipeline execution produces exactly one of four verdicts. The mapping is a p
 
 The scoring logic (Layers L3, L4, L5a, L5b) is verified by three independent methods. A defect would have to produce a consistent false result across all three simultaneously.
 
+Proof record page: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/PROOFS.md
+Dafny verification log: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/verification/dafny/assess_consequence_verify.log
+CI workflow: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml
+
+### Dafny (machine-checked proofs over entire input domain)
+
+- Tool: Dafny 4.9.1+452c307284e1511e5c2d10b9615f4c9c15f010e2, Boogie + Z3 4.12.1 bundled
+- assess_consequence.dfy: 7 verified, 0 errors (6 helper functions + AssessConsequence method)
+- structural_drift.dfy: 1 verified, 0 errors (AssessStructuralDrift method, S1–S7)
+- temporal_drift.dfy: 1 verified, 0 errors (AnalyzeTemporalDrift method, T1–T8)
+- Total: 9 methods/functions verified, 0 errors across all three files
+- POST-1–11a: 11 active postconditions on AssessConsequence
+- Proof files: verification/dafny/assess_consequence.dfy, structural_drift.dfy, temporal_drift.dfy
+
 ### CrossHair (symbolic execution on active Python source)
 
 - Consequence model: contracts C1–C12 (verdict bijection, score bounds, safety-critical floors, empty-input guarantee)
 - Structural drift: contracts S1–S7 (dual-gate biconditional — DESTRUCTIVE requires both ratio > threshold AND count >= min)
 - Temporal drift: contracts T1–T7 (drift_score >= 0, status bijection, zero inputs → CURRENT)
 - Semantic transparency: contracts M1–M9 (mci_score in [0,1], DECEPTIVE iff score >= 0.5, no description → UNVERIFIED)
+- Total: 35 contracts, 0 counterexamples
+- Contract files: verification/consequence_pure.py, structural_pure.py, temporal_pure.py, semantic_pure.py
 
 ### Z3 Theorem Prover (SMT proofs on abstract model)
 
-- Properties P1–P10: score bounds, verdict bijection, safety-critical floors, empty-input guarantee
+- Properties P1–P10: typosquat implication, score monotonicity, verdict bijection, safety-critical floors, empty-input guarantee
 - All 10 properties: unsat in < 0.1s
-
-### Dafny (machine-checked proofs over entire input domain)
-
-- POST-1–11a: 11 postconditions verified, 0 errors
-- Covers: score non-negativity, score upper bound, verdict bijection, three safety-critical floors, empty-input guarantee
+- Proof file: tests/proofs/test_z3_properties.py
 
 ## Proven Invariants
 
@@ -89,6 +101,7 @@ Verdict thresholds: DESTRUCTIVE >= 5, CAUTION >= 3, REVIEW >= 1, SAFE = 0.
 ## Documentation
 
 - README: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/README.md
+- PROOFS.md (formal verification record): https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/PROOFS.md
 - VERIFICATION.md: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/VERIFICATION.md
 - VERIFICATION_SPEC.md: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/VERIFICATION_SPEC.md
 - WHITEPAPER.md: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/WHITEPAPER.md

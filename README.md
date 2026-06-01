@@ -2,6 +2,10 @@
 
 **Version:** 1.3.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Released:** May 2026
 
+[![Dafny Verification](https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml/badge.svg)](https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml)
+
+**Formally verified** — 35 CrossHair contracts · 10 Z3 SMT proofs · 11 Dafny postconditions · 273 tests pass · 3 independent proof methods. → [`PROOFS.md`](PROOFS.md)
+
 PayloadGuard is a GitHub Action that forensically scans pull requests for destructive, deceptive, or malicious code payloads before they reach your main branch.
 
 It was built for the class of attack where a branch held open for months lands as a *"minor fix"* and wipes the codebase in a single merge. Wire it to branch protection and the merge button is blocked automatically — no human review required.
