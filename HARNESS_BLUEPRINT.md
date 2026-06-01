@@ -620,4 +620,4 @@ All `uses:` references in harness workflows are pinned to exact SHAs. This is de
   the actions it depends on.
 
 The analyser SHA in `payloadguard.yml` must be updated manually when a new version is deployed to
-`main`. The current pin points to the analyser commit that removed PLI and restored the test suite.
+`main`. The current pin (`fe68338`) points to analyser main at v1.3.0.
