@@ -14,11 +14,13 @@
 
 - **A03/A06 root cause (resolved 2026-06-01):** The "SHA regression" framing was incorrect. analyze.py is functionally identical between `5dd6a072` and `fe68338` — only cleanup changes separate them (unused import, dead hasattr guard, _iter_workflow_file_diffs helper), none affecting scoring. A03 cross-file structural ratio ~8% < 20% threshold → score 0 → SAFE. A06 all metrics sub-threshold, no compound detection rule → score 0 → SAFE. Both were returning DESTRUCTIVE only while PLI was active (2026-05-29). Expectations corrected in harness test_cases.json and HARNESS.md.
 
-- **Branch deletion — UNBLOCKED (regression verified 34/34).**
-  - Remote branches to delete (analyser, via GitHub UI — git push --delete blocked by local proxy): `claude/general-conversation-ANx2E`, `docs/post-merge-handover`, `docs/professional-readme`, `docs/session-end-may25`, `docs/session-handover-may25`, `fix/l2-l2c-double-scoring`. ⚠️ `fix/json-serialization-raw-tokens` — delete WITHOUT merging (7,598 line deletions, guts verification suite, test suite, eBPF agent, orchestrator).
-  - Remote branches to delete (harness, via GitHub UI): `ci/cross-repo-regression-trigger`, `claude/general-conversation-ANx2E`, `docs/harness-docs-update`, `docs/sync-after-typosquat-fix`, `feat/pli-regression-testing`
-  - Keep — analyser: `main`, `release/v1.2.0`, `DarkVader-PLG-vericode`
-  - Keep — harness: `main`, `test/megalodon-simulation`, all `runtime/` branches, all permanent test fixture branches
+- **Branch deletion — IN PROGRESS (git push --delete blocked by proxy; GitHub UI required).**
+  - Devin PRs closed (2026-06-01): analyser #75, #76, #77, #78; harness #67, #68, #69.
+  - Analyser — delete via GitHub UI (15 branches): `claude/general-conversation-ANx2E`, `ci/cross-repo-regression-trigger`, `docs/cleanup-stale-planning-docs`, `docs/post-merge-handover`, `docs/professional-readme`, `docs/regression-verified-34-34`, `docs/session-end-may25`, `docs/session-handover-may25`, `fix/json-serialization-raw-tokens` (safe — only 2 lines unique vs main, old branch), `fix/l2-l2c-double-scoring`, `fix/readme-layer-count` (merged PR #64), `devin/1780155535-disclosure-strategy`, `devin/1780155866-controlled-disclosure-strategy`, `devin/1780158266-layer-restructuring-plan`, `docs/disclosure-strategy-and-briefs`
+  - Harness — delete via GitHub UI (8 branches): `ci/cross-repo-regression-trigger`, `claude/general-conversation-ANx2E`, `docs/harness-docs-update`, `docs/public-brief`, `feat/pli-regression-testing`, `fix/harness-regression-prep` (merged PR #71), `devin/1780155683-disclosure-strategy`, `devin/1780156042-public-brief`
+  - ⚠️ `DarkVader-PLG-vericode` — **DO NOT DELETE YET.** 40 files, 4,492 deletions: removes verification suite (`verification/`), Dafny proofs, CrossHair contracts test, `orchestrator.py`, `trust_grader.py`, `DEVLOG.md`, `HARNESS_BLUEPRINT.md`, `VERIFICATION.md`, `VERIFICATION_SPEC.md`, CI workflows. Adds planning docs and `feature-ab.patch`. Pending user decision on purpose.
+  - Keep — analyser: `main`, `claude/oidc-typosquat-detection-UBCOJ`, `release/v1.2.0`
+  - Keep — harness: `main`, `claude/oidc-typosquat-detection-UBCOJ`, `test/megalodon-simulation`, all `runtime/` branches, all permanent test fixture branches
 - **Vericoding Phase 4 — Dafny MERGED (PR #70, main `b44a116`):**
   - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–11a (score bounds, verdict bijection, safety implications, empty-input guarantee). POST-12 (PLI) removed in revert.
   - `verification/dafny/structural_drift.dfy`: L4 — S1–S7 dual-gate biconditional
