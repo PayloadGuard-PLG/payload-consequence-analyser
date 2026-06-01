@@ -3,23 +3,19 @@
 ## Handover (update this block at the end of every session)
 
 - **Branch for next work:** create new branch from main (both repos)
-- **Status:** v1.3.0. Harness regression **34/34 PASS** (verified 2026-06-01). A03/A06 expectations corrected — documented bypass cases, not analyser regressions (harness PR #72, merged 2026-06-01). All 6 previously unverified cases confirmed PASS via MCP check_runs. Branch deletion now unblocked.
-- **Next action:** Branch deletion (see below). Run next regression via `workflow_dispatch` after deletions to confirm clean state.
+- **Status:** v1.3.0. Harness regression **34/34 PASS** (verified 2026-06-01). Both repos fully cleaned — 15 stale branches deleted from analyser, 8 from harness (2026-06-01). Repos are in the cleanest state to date.
+- **Next action:** Additional verification testing (new test cases or coverage expansion). Run a fresh regression via `workflow_dispatch` to confirm clean baseline before adding cases.
 - **CI:** `trigger-regression.yml` manual-only (`workflow_dispatch`). Harness `regression.yml` also manual-only.
 
-- **Regression verification — 2026-05-31 14:12 UTC (analyser SHA fe68338) — COMPLETE 34/34:**
+- **Regression verification — 2026-06-01 (analyser SHA fe68338, v1.3.0) — COMPLETE 34/34:**
   - PASS (34/34): T03, T04, T05, T09, T10, T11, A01, A02, A03, A04, A05, A06, A07, A09, WS01–WS07, AW01–AW05, RTA01–RTA05, RT01–RT03
   - FAIL: none
-  - WS03 corrected DESTRUCTIVE→CAUTION (harness PR #71). A03+A06 corrected DESTRUCTIVE→SAFE (harness PR #72) — both are documented bypass cases. A07, A09, RTA03, RTA04, RT02, RT01 confirmed PASS via MCP check_runs 2026-06-01.
 
-- **A03/A06 root cause (resolved 2026-06-01):** The "SHA regression" framing was incorrect. analyze.py is functionally identical between `5dd6a072` and `fe68338` — only cleanup changes separate them (unused import, dead hasattr guard, _iter_workflow_file_diffs helper), none affecting scoring. A03 cross-file structural ratio ~8% < 20% threshold → score 0 → SAFE. A06 all metrics sub-threshold, no compound detection rule → score 0 → SAFE. Both were returning DESTRUCTIVE only while PLI was active (2026-05-29). Expectations corrected in harness test_cases.json and HARNESS.md.
+- **A03/A06 (resolved 2026-06-01):** Both are documented bypass cases — SAFE is correct. A03: cross-file structural ratio ~8% < 20% threshold. A06: all metrics sub-threshold, no compound detection rule. Were returning DESTRUCTIVE only while PLI was active (2026-05-29 evaluation). Expectations corrected in harness test_cases.json and HARNESS.md (PR #72).
 
-- **Branch deletion — IN PROGRESS (git push --delete blocked by proxy; GitHub UI required).**
-  - Devin PRs closed (2026-06-01): analyser #75, #76, #77, #78; harness #67, #68, #69.
-  - Analyser — delete via GitHub UI (15 branches): `claude/general-conversation-ANx2E`, `ci/cross-repo-regression-trigger`, `docs/cleanup-stale-planning-docs`, `docs/post-merge-handover`, `docs/professional-readme`, `docs/regression-verified-34-34`, `docs/session-end-may25`, `docs/session-handover-may25`, `fix/json-serialization-raw-tokens` (safe — only 2 lines unique vs main, old branch), `fix/l2-l2c-double-scoring`, `fix/readme-layer-count` (merged PR #64), `devin/1780155535-disclosure-strategy`, `devin/1780155866-controlled-disclosure-strategy`, `devin/1780158266-layer-restructuring-plan`, `docs/disclosure-strategy-and-briefs`
-  - Harness — delete via GitHub UI (8 branches): `ci/cross-repo-regression-trigger`, `claude/general-conversation-ANx2E`, `docs/harness-docs-update`, `docs/public-brief`, `feat/pli-regression-testing`, `fix/harness-regression-prep` (merged PR #71), `devin/1780155683-disclosure-strategy`, `devin/1780156042-public-brief`
-  - Keep — analyser: `main`, `claude/oidc-typosquat-detection-UBCOJ`, `release/v1.2.0`, `DarkVader-PLG-vericode` (intentional R&D branch for verification exploration — do not delete)
-  - Keep — harness: `main`, `claude/oidc-typosquat-detection-UBCOJ`, `test/megalodon-simulation`, all `runtime/` branches, all permanent test fixture branches
+- **Branch inventory (clean as of 2026-06-01):**
+  - Analyser: `main`, `release/v1.2.0`, `DarkVader-PLG-vericode` (R&D — keep), `claude/oidc-typosquat-detection-UBCOJ`
+  - Harness: `main`, `claude/oidc-typosquat-detection-UBCOJ`, `test/megalodon-simulation`, all 38 permanent fixture branches
 - **Vericoding Phase 4 — Dafny MERGED (PR #70, main `b44a116`):**
   - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–11a (score bounds, verdict bijection, safety implications, empty-input guarantee). POST-12 (PLI) removed in revert.
   - `verification/dafny/structural_drift.dfy`: L4 — S1–S7 dual-gate biconditional
