@@ -9,6 +9,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: GitRoll Scan
-        uses: brenoepics/gitroll-action@v0.1.0
+        uses: brenoepics/gitroll-action@7d82ea018bae0e13a90c3f988524325a407df310
         with:
           username: 'DarkVader-PLG'
