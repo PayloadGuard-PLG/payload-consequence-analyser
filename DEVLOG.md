@@ -2,6 +2,42 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-06-11 — Miasma research complete; L2d AI tooling config poisoning sprint planned
+
+### Context
+
+Miasma is an active supply-chain worm (TeamPCP / Mini Shai-Hulud lineage) targeting AI coding agent configuration files in source repositories. Confirmed blast radius as of 2026-06-11: ~123 source repositories including `Azure/durabletask` and `Azure-Samples/llm-fine-tuning`, 57 npm packages across 286+ malicious versions, 73 Microsoft repositories taken down 3–5 June 2026. CVEs: CVE-2025-59536, CVE-2026-21852 (Claude Code SessionStart hooks); CVE-2025-54136 MCPoison; CVE-2025-54135 CurXecute.
+
+PayloadGuard has no detection for this class. GitHub Actions poisoning (L2c) covers `.github/workflows/` exclusively. AI tooling configs (`.claude/`, `.gemini/`, `.cursor/`, `.vscode/`, `mcp.json`, `composer.json`, `Gemfile`, `binding.gyp`) are outside the current scan surface.
+
+### Research findings summary
+
+Full research document: `research-for-updates.md` on this branch.
+
+The attack class divides into two structurally different sub-types, each requiring distinct detection logic:
+
+**Sub-type A — Direct-execution config (high signal, near-deterministic):** A config field carries a shell command executed by a legitimate tool trigger (folder open, session start, install, test). This is the Miasma core mechanism. Six confirmed config surfaces in the wild: `.claude/settings.json` and `.gemini/settings.json` (byte-identical `hooks.SessionStart[].hooks[].command` payload), `.cursor/rules/*.mdc` (NL imperative in `alwaysApply: true` rule — prompt injection achieving execution via agent), `.vscode/tasks.json` (`runOn: folderOpen` + `command`), `package.json` lifecycle script hijack, `composer.json` `post-install-cmd`. Additionally: `binding.gyp` `<!(...)` command substitution is the npm-registry arm's install-time evasion, bypassing conventional lifecycle-script scanners.
+
+**Sub-type B — Instruction/prompt-injection config (lower signal, noisier):** A rules file steers the AI agent to write malicious code or take malicious actions. Uses hidden Unicode (zero-width joiners, bidi controls, U+E0000 tag block). GitHub shipped a warning for this (May 2025). `.cursor/rules/` and `.github/copilot-instructions.md` are the documented surfaces (Pillar Security "Rules File Backdoor", March 2025).
+
+**MCP config poisoning:** `mcp.json` entries whose `command`/`args` launch a repo-local script or untrusted `npx` package. Documented by Invariant Labs (CVE-2025-54136/54135). `mcp-scan` (Invariant/Snyk) covers local installs but not PR diffs.
+
+**Binary blob delivery:** The Miasma dropper (`.github/setup.js`, 4.3 MB) is deliberately bloated above the GitHub code-search indexing ceiling (~384 KB) so search sweeps miss the launcher references to it. The payload is AES-128-GCM encrypted + ROT+char-code `eval` obfuscated. Shannon entropy alone is not a useful standalone signal — must be compounded with type-vs-magic mismatch, executable magic bytes, or wired-to-execution cross-reference. PR-borne binary steganography is a plausible but undocumented in-the-wild attack vector in this class.
+
+**Version-constraint widening:** A hardening heuristic with no documented in-the-wild campaign as the delivery vector. Dominated by Dependabot/Renovate traffic. Tier 3 advisory only — score-and-correlate, never block alone.
+
+### Detection gap confirmed
+
+No existing tool performs PR-diff-level structural detection of the direct-execution config class. SafeDep grep heuristics (substring match, no FP suppression) and `vet` (dependency-centric) are the closest prior art. A structured PR-level scanner that parses the config grammar and evaluates Trigger × Authority × Grammar × command-content is currently an underserved niche.
+
+### Implementation decision
+
+New layer **L2d — AI Tooling Config Poisoning**, mirroring the L2c architecture (`_scan_github_actions_poisoning`). Phased across four sprints; see `MIASMA_DETECTION_SPRINT.md`. Sprint 1 ships the core detection function and scoring integration. Sprints 2–4 add compound binary blob signal, harness fixture cases, and the advisory version-constraint detector.
+
+False-positive strategy: the command-content regex targets interpreter invocations on repo-local or unknown paths and obfuscated patterns. Invocations on well-known tool binaries (`npx prettier`, `node -p "require(...)"`) are excluded. Every new signal ships with a corresponding harness SAFE case to anchor FP regression.
+
+---
+
 ## 2026-06-01 — Regression verified 34/34; A03/A06 root cause resolved
 
 ### Regression status: COMPLETE 34/34 PASS
