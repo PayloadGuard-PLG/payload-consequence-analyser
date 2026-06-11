@@ -225,6 +225,7 @@ The agent preflight canary will warn and exit 0 gracefully if tracepoints are un
 
 ## Development Rules
 
+- **Assumption is the mother of all fuck ups. Don't guess, verify or ask. Don't make decisions that require user input. If you hit a 404 when pushing, stop — it is likely PayloadGuard.org blocking the push. Verification of code quality, determinism, and honest capability is everything; otherwise the work means nothing.**
 - **Push:** `git push -u origin <branch>` — MCP push works now but PC push is equally fine
 - **CLAUDE.md is updated on every change, no exceptions.** Every code change, fix, finding, doc update, or architectural decision goes into the Handover block before the session ends. Stale handovers cause real work loss. This includes architecture table, key files, scoring, open findings, and version changelog — not just the Handover block.
 - **Read CLAUDE.md at session start and verify every section is current before touching code.**

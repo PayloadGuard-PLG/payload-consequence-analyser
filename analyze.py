@@ -307,6 +307,83 @@ _ACTIONS_WRITE_PERMISSIONS = re.compile(
 )
 
 # ==============================================================================
+# AI TOOLING CONFIG POISONING DETECTION (Layer 2d)
+# Scans added and modified AI coding agent and IDE config files for auto-execution
+# primitives. Confirmed in-the-wild surfaces from the Miasma/TeamPCP campaign:
+# .claude/settings.json, .gemini/settings.json, .cursor/rules/*.mdc,
+# .vscode/tasks.json, package.json lifecycle scripts, composer.json
+# post-install-cmd, Gemfile system(), binding.gyp <!(shell chain).
+# CVEs: CVE-2025-59536, CVE-2026-21852, CVE-2025-54136, CVE-2025-54135.
+# ==============================================================================
+
+_AI_CONFIG_PATH_RE = re.compile(
+    r'(^|/)(\.claude/settings\.json'
+    r'|\.gemini/settings\.json'
+    r'|\.cursor/rules/[^/]+\.mdc'
+    r'|\.vscode/tasks\.json'
+    r'|\.cursor/mcp\.json'
+    r'|\.vscode/mcp\.json'
+    r'|mcp\.json'
+    r'|composer\.json'
+    r'|Gemfile'
+    r'|binding\.gyp'
+    r'|package\.json)$',
+    re.IGNORECASE,
+)
+
+# Critical command patterns in hook/task/script fields:
+# pipe-to-shell, payload decode, eval, interpreter on .github/ path,
+# JS obfuscation, crypto decryption, bun install, memory scraping.
+_AI_HOOK_CRITICAL_CMDS = re.compile(
+    r'(\|\s*(ba)?sh\b'
+    r'|base64\s+-d'
+    r'|eval\s*\('
+    r'|\b(node|bun|deno)\b[^\n]*\.github/'
+    r'|String\.fromCharCode'
+    r'|createDecipheriv'
+    r'|oven-sh/bun/releases'
+    r'|/proc/\*/mem)',
+    re.IGNORECASE,
+)
+
+# Hidden Unicode: zero-width chars, bidi controls, invisible tag block.
+_HIDDEN_UNICODE_RE = re.compile(
+    r'[​-‍‪-‮⁦-⁩﻿0-f]'
+)
+
+# Gemfile top-level execution primitives.
+_GEMFILE_EXEC_RE = re.compile(
+    r'^\s*(system\s*\(|exec\s*\(|`)',
+    re.MULTILINE,
+)
+
+# binding.gyp: shell-chain/redirection form (malicious) vs safe require lookup.
+_BINDING_GYP_CHAIN_RE = re.compile(
+    r'<!\([^)]*(\|\||&&|>\s*/dev/null|2>&1)[^)]*\)',
+    re.IGNORECASE,
+)
+_BINDING_GYP_SAFE_RE = re.compile(
+    r'<!\(\s*node\s+-[pe]\s+["\']require\(',
+    re.IGNORECASE,
+)
+
+# Cursor .mdc rule: NL imperative to run/execute something.
+_CURSOR_EXEC_IMPERATIVE_RE = re.compile(
+    r'(`[^`]+`|run\s+`|\bnode\s+\S|\bcurl\s+\S|\bexecute\b)',
+    re.IGNORECASE,
+)
+
+# Package.json lifecycle keys that auto-execute on install/build.
+_PACKAGE_LIFECYCLE_KEYS = frozenset({
+    'preinstall', 'install', 'postinstall', 'prepare', 'prepack', 'postpack',
+})
+
+# Composer.json lifecycle keys that auto-execute on install/update.
+_COMPOSER_LIFECYCLE_KEYS = frozenset({
+    'post-install-cmd', 'post-update-cmd', 'post-autoload-dump', 'pre-install-cmd',
+})
+
+# ==============================================================================
 # SCA — DEPENDENCY MANIFEST PATTERNS (Layer 2b)
 # Opt-in: only runs when allowlist.yml is present in the repo root.
 # ==============================================================================
@@ -1127,7 +1204,10 @@ class PayloadAnalyzer:
             # LAYER 2c: GitHub Actions poisoning detection
             actions_poison_flags = self._scan_github_actions_poisoning(diffs)
 
-            # LAYER 2d: Mutable action ref advisory (no score impact)
+            # LAYER 2d: AI tooling config poisoning detection
+            ai_config_flags = self._scan_ai_tooling_configs(diffs)
+
+            # Mutable action ref advisory (no score impact)
             mutable_tag_warnings = _scan_mutable_action_refs(diffs)
 
             # LAYER 3: CONSEQUENCE VERDICT
@@ -1145,6 +1225,10 @@ class PayloadAnalyzer:
                 actions_poisoning_flags=len(actions_poison_flags),
                 actions_poisoning_critical=any(
                     f['severity'] == 'CRITICAL' for f in actions_poison_flags
+                ),
+                ai_config_poisoning_flags=len(ai_config_flags),
+                ai_config_poisoning_critical=any(
+                    f['severity'] == 'CRITICAL' for f in ai_config_flags
                 ),
             )
 
@@ -1252,6 +1336,10 @@ class PayloadAnalyzer:
                     "flagged_workflows": actions_poison_flags[:10],
                     "total": len(actions_poison_flags),
                 },
+                "ai_config_poisoning": {
+                    "flagged_configs": ai_config_flags[:10],
+                    "total": len(ai_config_flags),
+                },
                 "mutable_tag_warnings": mutable_tag_warnings,
                 "permission_changes": permission_changes,
                 "special_files": special_files,
@@ -1282,6 +1370,8 @@ class PayloadAnalyzer:
         content_flags: int = 0,
         actions_poisoning_flags: int = 0,
         actions_poisoning_critical: bool = False,
+        ai_config_poisoning_flags: int = 0,
+        ai_config_poisoning_critical: bool = False,
     ) -> dict:
         """
         Layer 3 consequence scoring -- assigns a severity verdict to the PR's deletion profile.
@@ -1291,11 +1381,12 @@ class PayloadAnalyzer:
         Formal contracts are maintained in verification/consequence_pure.py and verified by
         CrossHair. Invariants proven there:
           - verdict in {SAFE, REVIEW, CAUTION, DESTRUCTIVE}
-          - severity_score in [0, 31]
+          - severity_score in [0, 36]
           - SAFE <-> severity_score < 1; DESTRUCTIVE <-> severity_score >= 5
           - security_file_deletions > 0 -> DESTRUCTIVE
           - structural_severity == CRITICAL -> DESTRUCTIVE
           - actions_poisoning_critical -> DESTRUCTIVE
+          - ai_config_poisoning_critical -> DESTRUCTIVE
           - all-zero inputs -> SAFE
 
         Run: cd verification && crosshair check consequence_pure
@@ -1400,6 +1491,20 @@ class PayloadAnalyzer:
             )
             severity_score += actions_cfg.get("high_signal_score", 3)
 
+        if ai_config_poisoning_critical:
+            flags.append(
+                f"{ai_config_poisoning_flags} AI tooling config file(s) contain critical "
+                f"auto-execution poisoning signals (SessionStart hook / folder-open task / "
+                f"lifecycle script / binding.gyp)"
+            )
+            severity_score += actions_cfg.get("critical_signal_score", 5)
+        elif ai_config_poisoning_flags > 0:
+            flags.append(
+                f"{ai_config_poisoning_flags} AI tooling config file(s) contain "
+                f"execution or prompt-injection signals"
+            )
+            severity_score += actions_cfg.get("high_signal_score", 3)
+
         if severity_score >= 5:
             return {
                 "status": "DESTRUCTIVE",
@@ -1447,6 +1552,9 @@ class PayloadAnalyzer:
             # to prevent double-counting scores from the same file.
             if isinstance(path, str) and re.search(_ACTIONS_WORKFLOW_PATTERN, path):
                 continue
+            # AI tooling config files are handled exclusively by L2d (_scan_ai_tooling_configs).
+            if isinstance(path, str) and _AI_CONFIG_PATH_RE.search(path):
+                continue
             try:
                 content = d.b_blob.data_stream.read().decode('utf-8', errors='replace')
             except Exception:
@@ -1461,6 +1569,56 @@ class PayloadAnalyzer:
                     'ci_triggers': ci_matches,
                     'shell_patterns': shell_matches,
                 })
+        return flags
+
+    def _scan_ai_tooling_configs(self, diffs) -> list:
+        """Scan added and modified AI tooling config files for auto-execution poisoning signals."""
+        if not self.config.actions.get("enabled", True):
+            return []
+        flags = []
+        for d in diffs:
+            if d.change_type not in ('A', 'M'):
+                continue
+            path = d.b_path or d.a_path or ''
+            if not isinstance(path, str) or not _AI_CONFIG_PATH_RE.search(path):
+                continue
+            try:
+                content = d.b_blob.data_stream.read().decode('utf-8', errors='replace')
+            except Exception:
+                continue
+
+            filename = Path(path).name.lower()
+            signals = []
+
+            if filename == 'settings.json' and re.search(r'(^|/)\.(claude|gemini)/', path, re.IGNORECASE):
+                signals.extend(_check_agent_settings_json(content))
+            elif filename == 'tasks.json' and re.search(r'(^|/)\.vscode/', path, re.IGNORECASE):
+                signals.extend(_check_vscode_tasks(content))
+            elif path.lower().endswith('.mdc') and re.search(r'(^|/)\.cursor/rules/', path, re.IGNORECASE):
+                signals.extend(_check_cursor_rule(content))
+            elif filename == 'package.json':
+                signals.extend(_check_package_json_scripts(content))
+            elif filename == 'composer.json':
+                signals.extend(_check_composer_json(content))
+            elif filename == 'gemfile':
+                signals.extend(_check_gemfile(content))
+            elif filename == 'binding.gyp':
+                signals.extend(_check_binding_gyp(content))
+            elif filename == 'mcp.json':
+                signals.extend(_check_mcp_json(content))
+
+            if _HIDDEN_UNICODE_RE.search(content):
+                signals.append({'type': 'hidden_unicode', 'pattern': 'non-printing Unicode character'})
+
+            if signals:
+                _AI_CRITICAL_TYPES = {
+                    'command_in_session_hook', 'command_in_folder_open_task',
+                    'lifecycle_script_hijack', 'binding_gyp_command_substitution',
+                    'gemfile_system_call', 'composer_post_install',
+                }
+                severity = 'CRITICAL' if any(s['type'] in _AI_CRITICAL_TYPES for s in signals) else 'HIGH'
+                flags.append({'file': path, 'signals': signals, 'severity': severity})
+
         return flags
 
     def _scan_github_actions_poisoning(self, diffs) -> list:
@@ -1625,6 +1783,151 @@ def _scan_mutable_action_refs(diffs) -> list:
             seen.add(raw)
             warnings.append({'file': path, 'action': action, 'ref': ref})
     return warnings
+
+
+# ==============================================================================
+# AI TOOLING CONFIG POISONING — module-level helper functions (Layer 2d)
+# Each function inspects one config surface and returns a list of signal dicts.
+# ==============================================================================
+
+def _check_agent_settings_json(content: str) -> list:
+    """Return signals from .claude/settings.json or .gemini/settings.json hook commands."""
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    hooks_root = data.get('hooks', {})
+    if not isinstance(hooks_root, dict):
+        return []
+    signals = []
+    for event_name, hook_list in hooks_root.items():
+        if not isinstance(hook_list, list):
+            continue
+        for entry in hook_list:
+            if not isinstance(entry, dict):
+                continue
+            for hook in entry.get('hooks', []):
+                if not isinstance(hook, dict) or hook.get('type') != 'command':
+                    continue
+                cmd = hook.get('command', '')
+                if isinstance(cmd, str) and _AI_HOOK_CRITICAL_CMDS.search(cmd):
+                    signals.append({
+                        'type': 'command_in_session_hook',
+                        'event': event_name,
+                        'command': cmd[:200],
+                    })
+    return signals
+
+
+def _check_vscode_tasks(content: str) -> list:
+    """Return signals from .vscode/tasks.json folder-open tasks with critical commands."""
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    signals = []
+    for task in data.get('tasks', []):
+        if not isinstance(task, dict):
+            continue
+        if task.get('runOptions', {}).get('runOn') != 'folderOpen':
+            continue
+        cmd = task.get('command', '')
+        if isinstance(cmd, str) and _AI_HOOK_CRITICAL_CMDS.search(cmd):
+            signals.append({
+                'type': 'command_in_folder_open_task',
+                'label': task.get('label', ''),
+                'command': cmd[:200],
+            })
+    return signals
+
+
+def _check_cursor_rule(content: str) -> list:
+    """Return signals from .cursor/rules/*.mdc with alwaysApply + execute imperative."""
+    if not re.search(r'alwaysApply\s*:\s*true', content, re.IGNORECASE):
+        return []
+    if _CURSOR_EXEC_IMPERATIVE_RE.search(content):
+        return [{'type': 'cursor_nl_exec_imperative',
+                 'pattern': 'alwaysApply rule with execute imperative'}]
+    return []
+
+
+def _check_package_json_scripts(content: str) -> list:
+    """Return signals from package.json lifecycle scripts with critical commands."""
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    scripts = data.get('scripts', {})
+    if not isinstance(scripts, dict):
+        return []
+    signals = []
+    for key, cmd in scripts.items():
+        if key.lower() not in _PACKAGE_LIFECYCLE_KEYS:
+            continue
+        if isinstance(cmd, str) and _AI_HOOK_CRITICAL_CMDS.search(cmd):
+            signals.append({'type': 'lifecycle_script_hijack', 'script': key, 'command': cmd[:200]})
+    return signals
+
+
+def _check_composer_json(content: str) -> list:
+    """Return signals from composer.json lifecycle scripts with critical commands."""
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    scripts = data.get('scripts', {})
+    if not isinstance(scripts, dict):
+        return []
+    signals = []
+    for key, cmd_or_list in scripts.items():
+        if key.lower() not in _COMPOSER_LIFECYCLE_KEYS:
+            continue
+        for cmd in (cmd_or_list if isinstance(cmd_or_list, list) else [cmd_or_list]):
+            if isinstance(cmd, str) and _AI_HOOK_CRITICAL_CMDS.search(cmd):
+                signals.append({'type': 'composer_post_install', 'script': key, 'command': cmd[:200]})
+    return signals
+
+
+def _check_gemfile(content: str) -> list:
+    """Return signals from Gemfile top-level system/exec/backtick calls."""
+    if _GEMFILE_EXEC_RE.search(content):
+        return [{'type': 'gemfile_system_call', 'pattern': 'top-level system/exec/backtick'}]
+    return []
+
+
+def _check_binding_gyp(content: str) -> list:
+    """Return signals from binding.gyp command-substitution shell chains."""
+    if not _BINDING_GYP_CHAIN_RE.search(content):
+        return []
+    if _BINDING_GYP_SAFE_RE.search(content):
+        return []
+    return [{'type': 'binding_gyp_command_substitution', 'pattern': '<!(shell chain)'}]
+
+
+def _check_mcp_json(content: str) -> list:
+    """Return signals from mcp.json server entries running repo-local scripts."""
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    servers = data.get('mcpServers', data.get('servers', {}))
+    if not isinstance(servers, dict):
+        return []
+    signals = []
+    for name, srv in servers.items():
+        if not isinstance(srv, dict):
+            continue
+        cmd = srv.get('command', '')
+        args = srv.get('args', [])
+        if not isinstance(cmd, str):
+            continue
+        args_str = ' '.join(str(a) for a in (args if isinstance(args, list) else []))
+        full_cmd = f"{cmd} {args_str}".strip()
+        if (re.search(r'\b(node|python3?|bun)\b', cmd, re.IGNORECASE) and
+                re.search(r'(^|\s)\.(github|claude|gemini)/', full_cmd)):
+            signals.append({'type': 'mcp_local_server_command', 'server': name,
+                            'command': full_cmd[:200]})
+    return signals
 
 
 def _load_runtime_events() -> list:
