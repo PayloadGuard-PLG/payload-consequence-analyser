@@ -15,7 +15,7 @@
 const DESTRUCTIVE_THRESHOLD: int := 5
 const CAUTION_THRESHOLD:     int := 3
 const REVIEW_THRESHOLD:      int := 1
-const MAX_SCORE:             int := 31
+const MAX_SCORE:             int := 36
 
 // ── Per-component scoring functions ──────────────────────────────────────────
 // Pure functions with explicit bounds. The method body uses these postconditions
@@ -105,7 +105,9 @@ method AssessConsequence(
     unverified_dependencies:   nat,
     content_flags:             nat,
     actions_poisoning_flags:   nat,
-    actions_poisoning_critical: bool
+    actions_poisoning_critical: bool,
+    ai_config_poisoning_flags:  nat,
+    ai_config_poisoning_critical: bool
 ) returns (status: string, severity_score: int)
 
     requires 0.0 <= deletion_ratio <= 100.0
@@ -119,7 +121,7 @@ method AssessConsequence(
     // POST-2: score is non-negative
     ensures severity_score >= 0
 
-    // POST-3: score does not exceed the sum of all signal maximums (31)
+    // POST-3: score does not exceed the sum of all signal maximums (36)
     ensures severity_score <= MAX_SCORE
 
     // POST-4–7: verdict ↔ score bijection (exhaustive, mutually exclusive)
@@ -137,12 +139,16 @@ method AssessConsequence(
     // POST-10: actions poisoning CRITICAL forces DESTRUCTIVE (contributes +5)
     ensures actions_poisoning_critical ==> status == "DESTRUCTIVE"
 
+    // POST-12: AI tooling config poisoning CRITICAL forces DESTRUCTIVE (contributes +5)
+    ensures ai_config_poisoning_critical ==> status == "DESTRUCTIVE"
+
     // POST-11a: all-zero inputs yield SAFE (no false positives on empty diffs)
     ensures files_deleted == 0 && lines_deleted == 0 && days_old == 0 &&
             deletion_ratio == 0.0 && structural_severity == "LOW" &&
             critical_file_deletions == 0 && security_file_deletions == 0 &&
             unverified_dependencies == 0 && content_flags == 0 &&
-            actions_poisoning_flags == 0 && !actions_poisoning_critical
+            actions_poisoning_flags == 0 && !actions_poisoning_critical &&
+            ai_config_poisoning_flags == 0 && !ai_config_poisoning_critical
             ==> status == "SAFE"
 {
     var s: int := 0;
@@ -181,10 +187,17 @@ method AssessConsequence(
         s := s + 3;
     }
 
-    // Explicit bound assertion: sum of all component maximums = 31.
+    // AI tooling config poisoning: CRITICAL = +5, HIGH = +3, none = 0
+    if ai_config_poisoning_critical {
+        s := s + 5;
+    } else if ai_config_poisoning_flags > 0 {
+        s := s + 3;
+    }
+
+    // Explicit bound assertion: sum of all component maximums = 36.
     // Each addend is bounded by its helper function's postcondition.
     // This assists the verifier in discharging POST-3.
-    assert s <= 3 + 4 + 5 + 2 + 5 + 3 + 4 + 5;
+    assert s <= 3 + 4 + 5 + 2 + 5 + 3 + 4 + 5 + 5;
 
     severity_score := s;
 

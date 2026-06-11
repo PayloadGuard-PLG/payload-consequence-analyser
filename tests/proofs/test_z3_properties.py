@@ -29,8 +29,9 @@ _REVIEW_THRESHOLD = 1
 # Maximum plausible contribution from non-workflow signals (deletion dims, age,
 # structural, etc.) — used as an upper bound in proofs that reason about the
 # total score. Derived from _assess_consequence: max deletion_dim=4, age=3,
-# structural=5, critical_path=2, security_files=5 → conservative cap=19.
-_MAX_OTHER_SCORE = 19
+# structural=5, critical_path=2, security_files=5, ai_config_critical=5
+# → conservative cap=24.
+_MAX_OTHER_SCORE = 24
 
 _skip = pytest.mark.skipif(not _Z3_AVAILABLE, reason="z3-solver not installed")
 

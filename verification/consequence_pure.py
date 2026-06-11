@@ -57,8 +57,9 @@ _REVIEW_THRESHOLD: int = 1
 # Maximum possible severity_score (all signals at maximum simultaneously):
 #   branch age +3, deletion_dim +4, structural CRITICAL +5,
 #   critical_file_deletions +2, security_file_deletions +5,
-#   unverified_dependencies +3, content_flags +4, actions_poisoning_critical +5
-_MAX_SCORE: int = 31
+#   unverified_dependencies +3, content_flags +4, actions_poisoning_critical +5,
+#   ai_config_poisoning_critical +5
+_MAX_SCORE: int = 36
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +135,8 @@ def _no_signals(
     content_flags: int,
     actions_poisoning_flags: int,
     actions_poisoning_critical: bool,
+    ai_config_poisoning_flags: int,
+    ai_config_poisoning_critical: bool,
 ) -> bool:
     """True when all inputs are at their zero/neutral values."""
     return (
@@ -148,6 +151,8 @@ def _no_signals(
         and content_flags == 0
         and actions_poisoning_flags == 0
         and not actions_poisoning_critical
+        and ai_config_poisoning_flags == 0
+        and not ai_config_poisoning_critical
     )
 
 
@@ -168,6 +173,8 @@ def assess_consequence_pure(
     content_flags: int = 0,
     actions_poisoning_flags: int = 0,
     actions_poisoning_critical: bool = False,
+    ai_config_poisoning_flags: int = 0,
+    ai_config_poisoning_critical: bool = False,
 ) -> Dict[str, Any]:
     """
     Pure-Python mirror of PayloadAnalyzer._assess_consequence() with CrossHair contracts.
@@ -187,11 +194,12 @@ def assess_consequence_pure(
     pre: unverified_dependencies >= 0
     pre: content_flags >= 0
     pre: actions_poisoning_flags >= 0
+    pre: ai_config_poisoning_flags >= 0
 
     Output invariants (post-conditions):
     post: __return__["status"] in ("SAFE", "REVIEW", "CAUTION", "DESTRUCTIVE")
     post: __return__["severity_score"] >= 0
-    post: __return__["severity_score"] <= 31
+    post: __return__["severity_score"] <= 36
 
     Verdict-score bijection (both directions):
     post: implies(__return__["status"] == "SAFE",        __return__["severity_score"] < 1)
@@ -200,12 +208,13 @@ def assess_consequence_pure(
     post: implies(__return__["status"] == "DESTRUCTIVE", __return__["severity_score"] >= 5)
 
     Safety-critical signal implications:
-    post: implies(security_file_deletions > 0,      __return__["status"] == "DESTRUCTIVE")
-    post: implies(structural_severity == "CRITICAL", __return__["status"] == "DESTRUCTIVE")
-    post: implies(actions_poisoning_critical,        __return__["status"] == "DESTRUCTIVE")
+    post: implies(security_file_deletions > 0,       __return__["status"] == "DESTRUCTIVE")
+    post: implies(structural_severity == "CRITICAL",  __return__["status"] == "DESTRUCTIVE")
+    post: implies(actions_poisoning_critical,         __return__["status"] == "DESTRUCTIVE")
+    post: implies(ai_config_poisoning_critical,       __return__["status"] == "DESTRUCTIVE")
 
     Empty-input guarantee:
-    post: implies(_no_signals(files_deleted, lines_deleted, days_old, deletion_ratio, structural_severity, critical_file_deletions, security_file_deletions, unverified_dependencies, content_flags, actions_poisoning_flags, actions_poisoning_critical), __return__["status"] == "SAFE")
+    post: implies(_no_signals(files_deleted, lines_deleted, days_old, deletion_ratio, structural_severity, critical_file_deletions, security_file_deletions, unverified_dependencies, content_flags, actions_poisoning_flags, actions_poisoning_critical, ai_config_poisoning_flags, ai_config_poisoning_critical), __return__["status"] == "SAFE")
     """
     severity_score: int = 0
 
@@ -249,6 +258,11 @@ def assess_consequence_pure(
     elif actions_poisoning_flags > 0:
         severity_score += _HIGH_SIGNAL_SCORE
 
+    # Step 9: AI tooling config poisoning (CRITICAL takes priority over HIGH)
+    if ai_config_poisoning_critical:
+        severity_score += _CRITICAL_SIGNAL_SCORE
+    elif ai_config_poisoning_flags > 0:
+        severity_score += _HIGH_SIGNAL_SCORE
 
     # Step 10: Verdict
     if severity_score >= _DESTRUCTIVE_THRESHOLD:
