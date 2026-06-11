@@ -1,10 +1,10 @@
 # PayloadGuard
 
-**Version:** 1.3.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Released:** May 2026
+**Version:** 1.4.0-dev &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Released:** May 2026
 
 [![Dafny Verification](https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml/badge.svg)](https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml)
 
-**Formally verified** — 35 CrossHair contracts · 10 Z3 SMT proofs · 11 Dafny postconditions · 273 tests pass · 3 independent proof methods. → [`PROOFS.md`](PROOFS.md)
+**Formally verified** — 36 CrossHair contracts · 10 Z3 SMT proofs · 12 Dafny postconditions · 274 tests pass · 3 independent proof methods. → [`PROOFS.md`](PROOFS.md)
 
 PayloadGuard is a GitHub Action that forensically scans pull requests for destructive, deceptive, or malicious code payloads before they reach your main branch.
 
@@ -20,6 +20,7 @@ It was built for the class of attack where a branch held open for months lands a
 | Structural gutting | Authentication layer silently removed function by function across multiple files |
 | Deceptive PR descriptions | Description says *"update config"* — diff deletes the entire security module |
 | Workflow poisoning | Base64 payloads, credential exfiltration, OIDC token theft, dormant triggers |
+| AI tooling config poisoning | Malicious `.claude/settings.json` or `package.json` hook that executes when a developer opens the repo in an AI coding agent or IDE |
 | Supply chain injection | Unverified packages added to manifests under the radar |
 | Typosquatted CI actions | `aws-actions-unofficial/` instead of `aws-actions/` — OIDC token handed to attacker |
 
@@ -35,9 +36,9 @@ PayloadGuard has three tiers of analysis. Each tier is a superset of the one bef
 │  Surface scan → Forensic analysis → Verdict                 │
 │  Dependency: GitPython only                                 │
 ├─────────────────────────────────────────────────────────────┤
-│  STANDARD  (adds L2c · L4 · L5a · L5b)                     │
-│  + Workflow poisoning · Structural drift · Temporal drift   │
-│  + Semantic transparency                                    │
+│  STANDARD  (adds L2c · L2d · L4 · L5a · L5b)               │
+│  + Workflow poisoning · AI config poisoning                 │
+│  + Structural drift · Temporal drift · Semantic transparency│
 │  Dependency: adds tree-sitter grammars                      │
 ├─────────────────────────────────────────────────────────────┤
 │  FULL  (adds L5c)                                           │
@@ -67,6 +68,7 @@ Adds four layers that catch sophisticated evasion: workflow-based attacks, struc
 | Layer | What it adds |
 |---|---|
 | **L2c — Actions Poisoning** | Workflow files scanned for base64 payloads, credential exfiltration, OIDC escalation, forged identities, dormant triggers, unsafe `pull_request_target` |
+| **L2d — AI Config Poisoning** | AI tooling config files scanned for shell commands in session hooks, folder-open tasks, lifecycle scripts, `binding.gyp` shell chains, MCP local server commands, and Cursor NL imperatives — 9 file surfaces |
 | **L4 — Structural Drift** | AST-level diff — which named classes, functions, and constants were deleted, per file and cross-file |
 | **L5a — Temporal Drift** | Branch age × target commit velocity — quantified staleness score to catch slow-burn campaigns |
 | **L5b — Semantic Transparency** | Whether the PR description matches what the diff actually does |
@@ -367,7 +369,7 @@ The eBPF agent monitors the CI runner itself during execution. It captures four 
 
 ### Verdict Scoring
 
-The verdict is a deterministic function of `severity_score ∈ [0, 31]`:
+The verdict is a deterministic function of `severity_score ∈ [0, 36]`:
 
 | Score | Verdict | Meaning |
 |---|---|---|
@@ -386,11 +388,13 @@ The verdict is a deterministic function of `severity_score ∈ [0, 31]`:
 | Lines deleted > 5k / 10k / 50k | +1 / +2 / +3 |
 | Critical path files deleted | +2 |
 | Security files deleted | +5 |
-| Structural severity CRITICAL (L4) | +3 |
+| Structural severity CRITICAL (L4) | +5 |
 | Unverified dependency — SCA (per package) | +3 |
 | Added file content: shell or CI patterns | +2 per match, capped +4 |
 | Actions poisoning CRITICAL signal (L2c) | +5 |
 | Actions poisoning HIGH signal (L2c) | +3 |
+| AI config poisoning CRITICAL signal (L2d) | +5 |
+| AI config poisoning HIGH signal (L2d) | +3 |
 
 The three deletion sub-scores (files, ratio, lines) are correlated and capped to prevent triple-counting.
 
@@ -406,6 +410,22 @@ The three deletion sub-scores (files, ratio, lines) are correlated and capped to
 | `forged_bot_author` | HIGH | Git identity configured to impersonate a known bot |
 | `oidc_elevation_no_consumer` | HIGH | `id-token: write` with no recognised OIDC consumer |
 | `dangerous_trigger_pull_request_target` | HIGH | `pull_request_target` without write permissions |
+
+### AI Config Poisoning Signals (L2d)
+
+Scans added or modified AI tooling config files across 9 surfaces: `.claude/settings.json`, `.gemini/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, `package.json`, `composer.json`, `Gemfile`, `binding.gyp`, and `mcp.json`.
+
+| Signal | Severity | Description |
+|---|---|---|
+| `command_in_session_hook` | CRITICAL | Shell command in a Claude/Gemini `SessionStart` hook |
+| `command_in_folder_open_task` | CRITICAL | VS Code task with `runOn: folderOpen` + dangerous shell command |
+| `lifecycle_script_hijack` | CRITICAL | `preinstall`/`postinstall`/`prepare` npm script with dangerous command |
+| `composer_post_install` | CRITICAL | Composer `post-install-cmd` / `post-update-cmd` with dangerous command |
+| `gemfile_system_call` | CRITICAL | Top-level `system()`, `exec()`, or backtick expression in a Gemfile |
+| `binding_gyp_command_substitution` | CRITICAL | Shell chain (`\|\|`, `&&`, output redirect) inside a `binding.gyp` `<!()` |
+| `cursor_nl_exec_imperative` | HIGH | Cursor rule with `alwaysApply: true` and an execute imperative |
+| `mcp_local_server_command` | HIGH | MCP server config launching a repo-local script |
+| `hidden_unicode` | HIGH | Zero-width, bidi, or Unicode tag-block characters in any config value |
 
 ### Temporal Drift (L5a)
 
@@ -440,9 +460,9 @@ PayloadGuard's scoring and consequence models are mathematically verified to ens
 |---|---|
 | **CrossHair** — symbolic execution | Consequence model (C1–C12), structural drift (S1–S7), temporal drift (T1–T7), semantic transparency (M1–M9) |
 | **Z3** — SMT theorem prover | Score bounds, verdict bijection, safety-critical floors, empty-input guarantee (P1–P10) |
-| **Dafny** — machine-checked proofs | Full input domain coverage, 11 postconditions verified, 0 errors (POST-1–11a) |
+| **Dafny** — machine-checked proofs | Full input domain coverage, 12 postconditions verified, 0 errors (POST-1–11a + POST-12) |
 
-**Current test state:** 273 tests pass, 7 skipped.
+**Current test state:** 274 tests pass, 7 skipped.
 
 → [`VERIFICATION.md`](VERIFICATION.md) — contracts, methods, and run instructions  
 → [`VERIFICATION_SPEC.md`](VERIFICATION_SPEC.md) — formal specification for external auditors
@@ -455,7 +475,7 @@ PayloadGuard's scoring and consequence models are mathematically verified to ens
 python -m pytest test_analyzer.py tests/proofs/ -q
 ```
 
-273 pass, 7 skip. New detection signals require test coverage in the relevant layer's test class. Open findings are tracked in [`AUDIT_LOG.md`](AUDIT_LOG.md).
+274 pass, 7 skip. New detection signals require test coverage in the relevant layer's test class. Open findings are tracked in [`AUDIT_LOG.md`](AUDIT_LOG.md).
 
 ---
 
