@@ -6,7 +6,7 @@ Three orthogonal verification methods cover the pure scoring logic across four a
 
 | Layer | Function | Module | Contracts |
 |-------|----------|--------|-----------|
-| L3 Consequence | `_assess_consequence()` | `verification/consequence_pure.py` | C1–C12 |
+| L3 Consequence | `_assess_consequence()` | `verification/consequence_pure.py` | C1–C13 |
 | L4 Structural | `analyze_structural_drift()` | `verification/structural_pure.py` | S1–S7 |
 | L5a Temporal | `analyze_drift()` | `verification/temporal_pure.py` | T1–T7 |
 | L5b Semantic | `analyze_transparency()` phase 3 | `verification/semantic_pure.py` | M1–M9 |
@@ -47,7 +47,7 @@ no GitPython, no AST parsing, no file I/O.
 
 ---
 
-### Layer 3 — Consequence Scoring (C1–C12)
+### Layer 3 — Consequence Scoring (C1–C13)
 
 **Target:** `PayloadAnalyzer._assess_consequence()` → `verification/consequence_pure.py`
 
@@ -63,6 +63,7 @@ no GitPython, no AST parsing, no file I/O.
 | P-06 | `unverified_dependencies >= 0` |
 | P-07 | `content_flags >= 0` |
 | P-08 | `actions_poisoning_flags >= 0` |
+| P-09 | `ai_config_poisoning_flags >= 0` |
 
 **Contracts:**
 
@@ -70,7 +71,7 @@ no GitPython, no AST parsing, no file I/O.
 |----------|-----------|----------------------|
 | C-01 | `verdict in {SAFE, REVIEW, CAUTION, DESTRUCTIVE}` | Verdict is always a valid enum value |
 | C-02 | `severity_score >= 0` | Score never goes negative |
-| C-03 | `severity_score <= 31` | Score is bounded; no runaway accumulation |
+| C-03 | `severity_score <= 36` | Score is bounded; no runaway accumulation |
 | C-04 | `SAFE <-> severity_score < 1` | SAFE is exact; cannot be produced by a non-zero score |
 | C-05 | `REVIEW <-> 1 <= severity_score < 3` | REVIEW is a closed interval |
 | C-06 | `CAUTION <-> 3 <= severity_score < 5` | CAUTION is a closed interval |
@@ -80,6 +81,7 @@ no GitPython, no AST parsing, no file I/O.
 | C-10 | `actions_poisoning_critical -> DESTRUCTIVE` | Critical workflow poisoning → DESTRUCTIVE |
 | C-11 | `all-zero inputs -> SAFE` | Empty PRs never produce a false positive |
 | C-12 | `deletion_dim in [0, 4]` | Aggregated deletion dimension always capped at 4 |
+| C-13 | `ai_config_poisoning_critical -> DESTRUCTIVE` | Critical AI config poisoning → DESTRUCTIVE |
 
 ---
 
@@ -228,7 +230,7 @@ CI runs Dafny automatically on any PR touching `verification/dafny/**` via `.git
 
 ```bash
 pytest tests/proofs/ -v --timeout=60
-# Expected: 272 pass, 7 skip
+# Expected: 274 pass, 7 skip
 ```
 
 ---
@@ -280,7 +282,7 @@ When scoring logic changes in `analyze.py`:
 - **Config-driven threshold overrides:** verification modules use default thresholds.
   User-configured overrides (e.g. `branch_age_days: [30, 60, 90]`) are not covered.
 - **L1 Surface Scan:** raw metric collection from GitPython diff objects — no pure scoring logic.
-- **L2/L2b/L2c:** regex matching, YAML parsing, manifest diffing — separate specs needed.
+- **L2/L2b/L2c/L2d:** regex matching, YAML/JSON parsing, manifest diffing, config content scanning — separate specs needed.
 - **L5b Phases 1 & 2:** `_stem()`, `_sanitize()`, `_extract_claim()`, `_profile_diff()` —
   string/regex operations; V_f abstracted as a boolean pre-computed input.
 - **L5c Runtime Agent:** eBPF/kernel boundary — separate formal model needed.

@@ -2,9 +2,10 @@
 
 **Purpose:** This document is the authoritative specification for external verification of PayloadGuard's scoring model. It was produced by reading the source code and is intended for use by an independent verifier — human auditor, CrossHair, Nagini, or Dafny — without relying on any tests or proofs written by the same author as the code.
 
-**Version pinned:** commit `d0541f6cdc1a46b8b05f15bf689bc6f5532bbb48` (branch `claude/oidc-typosquat-detection-UBCOJ`, merged to `main` as PR #63)  
+**Version pinned:** commit `257d1f3` (branch `claude/general-conversation-klxctt` — Sprint 1, L2d AI Config Poisoning)  
+**Previous pin:** commit `d0541f6cdc1a46b8b05f15bf689bc6f5532bbb48` (branch `claude/oidc-typosquat-detection-UBCOJ`, merged to `main` as PR #63)  
 **Source file:** `analyze.py`  
-**Method:** `PayloadAnalyzer._assess_consequence()` — lines 1272–1404
+**Method:** `PayloadAnalyzer._assess_consequence()`
 
 ---
 
@@ -33,6 +34,8 @@ The following preconditions must hold for the specification to apply. Behaviour 
 | `content_flags` | int | ≥ 0 | 0 |
 | `actions_poisoning_flags` | int | ≥ 0 | 0 |
 | `actions_poisoning_critical` | bool | ∈ {True, False} | False |
+| `ai_config_poisoning_flags` | int | ≥ 0 | 0 |
+| `ai_config_poisoning_critical` | bool | ∈ {True, False} | False |
 
 **Note:** `days_old` is clamped to `max(0, days_old)` at the call site before being passed in. The function itself does not clamp it. If negative values are passed, behaviour is implementation-defined.
 
@@ -47,9 +50,9 @@ POST-1:   result["status"] ∈ {"SAFE", "REVIEW", "CAUTION", "DESTRUCTIVE"}
 
 POST-2:   result["severity_score"] ≥ 0
 
-POST-3:   result["severity_score"] ≤ 31
+POST-3:   result["severity_score"] ≤ 36
           (theoretical maximum: age=3 + deletion_dim=4 + structural=5 +
-           critical_files=2 + security_files=5 + sca=3 + content=4 + actions=5)
+           critical_files=2 + security_files=5 + sca=3 + content=4 + actions=5 + ai_config=5)
 
 POST-4:   result["status"] == "SAFE"        ⟺  result["severity_score"] < 1
 POST-5:   result["status"] == "REVIEW"      ⟺  1 ≤ result["severity_score"] < 3
@@ -58,20 +61,26 @@ POST-7:   result["status"] == "DESTRUCTIVE" ⟺  result["severity_score"] ≥ 5
 
 POST-8:   All inputs at zero/false/default → result["status"] == "SAFE"
           (files_deleted=0, lines_deleted=0, days_old=0, deletion_ratio=0.0,
-           structural_severity="LOW", all counts=0, actions_poisoning_critical=False)
+           structural_severity="LOW", all counts=0, actions_poisoning_critical=False,
+           ai_config_poisoning_critical=False)
 
 POST-9:   security_file_deletions > 0 → result["status"] == "DESTRUCTIVE"
 POST-10:  structural_severity == "CRITICAL" → result["status"] == "DESTRUCTIVE"
 POST-11:  actions_poisoning_critical == True → result["status"] == "DESTRUCTIVE"
 
-POST-12:  The internal deletion_dim value ∈ [0, 4] for all inputs
+POST-12:  ai_config_poisoning_critical == True → result["status"] == "DESTRUCTIVE"
+          (Dafny file: `ensures ai_config_poisoning_critical ==> status == "DESTRUCTIVE"`)
+
+POST-13:  The internal deletion_dim value ∈ [0, 4] for all inputs
           (deletion_dim is not returned but can be derived: see Section 4, step 5)
 
-POST-13:  Monotonicity — for any single signal parameter p, holding all other
+POST-14:  Monotonicity — for any single signal parameter p, holding all other
           parameters constant: increasing p never decreases result["severity_score"]
 ```
 
 **POST-4 through POST-7 are exhaustive and mutually exclusive.** Every possible score maps to exactly one verdict. There is no score for which the verdict is undefined.
+
+**POST-11 and POST-12 are the safety-critical floors.** Either condition alone is sufficient to force DESTRUCTIVE regardless of all other signal values.
 
 ---
 
@@ -147,6 +156,10 @@ content_score     = min(4, content_flags * 2)   if content_flags > 0   else 0
 actions_score     = 5   if actions_poisoning_critical
                   = 3   if (not actions_poisoning_critical) and actions_poisoning_flags > 0
                   = 0   otherwise
+
+ai_config_score   = 5   if ai_config_poisoning_critical
+                  = 3   if (not ai_config_poisoning_critical) and ai_config_poisoning_flags > 0
+                  = 0   otherwise
 ```
 
 ### Total Score and Verdict
@@ -159,6 +172,7 @@ severity_score = age_score
                + sca_score
                + content_score
                + actions_score
+               + ai_config_score
 
 verdict(severity_score):
   "DESTRUCTIVE"   if severity_score ≥ 5
@@ -179,7 +193,9 @@ def _assess_consequence(self, files_deleted, lines_deleted, days_old, deletion_r
                          structural_severity="LOW", critical_file_deletions=0,
                          security_file_deletions=0, unverified_dependencies=0,
                          content_flags=0, actions_poisoning_flags=0,
-                         actions_poisoning_critical=False):
+                         actions_poisoning_critical=False,
+                         ai_config_poisoning_flags=0,
+                         ai_config_poisoning_critical=False):
     """
     pre: files_deleted >= 0
     pre: lines_deleted >= 0
@@ -191,14 +207,16 @@ def _assess_consequence(self, files_deleted, lines_deleted, days_old, deletion_r
     pre: unverified_dependencies >= 0
     pre: content_flags >= 0
     pre: actions_poisoning_flags >= 0
+    pre: ai_config_poisoning_flags >= 0
     post: __return__["status"] in ("SAFE", "REVIEW", "CAUTION", "DESTRUCTIVE")
     post: __return__["severity_score"] >= 0
-    post: __return__["severity_score"] <= 31
+    post: __return__["severity_score"] <= 36
     post: (__return__["status"] == "SAFE") == (__return__["severity_score"] < 1)
     post: (__return__["status"] == "DESTRUCTIVE") == (__return__["severity_score"] >= 5)
     post: not (security_file_deletions > 0) or __return__["status"] == "DESTRUCTIVE"
     post: not (structural_severity == "CRITICAL") or __return__["status"] == "DESTRUCTIVE"
     post: not actions_poisoning_critical or __return__["status"] == "DESTRUCTIVE"
+    post: not ai_config_poisoning_critical or __return__["status"] == "DESTRUCTIVE"
     """
 ```
 
@@ -217,7 +235,9 @@ method AssessConsequence(
     unverified_dependencies: nat,
     content_flags: nat,
     actions_poisoning_flags: nat,
-    actions_poisoning_critical: bool
+    actions_poisoning_critical: bool,
+    ai_config_poisoning_flags: nat,
+    ai_config_poisoning_critical: bool
 ) returns (status: string, severity_score: int)
   requires 0.0 <= deletion_ratio <= 100.0
   requires structural_severity == "LOW" || structural_severity == "MEDIUM" ||
@@ -225,19 +245,21 @@ method AssessConsequence(
   ensures status == "SAFE" || status == "REVIEW" ||
           status == "CAUTION" || status == "DESTRUCTIVE"
   ensures severity_score >= 0
-  ensures severity_score <= 31
+  ensures severity_score <= 36
   ensures (status == "SAFE")        <==> (severity_score < 1)
   ensures (status == "REVIEW")      <==> (1 <= severity_score < 3)
   ensures (status == "CAUTION")     <==> (3 <= severity_score < 5)
   ensures (status == "DESTRUCTIVE") <==> (severity_score >= 5)
-  ensures security_file_deletions > 0     ==> status == "DESTRUCTIVE"
+  ensures security_file_deletions > 0       ==> status == "DESTRUCTIVE"
   ensures structural_severity == "CRITICAL" ==> status == "DESTRUCTIVE"
-  ensures actions_poisoning_critical      ==> status == "DESTRUCTIVE"
+  ensures actions_poisoning_critical        ==> status == "DESTRUCTIVE"
+  ensures ai_config_poisoning_critical      ==> status == "DESTRUCTIVE"
   ensures files_deleted == 0 && lines_deleted == 0 && days_old == 0 &&
           deletion_ratio == 0.0 && structural_severity == "LOW" &&
           critical_file_deletions == 0 && security_file_deletions == 0 &&
           unverified_dependencies == 0 && content_flags == 0 &&
-          actions_poisoning_flags == 0 && !actions_poisoning_critical
+          actions_poisoning_flags == 0 && !actions_poisoning_critical &&
+          ai_config_poisoning_flags == 0 && !ai_config_poisoning_critical
           ==> status == "SAFE"
 ```
 
@@ -308,6 +330,6 @@ The specification in this document covers **only the consequence scoring functio
 
 3. **`deletion_ratio` source.** The ratio is computed externally (by git numstat) before being passed in. The function trusts the caller to provide a value in [0, 100]. If the caller provides 101.0, POST-5 through POST-7 may not hold — this is a caller bug.
 
-4. **`actions_poisoning_flags` and `actions_poisoning_critical` are not mutually exclusive enforced.** If `actions_poisoning_critical=True`, the actions branch adds 5 (not 3+5). The `elif` in the source code ensures this — but a verifier should confirm that the critical branch is not double-counted.
+4. **`actions_poisoning_flags`/`actions_poisoning_critical` and `ai_config_poisoning_flags`/`ai_config_poisoning_critical` are not mutually exclusive enforced.** If the respective `_critical=True`, the branch adds 5 (not 3+5). The `elif` in the source code ensures this for both pairs — a verifier should confirm neither critical branch is double-counted.
 
 5. **P1–P10 are not independent.** The existing Z3 proofs in `tests/proofs/test_z3_properties.py` were written by the same author as the source code. They validate the spec against a Z3 model of the code, not the code directly. CrossHair and Dafny provide independent verification against the actual Python source and a language-agnostic model respectively.
