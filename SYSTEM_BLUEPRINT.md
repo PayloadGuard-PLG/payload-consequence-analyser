@@ -1,6 +1,6 @@
 # PayloadGuard — System Blueprint
 
-**Version:** 1.3.0 | **Generated:** 2026-05-31
+**Version:** 1.4.0-dev (branch `claude/general-conversation-klxctt`) | **Updated:** 2026-06-11
 
 This document is the authoritative reference for the repository structure, module roles, production
 dependencies, and the end-to-end analysis pipeline. Keep it in sync with the codebase; the code
@@ -75,7 +75,7 @@ payload-consequence-analyser/
 ├── action.yml                        # GitHub Action composite wrapper (inputs, outputs, steps)
 ├── pyproject.toml                    # package: payloadguard-plg v1.0.2; entry payloadguard=analyze:main
 ├── requirements.txt                  # Python runtime + test dependencies
-├── test_analyzer.py                  # pytest suite: 273 pass, 7 skip (258 unit + 15 proof)
+├── test_analyzer.py                  # pytest suite: 274 pass (274 unit; Z3/CrossHair proof tests skip without external install)
 ├── part1.txt                         # stale scratch artifact — candidate for removal
 │
 ├── AUDIT_LOG.md                      # architectural findings + incident reports (source of truth)
@@ -98,7 +98,7 @@ payload-consequence-analyser/
 
 | Module | Role | Key symbols |
 |---|---|---|
-| `analyze.py` | Core analyser — all 9 layers, scoring, report generation, CLI | `PayloadAnalyzer`, `PayloadGuardConfig`, `DEFAULT_CONFIG`, `load_config()`, `StructuralPayloadAnalyzer`, `TemporalDriftAnalyzer`, `SemanticTransparencyAnalyzer`, `_assess_consequence()`, `_scan_added_file_content()`, `_scan_github_actions_poisoning()`, `_iter_workflow_file_diffs()`, `_scan_mutable_action_refs()`, `_load_runtime_events()`, `print_report()`, `format_markdown_report()`, `save_json_report()`, `save_markdown_report()`, `main()` |
+| `analyze.py` | Core analyser — all layers, scoring, report generation, CLI | `PayloadAnalyzer`, `PayloadGuardConfig`, `DEFAULT_CONFIG`, `load_config()`, `StructuralPayloadAnalyzer`, `TemporalDriftAnalyzer`, `SemanticTransparencyAnalyzer`, `_assess_consequence()`, `_scan_added_file_content()`, `_scan_github_actions_poisoning()`, `_scan_ai_tooling_configs()`, `_check_agent_settings_json()`, `_check_vscode_tasks()`, `_check_cursor_rule()`, `_check_package_json_scripts()`, `_check_composer_json()`, `_check_gemfile()`, `_check_binding_gyp()`, `_check_mcp_json()`, `_iter_workflow_file_diffs()`, `_scan_mutable_action_refs()`, `_load_runtime_events()`, `print_report()`, `format_markdown_report()`, `save_json_report()`, `save_markdown_report()`, `main()` |
 | `structural_parser.py` | L4 tree-sitter AST extraction for Python/JS/JSX/TS/TSX/Go/Rust/Java | `language_for_path()`, `_load_language()`, `extract_named_nodes()` |
 | `post_check_run.py` | Posts named Check Run to GitHub via App JWT (RS256) | `_safe_truncate()`, `main()` |
 | `remediate.py` | L2c auto-remediation: resolves `uses:` action tags to SHAs, opens PR | `RemediationTarget`, `WorkflowRemediator` |
@@ -254,21 +254,44 @@ PayloadAnalyzer.analyze()
   │   ├── loads allowlist.yml via _load_allowlist(repo_path)
   │   └── unverified_dependencies = packages in diff not in allowlist
   │
-  └── L2c Actions poisoning  →  _scan_github_actions_poisoning(diffs)
-      ├── iterates workflow files via _iter_workflow_file_diffs(diffs)
-      │     (yields path, content, diff for A/M files matching .github/workflows/*)
-      ├── normalizes content via _normalize_yaml_content(content)
-      │     (collapses multiline YAML block scalars to single lines)
-      └── signals detected:
-          ├── base64_payload          CRITICAL  base64+shell pipe pattern
-          ├── credential_harvest      CRITICAL  env exfil, cloud metadata, secret grep
-          ├── pull_request_target_with_write_permissions  CRITICAL  pwn-request vector
-          ├── oidc_elevation_typosquatted  CRITICAL  id-token:write + typosquatted consumer
-          │     via _is_oidc_consumer_typosquatted()  (known-bad prefix list)
-          ├── dormant_trigger_with_payload  HIGH  workflow_dispatch/schedule + shell exec
-          ├── forged_bot_author       HIGH      git identity impersonating known bot
-          ├── oidc_elevation_no_consumer  HIGH  id-token:write with no known OIDC consumer
-          └── dangerous_trigger_pull_request_target  HIGH  pull_request_target alone
+  ├── L2c Actions poisoning  →  _scan_github_actions_poisoning(diffs)
+  │   ├── iterates workflow files via _iter_workflow_file_diffs(diffs)
+  │   │     (yields path, content, diff for A/M files matching .github/workflows/*)
+  │   ├── normalizes content via _normalize_yaml_content(content)
+  │   │     (collapses multiline YAML block scalars to single lines)
+  │   └── signals detected:
+  │       ├── base64_payload          CRITICAL  base64+shell pipe pattern
+  │       ├── credential_harvest      CRITICAL  env exfil, cloud metadata, secret grep
+  │       ├── pull_request_target_with_write_permissions  CRITICAL  pwn-request vector
+  │       ├── oidc_elevation_typosquatted  CRITICAL  id-token:write + typosquatted consumer
+  │       ├── dormant_trigger_with_payload  HIGH  workflow_dispatch/schedule + shell exec
+  │       ├── forged_bot_author       HIGH      git identity impersonating known bot
+  │       ├── oidc_elevation_no_consumer  HIGH  id-token:write with no known OIDC consumer
+  │       └── dangerous_trigger_pull_request_target  HIGH  pull_request_target alone
+  │
+  └── L2d AI tooling config poisoning  →  _scan_ai_tooling_configs(diffs)
+      ├── matches paths via _AI_CONFIG_PATH_RE (9 surfaces)
+      ├── dispatches to surface-specific helper function per file
+      └── signals detected (helper → signal type → severity):
+          ├── _check_agent_settings_json   command_in_session_hook       CRITICAL
+          │     JSON hooks.*.hooks[].command matching _AI_HOOK_CRITICAL_CMDS
+          │     (.claude/settings.json, .gemini/settings.json)
+          ├── _check_vscode_tasks          command_in_folder_open_task   CRITICAL
+          │     tasks[].runOptions.runOn == "folderOpen" + critical command
+          ├── _check_package_json_scripts  lifecycle_script_hijack        CRITICAL
+          │     preinstall/postinstall/prepare script matching _AI_HOOK_CRITICAL_CMDS
+          ├── _check_composer_json         composer_post_install          CRITICAL
+          │     scripts.post-install-cmd / post-update-cmd matching _AI_HOOK_CRITICAL_CMDS
+          ├── _check_gemfile               gemfile_system_call            CRITICAL
+          │     top-level system()/exec()/backtick via _GEMFILE_EXEC_RE
+          ├── _check_binding_gyp           binding_gyp_command_substitution  CRITICAL
+          │     <!(shell chain) via _BINDING_GYP_CHAIN_RE; safe require() excluded
+          ├── _check_cursor_rule           cursor_nl_exec_imperative       HIGH
+          │     alwaysApply: true + execute imperative via _CURSOR_EXEC_IMPERATIVE_RE
+          ├── _check_mcp_json              mcp_local_server_command        HIGH
+          │     server command launching repo-local script
+          └── (all surfaces)              hidden_unicode                   HIGH
+                _HIDDEN_UNICODE_RE matches zero-width/bidi/tag-block chars
 ```
 
 ---
@@ -360,10 +383,11 @@ PayloadAnalyzer.analyze()
       files_deleted, lines_deleted, days_old, deletion_ratio,
       structural_severity, critical_file_deletions, security_file_deletions,
       unverified_dependencies, content_flags,
-      actions_poisoning_flags, actions_poisoning_critical
+      actions_poisoning_flags, actions_poisoning_critical,
+      ai_config_poisoning_flags, ai_config_poisoning_critical
   ) → {status, severity_score}
 
-  Scoring (MAX_SCORE = 31):
+  Scoring (MAX_SCORE = 36):
   ┌─────────────────────────────────────────────────────┬────────┐
   │ Signal                                              │ Points │
   ├─────────────────────────────────────────────────────┼────────┤
@@ -380,6 +404,8 @@ PayloadAnalyzer.analyze()
   │ Added file content flags (CI/shell, capped)         │  0–4   │
   │ Actions poisoning CRITICAL signal                   │    +5  │
   │ Actions poisoning HIGH signal                       │    +3  │
+  │ AI config poisoning CRITICAL signal                 │    +5  │
+  │ AI config poisoning HIGH signal                     │    +3  │
   └─────────────────────────────────────────────────────┴────────┘
 
   Verdict thresholds:
@@ -388,10 +414,11 @@ PayloadAnalyzer.analyze()
     score 3–4        → CAUTION     exit 0
     score ≥ 5        → DESTRUCTIVE exit 2
 
-  Safety-critical floor (verified by Dafny POST-8/9/10):
+  Safety-critical floor (verified by Dafny POST-8/9/10/12):
     security_file_deletions > 0     → always DESTRUCTIVE
     structural_severity == CRITICAL → always DESTRUCTIVE
     actions_poisoning_critical      → always DESTRUCTIVE
+    ai_config_poisoning_critical    → always DESTRUCTIVE
 ```
 
 ---
@@ -414,6 +441,7 @@ PayloadAnalyzer.analyze()
   ├── temporal_drift: {status, drift_score, branch_age_days, target_commits_per_day}
   ├── semantic_transparency: {result, mci_score, signals[], label}
   ├── actions_poisoning: {signals[], has_critical, has_high, mutable_action_refs[]}
+  ├── ai_config_poisoning: {flagged_configs[], total}
   ├── runtime_events[]
   ├── severity_score (int)
   ├── status (SAFE|REVIEW|CAUTION|DESTRUCTIVE)
@@ -457,7 +485,7 @@ PayloadAnalyzer.analyze()
        ↓
   Fix in: analyze.py (the relevant layer or signal)
        ↓
-  Verify: python -m pytest test_analyzer.py tests/proofs/ -q  (273 pass, 7 skip)
+  Verify: python -m pytest test_analyzer.py tests/proofs/ -q  (274 pass, 7 skip)
        ↓
   Update: AUDIT_LOG.md (RESOLVED), CLAUDE.md (remove from Open Findings), DEVLOG.md (session entry)
 ```
@@ -466,14 +494,14 @@ PayloadAnalyzer.analyze()
 
 ## Formal Verification Summary
 
-273 tests pass, 7 skipped. 11 Dafny postconditions verified across 3 files.
+274 tests pass, 7 skipped. 12 Dafny postconditions verified across 3 files.
 
 | Method | Coverage | Run command |
 |---|---|---|
 | CrossHair | C1–C12 (L3), S1–S7 (L4), T1–T7 (L5a), M1–M9 (L5b) | `cd verification && crosshair check <module> --analysis_kind PEP316 --per_condition_timeout 30` |
 | Z3 SMT | P1–P10 (L3) | `pytest tests/proofs/ -m proof -v --timeout=30` |
-| Dafny | POST-1–11a (L3), S1–S7 (L4), T1–T8 (L5a) | `dafny verify verification/dafny/assess_consequence.dfy` |
-| pytest (unit) | 258 test cases across all layers | `python -m pytest test_analyzer.py -v` |
+| Dafny | POST-1–11a + POST-12 (L3), S1–S7 (L4), T1–T8 (L5a) | `dafny verify verification/dafny/assess_consequence.dfy` |
+| pytest (unit) | 274 test cases across all layers | `python -m pytest test_analyzer.py -v` |
 | pytest (proofs) | 15 proof-wrapper tests | `python -m pytest tests/proofs/ -v` |
 
 Skipped tests (7): 4× `TestPostCheckRun` (requires App secrets), 3× `TestStructuralParserJSTS` (requires tree-sitter grammar packages).

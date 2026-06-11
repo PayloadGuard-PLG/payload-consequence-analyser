@@ -2,6 +2,58 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-06-11 — Sprint 1 complete: L2d AI tooling config poisoning detection shipped
+
+### What was built
+
+New layer L2d — `_scan_ai_tooling_configs()` — detects Miasma-class auto-execution payloads in AI coding agent and IDE configuration files added or modified in a PR diff. Committed to branch `claude/general-conversation-klxctt` as SHA `257d1f3`.
+
+### Files changed
+
+**`analyze.py`:**
+- New constants block: `_AI_CONFIG_PATH_RE` (9 config surfaces), `_AI_HOOK_CRITICAL_CMDS` (pipe-to-shell, base64 decode, eval, interpreter on `.github/` path, JS obfuscation, AES decrypt, bun install, `/proc/*/mem`), `_HIDDEN_UNICODE_RE` (zero-width/bidi/tag-block ranges), `_GEMFILE_EXEC_RE`, `_BINDING_GYP_CHAIN_RE`, `_BINDING_GYP_SAFE_RE`, `_CURSOR_EXEC_IMPERATIVE_RE`, `_PACKAGE_LIFECYCLE_KEYS`, `_COMPOSER_LIFECYCLE_KEYS`.
+- 8 module-level helper functions (one per config surface): `_check_agent_settings_json`, `_check_vscode_tasks`, `_check_cursor_rule`, `_check_package_json_scripts`, `_check_composer_json`, `_check_gemfile`, `_check_binding_gyp`, `_check_mcp_json`.
+- `PayloadAnalyzer._scan_ai_tooling_configs(diffs)` — iterates diffs, dispatches to surface-specific helper, collects signals, assigns CRITICAL or HIGH severity per file.
+- `_scan_added_file_content`: added `_AI_CONFIG_PATH_RE` exclusion to prevent double-scoring (mirrors the existing L2c workflow-file exclusion).
+- `_assess_consequence`: added `ai_config_poisoning_flags: int = 0` and `ai_config_poisoning_critical: bool = False` params. Step 9 scoring block: CRITICAL adds `critical_signal_score` (5), HIGH adds `high_signal_score` (3), both sourced from `config.actions` dict.
+- `analyze()`: L2d call after L2c, results passed to `_assess_consequence`, included in JSON report under `"ai_config_poisoning": {"flagged_configs": [...], "total": N}`.
+
+**`verification/consequence_pure.py`:**
+- `_MAX_SCORE`: 31 → 36 (new maximum: all prior signals + ai_config_critical +5).
+- `_no_signals()`: added `ai_config_poisoning_flags` and `ai_config_poisoning_critical` params.
+- `assess_consequence_pure()`: new params, new pre-condition `ai_config_poisoning_flags >= 0`, updated `post: severity_score <= 36`, new POST-12 (`ai_config_poisoning_critical → DESTRUCTIVE`), updated empty-input `_no_signals` call, added Step 9 scoring block.
+
+**`verification/dafny/assess_consequence.dfy`:**
+- `MAX_SCORE`: 31 → 36.
+- `AssessConsequence` method: new `ai_config_poisoning_flags: nat` and `ai_config_poisoning_critical: bool` params, POST-12 postcondition, ai_config scoring block, bound assertion updated `3+4+5+2+5+3+4+5` → `3+4+5+2+5+3+4+5+5`.
+
+**`tests/proofs/test_z3_properties.py`:**
+- `_MAX_OTHER_SCORE`: 19 → 24 (conservative upper bound for non-workflow signals, increased by +5 for the new ai_config_critical maximum).
+
+**`test_analyzer.py`:**
+- New imports: 8 helper functions from analyze.py.
+- New class `TestAIToolingConfigPoisoning`: 16 tests.
+  - Unit tests (helper functions): `test_claude_settings_session_hook_critical`, `test_gemini_settings_session_hook_critical`, `test_vscode_tasks_folder_open_critical`, `test_cursor_rule_alwaysapply_with_exec_imperative`, `test_binding_gyp_shell_chain_critical`.
+  - FP-anchor safe cases: `test_vscode_tasks_no_folder_open_is_safe`, `test_cursor_rule_alwaysapply_without_exec_is_safe`, `test_binding_gyp_safe_require_not_flagged`, `test_claude_settings_legitimate_hook_is_safe`.
+  - Integration tests: `test_ai_config_critical_scores_destructive`, `test_ai_config_high_scores_caution`, `test_ai_config_flag_text_in_verdict`, `test_ai_config_key_in_report`, `test_full_scan_detects_claude_session_hook`, `test_ai_config_disabled_via_config`, `test_zero_ai_config_inputs_still_safe`.
+
+### Test results
+
+```
+python -m pytest test_analyzer.py -q
+274 passed, 0 failed
+```
+
+All 16 new tests pass. All 258 pre-existing tests pass. FP-anchor cases confirm no false positives on legitimate hooks, tasks without `folderOpen`, and safe `binding.gyp` include-path expressions.
+
+### Design notes
+
+- CRITICAL signal types: `command_in_session_hook`, `command_in_folder_open_task`, `lifecycle_script_hijack`, `binding_gyp_command_substitution`, `gemfile_system_call`, `composer_post_install`. HIGH: `cursor_nl_exec_imperative`, `hidden_unicode`, `mcp_local_server_command`.
+- FP suppression rationale: `_AI_HOOK_CRITICAL_CMDS` requires a specific dangerous form (pipe-to-shell, obfuscation, interpreter on `.github/` path) — not any interpreter invocation. Legitimate hooks (`npx prettier --write .`) contain no CRITICAL pattern. `binding.gyp` safe form (`<!(node -p "require(...)")`) is excluded by `_BINDING_GYP_SAFE_RE` before `_BINDING_GYP_CHAIN_RE` is evaluated. Cursor rules require both `alwaysApply: true` AND an execute imperative.
+- `actions.enabled: false` in `payloadguard.yml` disables both L2c and L2d (same gate).
+
+---
+
 ## 2026-06-11 — Miasma research complete; L2d AI tooling config poisoning sprint planned
 
 ### Context

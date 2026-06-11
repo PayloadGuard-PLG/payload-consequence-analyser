@@ -2,54 +2,52 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch for next work:** create new branch from main (both repos)
-- **Status:** v1.3.0. Harness regression **34/34 PASS** (verified 2026-06-01). Both repos fully cleaned — 15 stale branches deleted from analyser, 8 from harness (2026-06-01). Repos are in the cleanest state to date.
-- **Next action:** Merge `claude/oidc-typosquat-detection-UBCOJ` → main (README rewrite + CLAUDE.md/HARNESS_BLUEPRINT.md updates). Then create new branch for additional verification testing. Run a fresh regression via `workflow_dispatch` to confirm clean baseline before adding cases.
+- **Active branch:** `claude/general-conversation-klxctt` (both repos)
+- **Status:** v1.3.0 on main. Branch `claude/general-conversation-klxctt` carries Sprint 1 (L2d) — not yet merged. Version will bump to v1.4.0 at merge.
+- **Sprint 1 — COMPLETE (2026-06-11, SHA 257d1f3):**
+  - L2d AI tooling config poisoning detection shipped: `_scan_ai_tooling_configs()` + 8 helper functions.
+  - Confirmed Miasma surfaces covered: `.claude/settings.json`, `.gemini/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, `package.json` lifecycle scripts, `composer.json` post-install-cmd, `Gemfile` system(), `binding.gyp` shell chain, `mcp.json`.
+  - `_assess_consequence`: `ai_config_poisoning_flags` / `ai_config_poisoning_critical` params added. CRITICAL +5 → DESTRUCTIVE floor, HIGH +3 → CAUTION.
+  - MAX_SCORE: 31 → 36.
+  - `verification/consequence_pure.py`: `_MAX_SCORE` 31→36, POST-12 contract added.
+  - `verification/dafny/assess_consequence.dfy`: `MAX_SCORE` 31→36, POST-12 postcondition added.
+  - `tests/proofs/test_z3_properties.py`: `_MAX_OTHER_SCORE` 19→24.
+  - 16 new tests in `TestAIToolingConfigPoisoning` (8 unit, 8 integration; 3 FP-anchor safe cases).
+  - Test suite: **274 pass, 0 fail** (`test_analyzer.py` alone; Z3/CrossHair require external install).
+- **Next:** Sprint 2 (L1-ext: executable magic bytes + compound large-blob detector). Then Sprint 3 (harness WS08/WS09/WS10). Then merge branch → main as v1.4.0 and run harness regression.
 - **CI:** `trigger-regression.yml` manual-only (`workflow_dispatch`). Harness `regression.yml` also manual-only.
+- **Harness regression — last verified 2026-06-01 (analyser SHA fe68338, v1.3.0) — 34/34 PASS.**
+  - Sprint 1 adds a new detection layer; re-regression required after merge to confirm no regressions on existing 34 cases.
 
 - **Regression verification — 2026-06-01 (analyser SHA fe68338, v1.3.0) — COMPLETE 34/34:**
   - PASS (34/34): T03, T04, T05, T09, T10, T11, A01, A02, A03, A04, A05, A06, A07, A09, WS01–WS07, AW01–AW05, RTA01–RTA05, RT01–RT03
   - FAIL: none
 
-- **A03/A06 (resolved 2026-06-01):** Both are documented bypass cases — SAFE is correct. A03: cross-file structural ratio ~8% < 20% threshold. A06: all metrics sub-threshold, no compound detection rule. Were returning DESTRUCTIVE only while PLI was active (2026-05-29 evaluation). Expectations corrected in harness test_cases.json and HARNESS.md (PR #72).
+- **A03/A06 (resolved 2026-06-01):** Both are documented bypass cases — SAFE is correct. A03: cross-file structural ratio ~8% < 20% threshold. A06: all metrics sub-threshold, no compound detection rule. Were returning DESTRUCTIVE only while PLI was active. Expectations corrected in harness test_cases.json and HARNESS.md (PR #72).
 
-- **Branch inventory (clean as of 2026-06-01):**
-  - Analyser: `main`, `release/v1.2.0`, `DarkVader-PLG-vericode` (R&D — keep), `claude/oidc-typosquat-detection-UBCOJ`
-  - Harness: `main`, `claude/oidc-typosquat-detection-UBCOJ`, `test/megalodon-simulation`, all 38 permanent fixture branches
-- **Vericoding Phase 4 — Dafny MERGED (PR #70, main `b44a116`):**
-  - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–11a (score bounds, verdict bijection, safety implications, empty-input guarantee). POST-12 (PLI) removed in revert.
+- **Branch inventory (as of 2026-06-11):**
+  - Analyser: `main`, `release/v1.2.0`, `DarkVader-PLG-vericode` (R&D — keep), `claude/oidc-typosquat-detection-UBCOJ`, `claude/general-conversation-klxctt` (active — Sprint 1)
+  - Harness: `main`, `claude/oidc-typosquat-detection-UBCOJ`, `test/megalodon-simulation`, `claude/general-conversation-klxctt`, all 38 permanent fixture branches
+- **Vericoding Phase 4 — Dafny (PR #70, main `b44a116`):**
+  - `verification/dafny/assess_consequence.dfy`: L3 — POST-1–11a + POST-12 (ai_config_poisoning_critical → DESTRUCTIVE, added Sprint 1). MAX_SCORE updated 31→36.
   - `verification/dafny/structural_drift.dfy`: L4 — S1–S7 dual-gate biconditional
   - `verification/dafny/temporal_drift.dfy`: L5a — T1–T8 linear drift, zero-input guarantees
-  - `.github/workflows/verify-dafny.yml`: CI — Dafny 4.9.1 release zip (bundles Z3 4.12.1); runs on PR/push touching `verification/dafny/**`
+  - `.github/workflows/verify-dafny.yml`: CI — Dafny 4.9.1; runs on PR/push touching `verification/dafny/**`
   - `verify-dafny.log` placeholder in place — replace with actual `dafny verify` output after local run
-- **Vericoding Phase 2 — CrossHair SHIPPED, all 4 layers verified (272 pass, 7 skip):**
-  - `verification/consequence_pure.py`: Layer 3 — C1–C12 contracts (verdict bijection, score bounds, safety implications). C13 (PLI) removed in revert.
-  - `verification/temporal_pure.py`: Layer 5a — T1–T7 contracts (drift_score ≥ 0, status bijection, zero-input → CURRENT)
-  - `verification/structural_pure.py`: Layer 4 — S1–S7 contracts (dual-gate: DESTRUCTIVE requires BOTH ratio > threshold AND count ≥ min)
-  - `verification/semantic_pure.py`: Layer 5b — M1–M9 contracts (mci_score ∈ [0,1], DECEPTIVE ↔ score ≥ 0.5, no-description → UNVERIFIED)
-  - `tests/proofs/test_crosshair_contracts.py`: 5 pytest tests (`@pytest.mark.crosshair`) — all pass in ~8s.
-  - `VERIFICATION.md`: public-facing doc — what is proven, how, what is not, sync requirement.
-  - `VERIFICATION_SPEC.md`: formal specification for external verifiers — pinned to `d0541f6`.
+- **Vericoding Phase 2 — CrossHair (all 4 layers verified):**
+  - `verification/consequence_pure.py`: Layer 3 — C1–C12 contracts + POST-12 implication. `_MAX_SCORE` updated 31→36 (Sprint 1). `_no_signals` and `assess_consequence_pure` updated with new params.
+  - `verification/temporal_pure.py`: Layer 5a — T1–T7
+  - `verification/structural_pure.py`: Layer 4 — S1–S7
+  - `verification/semantic_pure.py`: Layer 5b — M1–M9
+  - `tests/proofs/test_crosshair_contracts.py`: 5 pytest tests (`@pytest.mark.crosshair`)
   - Run CrossHair: `cd verification && crosshair check <module> --analysis_kind PEP316 --per_condition_timeout 30`
-  - Run via pytest: `pytest tests/proofs/ -m crosshair -v`
   - **Constraint:** Verification is external. Claude produces specs/implementation modules only.
 - **Phase 2 Stage 3b (block mode + egress allowlist) — VERIFIED on real hardware:**
-  - Smoke test PASSED: all 4 event types captured (execve, egress_connect, ptrace_attach, procmem_open).
-  - Three PC-specific fixes applied:
-    1. `agent/preflight.go`: `rlimit.RemoveMemlock()` moved before canary load — WSL2 fails canary with EPERM if memlock still in effect.
-    2. `agent/bpf/probe.c` `trace_openat`: `__builtin_memcpy` size corrected from `sizeof(e->detail)=64` to `sizeof(path)=32` — BPF verifier caught out-of-bounds read at R10+7.
-    3. `agent/bpf/probe.c` `trace_ptrace`: `PTRACE_TRACEME` (request=0) added to the filter alongside `PTRACE_ATTACH` (16) and `PTRACE_SEIZE` (0x4206).
-  - `agent/bpf/probe.c`: two BPF maps (`pg_config`, `egress_allow_ipv4`) + block logic via `bpf_send_signal(9)`. Event struct has `blocked` field.
-  - `agent/main.go`: populates maps at startup, reports `blocked` in JSON events.
-  - `agent/events.go`: `Blocked uint8` + `Pad [3]uint8` fields.
+  - `agent/bpf/probe.c`: two BPF maps (`pg_config`, `egress_allow_ipv4`) + block logic via `bpf_send_signal(9)`.
   - `scripts/pc-smoke-test.sh`: one-command build+run+verify. Run with `sudo bash scripts/pc-smoke-test.sh`.
-- **Phase 2 Stage 2 (Z3 proofs) — SHIPPED:**
-  - `tests/proofs/test_z3_properties.py`: P1–P10, all `unsat` in <0.1 s.
-  - Run: `pytest tests/proofs/ -m proof -v --timeout=30`
-- **Phase 2 Stage 1 (auto-remediation) — SHIPPED:**
-  - `remediate.py`: `WorkflowRemediator` — resolves `uses:` tags to SHAs, patches YAML, opens PR.
-  - `action.yml`: `auto-remediate` input (default `false`).
-- **Test suite:** `python -m pytest test_analyzer.py tests/proofs/ -q --timeout=30` → 273 pass, 7 skip.
+- **Phase 2 Stage 2 (Z3 proofs):** `tests/proofs/test_z3_properties.py`: P1–P10. `_MAX_OTHER_SCORE` updated 19→24 (Sprint 1).
+- **Phase 2 Stage 1 (auto-remediation):** `remediate.py` `WorkflowRemediator` operational.
+- **Test suite:** `python -m pytest test_analyzer.py -q` → **274 pass, 0 fail**. (Z3/CrossHair proof tests skip without external install.)
 - **Open findings:** INC-3 (direct push to main).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
@@ -77,6 +75,7 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 | L2 Forensic | Critical path regex matching on deleted files + added file content scan | `CRITICAL_PATH_PATTERNS`, `_scan_added_file_content()` |
 | L2b SCA | Manifest diff scanning vs `allowlist.yml` (opt-in) | `_parse_added_packages()`, `_load_allowlist()` |
 | L2c Actions Poisoning | Added/modified workflow files: base64, credential harvest, OIDC elevation, typosquatted consumers | `_scan_github_actions_poisoning()` |
+| L2d AI Config Poisoning | Added/modified AI tooling config files: SessionStart hooks, folder-open tasks, lifecycle script hijacks, binding.gyp shell chains, Cursor NL imperatives, hidden Unicode, MCP local server commands | `_scan_ai_tooling_configs()` |
 | L3 Consequence | Severity scoring → SAFE/REVIEW/CAUTION/DESTRUCTIVE | `_assess_consequence()` |
 | L4 Structural | AST diff — named class/function/constant deletions | `StructuralPayloadAnalyzer` |
 | L4b PLI | Semantic consistency — PR description vs diff, commit vs content, old vs new function | NOT ACTIVE — reverted |
@@ -108,17 +107,19 @@ DEVLOG.md           — chronological session log
 
 ### Scoring
 
-- Structural CRITICAL: +3
+- Structural CRITICAL: +5
 - Security file deleted: +5
 - Actions poisoning CRITICAL signal: +5
+- AI config poisoning CRITICAL signal: +5
 - Unverified dependency (SCA): +3 per unique package
 - Actions poisoning HIGH signal: +3
+- AI config poisoning HIGH signal: +3
 - Critical path deleted: +2
 - Added file content flags (CI triggers/shell): +2 per match, capped at +4
 - Line/file/ratio flags: up to +4 (capped, correlated dims)
 - Branch age: +1/+2/+3
 - Thresholds: score >=5 -> DESTRUCTIVE, >=3 -> CAUTION, >=1 -> REVIEW
-- MAX_SCORE: 31
+- MAX_SCORE: 36
 
 ### Config (`payloadguard.yml` in target repo, optional)
 
@@ -139,7 +140,19 @@ sca:
 
 ## Current Version
 
-`__version__ = "1.3.0"` (analyze.py:29) — PLI reverted, architecture stable at v1.2.0 level + RTA02 fix
+`__version__ = "1.3.0"` (analyze.py — to be bumped to 1.4.0 at branch merge)
+
+### v1.4.0 changes (branch `claude/general-conversation-klxctt` — Sprint 1, 2026-06-11)
+- Feature: L2d AI tooling config poisoning detection — `_scan_ai_tooling_configs()` + 8 surface-specific helper functions (`_check_agent_settings_json`, `_check_vscode_tasks`, `_check_cursor_rule`, `_check_package_json_scripts`, `_check_composer_json`, `_check_gemfile`, `_check_binding_gyp`, `_check_mcp_json`).
+- Signals: `command_in_session_hook` (CRITICAL), `command_in_folder_open_task` (CRITICAL), `lifecycle_script_hijack` (CRITICAL), `binding_gyp_command_substitution` (CRITICAL), `gemfile_system_call` (CRITICAL), `composer_post_install` (CRITICAL), `cursor_nl_exec_imperative` (HIGH), `hidden_unicode` (HIGH), `mcp_local_server_command` (HIGH).
+- `_assess_consequence`: new `ai_config_poisoning_flags` / `ai_config_poisoning_critical` params. Step 9 scoring block mirrors L2c (CRITICAL +5, HIGH +3).
+- `_scan_added_file_content`: AI config paths excluded to prevent double-scoring (mirrors L2c exclusion pattern).
+- MAX_SCORE: 31 → 36.
+- Verification: `consequence_pure.py` `_MAX_SCORE` 31→36, POST-12 contract. `assess_consequence.dfy` `MAX_SCORE` 31→36, POST-12 postcondition. `test_z3_properties.py` `_MAX_OTHER_SCORE` 19→24.
+- Tests: 16 new tests in `TestAIToolingConfigPoisoning`. Suite: 274 pass, 0 fail.
+- Docs: `research-for-updates.md` (Miasma attack research), `MIASMA_DETECTION_SPRINT.md` (4-sprint plan), DEVLOG 2026-06-11 entry.
+
+### v1.3.0 changes
 
 ### v1.3.0 changes
 - PLI L4b evaluated and reverted. PLI integration (PR #73) was implemented and regression-tested (34 stable cases, 2026-05-29). Result: 2 true positives (A03 adversarial/slow-deletion, A06 adversarial/threshold-gaming — both previously bypassing), 3 false positives (WS07 safe-clean-workflow, RT02 postinstall-curl, RTA03 prt-untrusted-checkout). Root cause: PLI's L2 LLM analysis interprets code diff summaries as blank AI responses, generating critical findings on legitimate safe PRs. Reverted from scoring path. MAX_SCORE reverted 36→31.
