@@ -9,6 +9,8 @@
   - External three-document audit asserted 16 findings. All 16 verified and confirmed; none contradicted; two revised upward in scope. 13 further findings recorded, four critical.
   - Full register, evidence and six-phase remediation sequence: **`AUDIT_VERIFICATION_20260902.md`** on this branch. Security-relevant specifics live there, not in DEVLOG or this file.
   - **Phase 0 is time-critical** and gates everything else. Nothing downstream is trustworthy until it lands.
+  - **Phase 0.2 — DONE.** Template injection removed. Every `${{ }}` interpolation is out of every `run:` body in `action.yml` and all five workflows; attacker-influenced refs now travel via `env:` and are dereferenced as quoted shell variables. `trigger-regression.yml` builds its dispatch payload with `jq` instead of string interpolation. Regression guard: `TestOwnWorkflowsNotInjectable` in `test_analyzer.py` parses this repo's own action and workflows and fails on reintroduction — verified by planting the old construct in a copy.
+  - **Phase 0.1 / 0.3 / 0.4 remain open**, and 0.4 is date-bound.
   - No source file has been modified. The repositories are exactly as audited.
 
 - **Verification status — corrected by first actual execution (2026-09-02):**
@@ -18,7 +20,7 @@
   - **Z3 — does not constrain the implementation.** The suite never references `_assess_consequence`; with that function stubbed to a constant SAFE verdict it still reports 10 passed, while the unit suite reports 32 failed. Do not treat the Z3 row as evidence about the analyser until it is rewritten.
   - **Differential (new):** `analyze.py::_assess_consequence` vs `consequence_pure.assess_consequence_pure`, exhaustive over 3,732,480 vectors — **0 divergence** in `status` and `severity_score`. But `severity_score` is a **float** in `analyze.py:1395` and an **int** in both specs; a value-only test misses it.
 
-- **Test suite:** `python -m pytest test_analyzer.py -q` → **277 passed, 4 skipped, 281 collected**. The 4 skips gate on an importable `cryptography`. Earlier records of "274 pass" understate the total; 274+7 also sums to 281, so README is defensible, but any doc stating a total of 279 or 272 is wrong.
+- **Test suite:** `python -m pytest test_analyzer.py -q` → **280 passed, 4 skipped, 284 collected** (281 + 3 added by Phase 0.2). The 4 skips gate on an importable `cryptography`. Earlier records of "274 pass" understate the total; 274+7 also sums to 281, so README is defensible, but any doc stating a total of 279 or 272 is wrong.
 - **Sprint 1 — COMPLETE (2026-06-11, SHA 257d1f3):**
   - L2d AI tooling config poisoning detection shipped: `_scan_ai_tooling_configs()` + 8 helper functions.
   - Confirmed Miasma surfaces covered: `.claude/settings.json`, `.gemini/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, `package.json` lifecycle scripts, `composer.json` post-install-cmd, `Gemfile` system(), `binding.gyp` shell chain, `mcp.json`.
@@ -65,7 +67,7 @@
 - **Open findings:** INC-3 (direct push to main).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
-- **Blockers:** Phase 0 of `AUDIT_VERIFICATION_20260902.md` is unstarted and time-critical.
+- **Blockers:** Phase 0.1 (key rotation), 0.3 (secret isolation) and 0.4 (Node 24 + release) of `AUDIT_VERIFICATION_20260902.md` remain open. 0.4 is date-bound.
 
 ---
 

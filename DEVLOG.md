@@ -2,6 +2,52 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-09-02 (later) — Phase 0.2: template injection removed from the action and workflows
+
+### Change
+
+Every `${{ }}` interpolation is now out of every `run:` body in `action.yml` and all five
+workflows. Attacker-influenced values travel through `env:` and are dereferenced as quoted shell
+variables — the pattern already used for `pr-description`, now applied consistently.
+
+- `action.yml` — `PG_BASE_REF` added to the fetch step; `PG_HEAD_REF`/`PG_BASE_REF` added to the
+  scan step; `PG_RUNTIME_MODE` added to the runtime step; three `${{ github.action_path }}` uses
+  replaced with `$GITHUB_ACTION_PATH` and two `${{ github.workspace }}` uses with
+  `$GITHUB_WORKSPACE`.
+- `.github/workflows/payloadguard.yml` — same treatment on the fetch and scan steps; the enforce
+  step reads its exit code from `env`.
+- `.github/workflows/trigger-regression.yml` — the dispatch payload is now built by `jq` from
+  environment values rather than assembled by string interpolation inside a quoted `curl -d`.
+
+This is the fix for the finding recorded as NF-1 in `AUDIT_VERIFICATION_20260902.md`. It matters
+beyond this repository because the affected construct is in `action.yml`, the composite action
+consumers run.
+
+### Regression guard
+
+`TestOwnWorkflowsNotInjectable` (3 tests) parses this repo's own action and workflow files, walks
+every step carrying a `run:`, and fails if an attacker-influenceable context appears in the body.
+Two supporting tests keep the guard honest: one asserts the pattern matches a planted offender and
+not the fixed form, the other asserts the iterator actually found steps, so the audit cannot pass
+by scanning nothing.
+
+Verified by reintroducing the pre-patch construct in a throwaway copy: the guard fails and names
+the file, the step and the expression. L2c does not detect this class in scanned diffs (NF-5), so
+until Phase 5 lands this test is the only thing preventing reintroduction here.
+
+### Scope note
+
+Phase 0.2 as specified covered `action.yml` and the self-test workflow. `trigger-regression.yml`
+and the enforce step were included because they are the same class and the same mechanical fix;
+leaving them would mean the repository still fails a template-injection lint. Lower risk in both
+cases — `workflow_dispatch` requires write access, and SHAs and usernames are not
+shell-significant.
+
+### Test results
+
+284 collected, **280 passed, 4 skipped**. The 4 skips are the `post_check_run` cases gating on an
+importable `cryptography`. No behavioural change to the analyser; `analyze.py` is untouched.
+
 ## 2026-09-02 — External audit verified; verification artefacts executed for the first time
 
 ### Scope

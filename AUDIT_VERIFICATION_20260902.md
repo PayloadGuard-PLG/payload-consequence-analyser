@@ -327,7 +327,13 @@ feature (L2d) absent from the whitepaper entirely. Full detail in NF-13 and Appe
 
 ## Part 2 — Findings the audit did not identify
 
-### NF-1 — Shell script injection in the distributed action — CRITICAL
+### NF-1 — Shell script injection in the distributed action — CRITICAL — **REMEDIATED**
+
+> **Status: fixed.** Every `${{ }}` interpolation has been removed from every `run:` body in
+> `action.yml` and all five workflows; attacker-influenced values now travel via `env:` and are
+> dereferenced as quoted shell variables. `TestOwnWorkflowsNotInjectable` in `test_analyzer.py`
+> guards against reintroduction and was verified by planting the old construct in a copy. The
+> description below is retained as the record of what was wrong.
 
 `action.yml:109-110` interpolates a pull-request-controlled value directly into a `shell: bash`
 run block:
