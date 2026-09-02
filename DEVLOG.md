@@ -2,6 +2,78 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-09-02 — External audit verified; verification artefacts executed for the first time
+
+### Scope
+
+An external party delivered a three-document audit (baseline protection, diagnostic ledger,
+first-pass verification) asserting 16 findings against analyser `a892575` and harness `214fa77`.
+This session verified those findings independently against the code and the live GitHub state at
+the same commits, then executed the test and verification suites.
+
+All 16 audit findings were confirmed; none was contradicted. Two required upward revision in scope.
+13 further findings were recorded, four of them critical.
+
+Security-relevant specifics — the affected constructs, their reachability, and the order of
+remediation — are recorded in `AUDIT_VERIFICATION_20260902.md` on branch
+`claude/audit-findings-review-6bzxtv`, and are deliberately not reproduced in this log. Remediation
+is sequenced in that document across six phases; Phase 0 is time-critical.
+
+### Verification suites — first execution on record
+
+`verify-dafny.log` had never been replaced with a real run, and no workflow runs the CrossHair or
+Z3 suites, so none of the three formal methods had been exercised before this session. All were run.
+
+| Method | Result |
+|---|---|
+| Unit (`test_analyzer.py`) | 277 passed, 4 skipped, **281 collected** |
+| Z3 (`test_z3_properties.py`) | 10 passed — but see below |
+| CrossHair | `consequence_pure`, `structural_pure`, `semantic_pure` clean; **`temporal_pure` reports 2 counterexamples** |
+| Dafny 4.9.1 | `assess_consequence` 7 verified, `structural_drift` 1, `temporal_drift` 1 — **0 errors** |
+
+### Findings from execution
+
+**Z3 suite does not constrain the implementation.** It never references `_assess_consequence`.
+With that function's body replaced by a constant-SAFE stub in a throwaway copy, the Z3 suite still
+reported 10 passed while the unit suite reported 32 failed. The proofs are insensitive to removal
+of the function they are said to verify.
+
+**Dafny does constrain its model, and is mutation-sensitive.** The same discipline applied to the
+Dafny specification: `MAX_SCORE` at 36 verifies and at 35 fails, so POST-3 is tight, not vacuous.
+Dropping the `security_file_deletions` contributor and forcing the verdict ladder to SAFE were both
+caught. The Dafny layer is sound.
+
+**CrossHair `temporal_pure` fails.** `analyze_drift_pure(0, float("inf"))` computes
+`0 * inf = nan`, which falsifies the `drift_score >= 0.0` contract and the CURRENT-band
+implication. The precondition `target_velocity >= 0.0` admits non-finite values. Not reachable from
+real commit data, but `VERIFICATION.md`'s claim that all four CrossHair layers verify is incorrect
+as written.
+
+**Spec and implementation agree on values, diverge on type.** An exhaustive differential between
+`analyze.py::_assess_consequence` and `verification.consequence_pure.assess_consequence_pure` over
+a bounded grid — 3,732,480 input vectors — found zero divergence in `status` or `severity_score`.
+That is a positive result. However `severity_score` is a float in `analyze.py:1395` and an `int` in
+both `consequence_pure.py:219` and `assess_consequence.dfy:111`. A value-only comparison misses
+this, since `36.0 == 36`.
+
+**MAX_SCORE is 36, confirmed twice independently.** Exhaustive measurement reaches exactly 36.0,
+and the Dafny bound is tight at 36. The five documentation locations stating 31 are wrong, as is
+`_MAX_OTHER_SCORE`-derived bound of 29 in the Z3 suite.
+
+### Corrections to previously recorded state
+
+- Test count: the suite collects **281**, not 274. `README.md`'s "274 pass, 7 skip" sums correctly
+  to 281 and is defensible for a reduced dependency set; claims stating a total of 279 or 272 are
+  not.
+- The "34/34 PASS, 2026-06-01" regression baseline has no corresponding CI run. `regression.yml`'s
+  most recent run is 2026-05-31 and it failed. Treat the baseline as unsubstantiated until re-run.
+- MAX_SCORE is 36 throughout; the `severity_score <= 31` invariant recorded in CLAUDE.md was stale.
+
+### Files changed
+
+`AUDIT_VERIFICATION_20260902.md` (new). No source file was modified in either repository. The
+mutation and sabotage experiments ran against throwaway copies outside the repositories.
+
 ## 2026-06-11 — Sprint 1 complete: L2d AI tooling config poisoning detection shipped
 
 ### What was built

@@ -2,8 +2,23 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Active branch:** `claude/general-conversation-klxctt` (both repos)
-- **Status:** v1.3.0 on main. Branch `claude/general-conversation-klxctt` carries Sprint 1 (L2d) — not yet merged. Version will bump to v1.4.0 at merge.
+- **Active branch:** `claude/audit-findings-review-6bzxtv` (analyser)
+- **Status:** v1.3.0 on main (`a892575`). Sprint 1 (L2d) is merged to main via PR #93. An external audit was received and independently verified on 2026-09-02; remediation has not started.
+
+- **AUDIT — 2026-09-02 (read this before any code change):**
+  - External three-document audit asserted 16 findings. All 16 verified and confirmed; none contradicted; two revised upward in scope. 13 further findings recorded, four critical.
+  - Full register, evidence and six-phase remediation sequence: **`AUDIT_VERIFICATION_20260902.md`** on this branch. Security-relevant specifics live there, not in DEVLOG or this file.
+  - **Phase 0 is time-critical** and gates everything else. Nothing downstream is trustworthy until it lands.
+  - No source file has been modified. The repositories are exactly as audited.
+
+- **Verification status — corrected by first actual execution (2026-09-02):**
+  - All three formal methods had never been run: `verify-dafny.log` is a placeholder and no workflow runs CrossHair or Z3.
+  - **Dafny 4.9.1 — sound.** All three `.dfy` files verify, 0 errors. Mutation-tested: the POST-3 bound is tight (36 verifies, 35 fails) and semantic mutations are caught.
+  - **CrossHair — 3 of 4 modules clean.** `consequence_pure`, `structural_pure`, `semantic_pure` pass. **`temporal_pure` reports 2 counterexamples**: `analyze_drift_pure(0, float("inf"))` yields `nan`, falsifying `drift_score >= 0.0` and the CURRENT-band implication. The `target_velocity >= 0.0` precondition admits non-finite values. `VERIFICATION.md`'s "all 4 layers verified" is incorrect as written.
+  - **Z3 — does not constrain the implementation.** The suite never references `_assess_consequence`; with that function stubbed to a constant SAFE verdict it still reports 10 passed, while the unit suite reports 32 failed. Do not treat the Z3 row as evidence about the analyser until it is rewritten.
+  - **Differential (new):** `analyze.py::_assess_consequence` vs `consequence_pure.assess_consequence_pure`, exhaustive over 3,732,480 vectors — **0 divergence** in `status` and `severity_score`. But `severity_score` is a **float** in `analyze.py:1395` and an **int** in both specs; a value-only test misses it.
+
+- **Test suite:** `python -m pytest test_analyzer.py -q` → **277 passed, 4 skipped, 281 collected**. The 4 skips gate on an importable `cryptography`. Earlier records of "274 pass" understate the total; 274+7 also sums to 281, so README is defensible, but any doc stating a total of 279 or 272 is wrong.
 - **Sprint 1 — COMPLETE (2026-06-11, SHA 257d1f3):**
   - L2d AI tooling config poisoning detection shipped: `_scan_ai_tooling_configs()` + 8 helper functions.
   - Confirmed Miasma surfaces covered: `.claude/settings.json`, `.gemini/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, `package.json` lifecycle scripts, `composer.json` post-install-cmd, `Gemfile` system(), `binding.gyp` shell chain, `mcp.json`.
@@ -16,7 +31,7 @@
   - Test suite: **274 pass, 0 fail** (`test_analyzer.py` alone; Z3/CrossHair require external install).
 - **Next:** Sprint 2 (L1-ext: executable magic bytes + compound large-blob detector). Then Sprint 3 (harness WS08/WS09/WS10). Then merge branch → main as v1.4.0 and run harness regression.
 - **CI:** `trigger-regression.yml` manual-only (`workflow_dispatch`). Harness `regression.yml` also manual-only.
-- **Harness regression — last verified 2026-06-01 (analyser SHA fe68338, v1.3.0) — 34/34 PASS.**
+- **Harness regression — UNSUBSTANTIATED.** The recorded "2026-06-01, 34/34 PASS" has no corresponding CI run: `regression.yml`'s most recent run is 2026-05-31 and it failed. Treat as unverified until re-run, and not before the oracle fixes in Phase 1 land (the runner currently exits 0 when every scan times out).
   - Sprint 1 adds a new detection layer; re-regression required after merge to confirm no regressions on existing 34 cases.
 
 - **Regression verification — 2026-06-01 (analyser SHA fe68338, v1.3.0) — COMPLETE 34/34:**
@@ -47,11 +62,10 @@
   - `scripts/pc-smoke-test.sh`: one-command build+run+verify. Run with `sudo bash scripts/pc-smoke-test.sh`.
 - **Phase 2 Stage 2 (Z3 proofs):** `tests/proofs/test_z3_properties.py`: P1–P10. `_MAX_OTHER_SCORE` updated 19→24 (Sprint 1).
 - **Phase 2 Stage 1 (auto-remediation):** `remediate.py` `WorkflowRemediator` operational.
-- **Test suite:** `python -m pytest test_analyzer.py -q` → **274 pass, 0 fail**. (Z3/CrossHair proof tests skip without external install.)
 - **Open findings:** INC-3 (direct push to main).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
-- **Blockers:** None.
+- **Blockers:** Phase 0 of `AUDIT_VERIFICATION_20260902.md` is unstarted and time-critical.
 
 ---
 
@@ -302,10 +316,24 @@ Tracking table: every verified layer must have an entry in `VERIFICATION.md` and
 
 | Layer | CrossHair | Z3 | Dafny |
 |---|---|---|---|
-| L3 Consequence | C1–C12 (`consequence_pure.py`) | P1–P10 (`test_z3_properties.py`) | POST-1–11a (`assess_consequence.dfy`) |
-| L4 Structural | S1–S7 (`structural_pure.py`) | — | S1–S7 (`structural_drift.dfy`) |
-| L5a Temporal | T1–T7 (`temporal_pure.py`) | — | T1–T8 (`temporal_drift.dfy`) |
-| L5b Semantic | M1–M9 (`semantic_pure.py`) | — | — |
+| L3 Consequence | `consequence_pure.py` — **clean** | `test_z3_properties.py` — **does not constrain the implementation** | `assess_consequence.dfy` — **verifies, 0 errors; bound tight** |
+| L4 Structural | `structural_pure.py` — **clean** | — | `structural_drift.dfy` — **verifies, 0 errors** |
+| L5a Temporal | `temporal_pure.py` — **2 counterexamples** | — | `temporal_drift.dfy` — **verifies, 0 errors** |
+| L5b Semantic | `semantic_pure.py` — **clean** | — | — |
+
+Status above is from actual execution on 2026-09-02, not from prior assertion. Three qualifications:
+
+1. **Z3 is not evidence about the analyser.** The suite reasons over free variables and never
+   references `_assess_consequence`; it passes unchanged against a stubbed scorer. Do not cite it
+   as verification until rewritten.
+2. **`temporal_pure` does not verify.** `analyze_drift_pure(0, float("inf"))` yields `nan`,
+   falsifying two contracts. The `target_velocity >= 0.0` precondition admits non-finite values.
+3. **CrossHair and Dafny verify reimplementations, not `analyze.py`.** A differential over
+   3,732,480 vectors found zero value divergence, so they currently agree — but nothing enforces
+   that, and `severity_score` is already a float in `analyze.py` against `int` in both specs.
+
+Contract label ranges (C1–C12 etc.) appear only in prose; no `verification/*.py` module carries
+them, so no clause is anchored to its documented identifier.
 
 When adding a new verified contract:
 1. Add the contract to the relevant `verification/*_pure.py` file
@@ -318,7 +346,7 @@ When adding a new verified contract:
 The following invariants are machine-verified and must not be violated by any code change:
 
 - **Score non-negativity:** `severity_score >= 0` at all times (POST-2 / C: severity_score >= 0)
-- **Score upper bound:** `severity_score <= 31` (MAX_SCORE = 31; POST-3)
+- **Score upper bound:** `severity_score <= 36` (MAX_SCORE = 36; POST-3). Confirmed 2026-09-02 by exhaustive measurement (max reached is exactly 36) and by Dafny bound-tightness (36 verifies, 35 fails).
 - **Verdict bijection:** Every score maps to exactly one verdict; every verdict maps to exactly one score range (POST-4–7)
 - **Safety-critical floor:** `security_file_deletions > 0` → DESTRUCTIVE; `structural_severity == CRITICAL` → DESTRUCTIVE; `actions_poisoning_critical` → DESTRUCTIVE (POST-8/9/10)
 - **Empty-input guarantee:** All-zero inputs → SAFE; no false positives on empty diffs (POST-11a)
