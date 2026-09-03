@@ -837,6 +837,18 @@ Two consequences follow.
 Fixture `AW02` (`adversarial/workflow-prt-only`) is defensible by comparison: read-only permissions
 with no untrusted checkout is a legitimate pattern. The distinction `RTA03` misses is the checkout.
 
+**Specification decision (settled by the maintainer, 2026-09-03): `RTA03` is DESTRUCTIVE.** The
+tool's job is to block that workflow. This fixes the discriminator as the untrusted checkout, not
+the declared permissions, and it is the principle every other L2c expectation should now be
+re-derived against.
+
+Verified consequence for the neighbouring fixture: `AW02` (`adversarial/workflow-prt-only`) carries
+`pull_request_target` with `actions/checkout@v4` and **no `ref:`**, so it resolves to the base
+branch and never executes pull-request-controlled code, then runs a base-branch script. It is a
+legitimate labeler pattern. `AW02` must therefore remain CAUTION while `RTA03` becomes DESTRUCTIVE,
+which makes it the false-positive anchor for the rule: any implementation that cannot separate
+these two is wrong. The suite already contains the discriminating pair.
+
 **Remediation.** Model the signature rather than the proxy: `pull_request_target` combined with a
 checkout whose `ref` resolves to a pull-request head is CRITICAL irrespective of declared
 permissions. Treat an absent `permissions:` block under that trigger as elevated, not neutral.
@@ -1106,12 +1118,21 @@ a shell pattern with a CI trigger still scores.
 2. **Branch protection evidence.** Still required from an owner-authenticated session, per BA-006's
    list. Recommend deferring the safety case until after Phase 0.1 and 0.3.
 3. **Version target.** `1.4.0` is assumed throughout Phase 2.1; confirm before the release tag.
-3b. **`RTA03` and the L2c fixture expectations.** `RTA03` records the canonical
-   `pull_request_target` compromise as correctly not blocked (NF-15). Correcting it to DESTRUCTIVE
-   changes the 34/34 baseline and is a specification decision, not a bug fix: it asserts that
-   PayloadGuard's job is to block that workflow. Every other L2c fixture should be re-derived the
-   same way, from the threat model rather than from observed output. Until that is settled, treat
-   L2c fixture PASSes as evidence that behaviour is unchanged, not that behaviour is correct.
+3b. **`RTA03` — SETTLED 2026-09-03: DESTRUCTIVE.** The discriminator is the untrusted checkout,
+   not the declared permissions. `AW02` stays CAUTION and serves as the false-positive anchor.
+   `RTA03` becomes a known-failing case until Phase 5.1 lands, which is the correct state for a
+   fixture that documents a real defect.
+3c. **Open: does the dormant-trigger discount survive?** Two fixtures rest on the reasoning
+   recorded in DEVLOG 2026-05-31 — "a `workflow_dispatch`-gated trigger requires manual activation
+   and is not autonomously dangerous", so a manual trigger caps at HIGH. `WS03`
+   (`workflow-security/dormant-trigger`) adds a `workflow_dispatch` workflow running
+   `curl -s … | bash`; `RTA04` (`rta/github-env-injection`) adds one writing `PATH`, `LD_PRELOAD`
+   and `NODE_OPTIONS=--require` into `$GITHUB_ENV` and then running `npm start` under them. Both
+   are planted backdoors that a pull request would merge into the repository; the manual trigger
+   delays activation rather than reducing the harm of merging. Both are currently CAUTION / exit 0.
+   Applying the `RTA03` principle would make them DESTRUCTIVE; retaining the discount keeps them
+   HIGH. This is one decision covering both, and it trades detection of planted backdoors against
+   false positives on legitimate manually-triggered maintenance workflows.
 4. **Z3 suite disposition.** Rewrite (2.3b, first branch) or withdraw the claim (second branch).
    This is a positioning decision as much as a technical one.
 
