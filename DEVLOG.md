@@ -2,6 +2,58 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-09-03 — NF-17: the workflow shell-exec signal is keyed on the wrong axis
+
+### Origin
+
+Deciding whether the dormant-trigger discount recorded on 2026-05-31 should survive the RTA03
+specification decision. It should not, but the question was the wrong shape: the discount is a
+symptom.
+
+### Measurement
+
+Holding the payload constant (`curl -s … | bash`) on an added workflow file and varying only the
+trigger:
+
+| Trigger | Signals | Verdict |
+|---|---|---|
+| `workflow_dispatch` | `dormant_trigger_with_payload` | CAUTION |
+| `schedule` (cron) | `dormant_trigger_with_payload` | CAUTION |
+| `push` — executes on merge | none | **SAFE** |
+| `pull_request` — executes on every PR | none | **SAFE** |
+
+L2c has no standalone signal for remote-fetch-and-execute in a workflow, only the composite
+`has_dormant_trigger and has_shell_exec`, and `_ACTIONS_DORMANT_TRIGGER` matches only
+`workflow_dispatch` and `schedule`. The payload is therefore detected *only* when the trigger is
+dormant, so the immediately-executing variant is scored lower than the delayed one. A pull request
+adding a workflow that runs `curl … | bash` on every push to main receives SAFE with no signal.
+
+The 2026-05-31 reasoning — a manual trigger is not autonomously dangerous — is sound about
+severity. The defect is that it was implemented as a detection gate rather than a severity modifier.
+
+### Decisions settled
+
+- `RTA03` → DESTRUCTIVE. Discriminator is the untrusted checkout, not the declared permissions.
+- `AW02` stays CAUTION. Verified: `pull_request_target` with `actions/checkout@v4` and no `ref:`,
+  so it resolves to the base branch and never executes PR-controlled code. It is the false-positive
+  anchor — any implementation that cannot separate it from `RTA03` is wrong.
+- `WS03` and `RTA04` → DESTRUCTIVE, as a consequence of NF-17 rather than by adjusting the discount.
+- A new fixture is required for `on: push` + `curl | bash`, which is SAFE today and is the most
+  dangerous case of the set.
+
+### Remediation shape
+
+Score the payload; let the trigger modify severity rather than admit it. Environment-hijack
+primitives (`LD_PRELOAD`, `NODE_OPTIONS=--require`, `PATH=` into `$GITHUB_ENV`) are CRITICAL
+unconditionally. Manage the false-positive cost on legitimate installers the way the codebase
+already manages OIDC consumers — an installer-host allowlist mirroring `trusted_oidc_consumers`,
+allowlisted host HIGH, anything else CRITICAL — rather than inventing a second exemption mechanism.
+
+### Files changed
+
+`AUDIT_VERIFICATION_20260902.md`, `CLAUDE.md`, `DEVLOG.md`. No source file modified.
+280 passed, 4 skipped.
+
 ## 2026-09-02 (later still) — Two L2c detection defects recorded: NF-15, NF-16
 
 ### Origin

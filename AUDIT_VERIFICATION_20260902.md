@@ -26,7 +26,7 @@ is marked as such rather than inferred.
 | Audit findings confirmed | 16 of 16 |
 | Audit findings contradicted | 0 |
 | Audit findings refined upward in severity or scope | 2 (BA-001, BA-011) |
-| Additional findings identified | 16 (NF-1 to NF-16), 5 of them critical |
+| Additional findings identified | 17 (NF-1 to NF-17), 6 of them critical |
 
 Three conclusions follow from the combined set that no individual finding states.
 
@@ -859,6 +859,57 @@ L2c fixture expectation from the threat model rather than from observed output.
 This finding outranks NF-5 in priority. NF-5 is a detector that does not exist; NF-15 is a detector
 that exists, is relied upon, and can be stepped around by writing one fewer line of YAML.
 
+### NF-17 — L2c's workflow shell-execution signal is keyed on the wrong axis — CRITICAL
+
+Raised while deciding whether the dormant-trigger discount should survive. It should not, but not
+for the reason the question assumed: the discount is a symptom, and the underlying defect is larger.
+
+L2c has no standalone signal for remote-code-fetch-and-execute in a workflow. It has only a
+composite:
+
+```python
+has_dormant_trigger = any(re.search(p, content, ...) for p in _ACTIONS_DORMANT_TRIGGER)
+has_shell_exec      = any(re.search(p, content, ...) for p in _CONTENT_SHELL_PATTERNS)
+if has_dormant_trigger and has_shell_exec:
+    signals.append({'type': 'dormant_trigger_with_payload', ...})   # HIGH
+```
+
+`_ACTIONS_DORMANT_TRIGGER` matches only `workflow_dispatch` and `schedule`. The shell payload is
+therefore scored **only when the trigger is dormant**. Measured, holding the payload
+(`curl -s … | bash`) constant and varying only the trigger on an added workflow file:
+
+| Trigger | Signals | Verdict | Exit |
+|---|---|---|---|
+| `workflow_dispatch` | `dormant_trigger_with_payload` | CAUTION | 0 |
+| `schedule` (cron) | `dormant_trigger_with_payload` | CAUTION | 0 |
+| `push` — executes on merge | **none** | **SAFE** | 0 |
+| `pull_request` — executes on every PR | **none** | **SAFE** | 0 |
+
+The ordering is inverted. Dormancy is the *mitigating* property — it delays execution and requires
+an actor with dispatch rights — yet it is the only condition under which the payload is detected at
+all. A pull request that adds a workflow running `curl … | bash` on every push to `main` receives
+**SAFE**, and PayloadGuard reports no signal whatsoever.
+
+The design note recorded in DEVLOG 2026-05-31 — "a `workflow_dispatch`-gated trigger requires manual
+activation and is not autonomously dangerous" — is sound reasoning about severity. The defect is
+that it was implemented as a detection *gate* rather than as a severity *modifier*.
+
+**Remediation.** Score the payload, and let the trigger modify the score rather than admit it:
+
+1. Add a standalone signal for remote-fetch-piped-to-shell in any added or modified workflow file,
+   independent of trigger. Environment-hijack primitives (`LD_PRELOAD`, `NODE_OPTIONS=--require`,
+   `PATH=` into `$GITHUB_ENV`) are CRITICAL unconditionally — they have no benign reading.
+2. Treat an automatically-firing trigger (`push`, `pull_request`, `pull_request_target`) as an
+   escalation over a dormant one, never the reverse.
+3. Manage the false-positive cost the way the codebase already manages it for OIDC: legitimate
+   installers do use `curl … | sh` (rustup, Deno, and similar). Mirror
+   `_is_oidc_consumer_legitimate` and its config-extended `trusted_oidc_consumers` with an
+   installer-host allowlist — allowlisted host scores HIGH, anything else CRITICAL. This reuses an
+   existing, tested pattern rather than inventing a second exemption mechanism.
+
+Consequent fixture changes: `WS03` → DESTRUCTIVE, `RTA04` → DESTRUCTIVE, and a new fixture for the
+`on: push` + `curl | bash` case, which is SAFE today and is the most dangerous of the set.
+
 ### NF-16 — The added-content scanner flags documentation prose — MEDIUM
 
 `_scan_added_file_content` scans every added file that is not a known code or binary extension.
@@ -1122,7 +1173,14 @@ a shell pattern with a CI trigger still scores.
    not the declared permissions. `AW02` stays CAUTION and serves as the false-positive anchor.
    `RTA03` becomes a known-failing case until Phase 5.1 lands, which is the correct state for a
    fixture that documents a real defect.
-3c. **Open: does the dormant-trigger discount survive?** Two fixtures rest on the reasoning
+3c. **SETTLED 2026-09-03 — the dormant-trigger discount does not survive, and the question was
+   the wrong shape.** See NF-17: the discount is a symptom of the shell payload being detected
+   *only* when the trigger is dormant, so the immediately-executing variant scores SAFE. The fix is
+   to score the payload and let the trigger modify severity, not gate detection. `WS03` and `RTA04`
+   both become DESTRUCTIVE as a consequence, plus a new fixture for the `on: push` case. Superseded
+   detail retained below for the record.
+
+3d. *(superseded by 3c)* **Does the dormant-trigger discount survive?** Two fixtures rest on the reasoning
    recorded in DEVLOG 2026-05-31 — "a `workflow_dispatch`-gated trigger requires manual activation
    and is not autonomously dangerous", so a manual trigger caps at HIGH. `WS03`
    (`workflow-security/dormant-trigger`) adds a `workflow_dispatch` workflow running
