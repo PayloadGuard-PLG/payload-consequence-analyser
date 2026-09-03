@@ -74,7 +74,7 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 | L1 Surface | File/line counts, permission changes, symlinks | `PayloadAnalyzer.analyze()` |
 | L2 Forensic | Critical path regex matching on deleted files + added file content scan | `CRITICAL_PATH_PATTERNS`, `_scan_added_file_content()` |
 | L2b SCA | Manifest diff scanning vs `allowlist.yml` (opt-in) | `_parse_added_packages()`, `_load_allowlist()` |
-| L2c Actions Poisoning | Added/modified workflow files: base64, credential harvest, OIDC elevation, typosquatted consumers | `_scan_github_actions_poisoning()` |
+| L2c Actions Poisoning | Added/modified workflow files: base64, credential harvest, remote code execution, `$GITHUB_ENV` hijack, OIDC elevation, typosquatted consumers, `pull_request_target` untrusted checkout | `_scan_github_actions_poisoning()`, `_prt_signals()`, `_remote_exec_payload()` |
 | L2d AI Config Poisoning | Added/modified AI tooling config files: SessionStart hooks, folder-open tasks, lifecycle script hijacks, binding.gyp shell chains, Cursor NL imperatives, hidden Unicode, MCP local server commands | `_scan_ai_tooling_configs()` |
 | L3 Consequence | Severity scoring → SAFE/REVIEW/CAUTION/DESTRUCTIVE | `_assess_consequence()` |
 | L4 Structural | AST diff — named class/function/constant deletions | `StructuralPayloadAnalyzer` |
@@ -119,7 +119,32 @@ DEVLOG.md           — chronological session log
 - Line/file/ratio flags: up to +4 (capped, correlated dims)
 - Branch age: +1/+2/+3
 - Thresholds: score >=5 -> DESTRUCTIVE, >=3 -> CAUTION, >=1 -> REVIEW
-- MAX_SCORE: 36
+- MAX_SCORE: 36 — unchanged by the L2c signal work; severity is bucketed CRITICAL/HIGH and both
+  buckets already existed, so no propagation to `consequence_pure.py`, `assess_consequence.dfy` or
+  the Z3 bounds was required.
+
+### Dogfooding gate
+
+`TestAnalyserScansItselfClean` runs L2c over this repository's own workflow files and its
+`action.yml`, and fails on any poisoning signal. It bypasses `_ACTIONS_WORKFLOW_PATTERN`
+deliberately: that filter does not cover a repo-root `action.yml` or
+`.github/actions/<name>/action.yml` (NF-18), so a self-scan built on it would skip the files that
+motivate it. Two supporting tests keep it honest — one asserts the collection is non-empty and
+includes `action.yml`, the other plants a payload and requires detection.
+
+NF-1 and NF-18 were both found by pointing the analyser at itself, which had never been done.
+
+### L2c severity model (NF-15 / NF-17)
+
+- `pull_request_target` severity derives from **whether the workflow checks out the pull request
+  head**, not from which permissions it declares. The permission block widens what a compromise
+  reaches; it does not determine whether one exists.
+- An absent `permissions:` block under `pull_request_target` is reported, not treated as safe — the
+  job inherits the repository default.
+- A shell payload is scored on **the payload**, independent of trigger. An automatically firing
+  trigger escalates; dormancy never gates detection.
+- False-positive control for legitimate installers uses an allowlist extensible via
+  `actions.trusted_installer_hosts`, mirroring `trusted_oidc_consumers`.
 
 ### Config (`payloadguard.yml` in target repo, optional)
 

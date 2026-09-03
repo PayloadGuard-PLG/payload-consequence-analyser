@@ -22,7 +22,7 @@ import textwrap
 import yaml
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 from dataclasses import dataclass, field
 import structural_parser
 
@@ -156,20 +156,31 @@ _ACTIONS_BASE64_PAYLOAD = [
 ]
 
 # Signal 2: Credential harvesting — env dumps, secret grep, metadata endpoints
+#
+# The bounded {0,N} quantifiers are load-bearing. These patterns are matched
+# against both the raw file and _normalize_yaml_content() output, and
+# normalisation strips every newline — so an unbounded [^\n]* stops meaning
+# "nearby on this line" and starts meaning "anywhere in the file". An ordinary
+# action.yml with an env: block, a `| sed` in an unrelated step, and the
+# substring KEY in a variable name was stitched into a single false
+# credential_harvest match, scoring CRITICAL and blocking the merge.
+#
+# The bound is a heuristic. The principled fix is to scope matching to one
+# `run:` block, which needs structural parsing rather than regex.
 _ACTIONS_CREDENTIAL_HARVEST = [
     r"curl\s+http://169\.254\.169\.254",
-    r"env\b[^\n]*\|\s*(grep|awk|sed)\b[^\n]*(KEY|TOKEN|SECRET|PASSWORD|CRED)",
-    r"printenv\b[^\n]*\|\s*(grep|awk)\b",
-    r"grep\s+-r[^\n]*(AWS_|GITHUB_TOKEN|api[_-]?key|ssh-rsa)",
+    r"env\b[^\n]{0,80}\|\s*(grep|awk|sed)\b[^\n]{0,80}(KEY|TOKEN|SECRET|PASSWORD|CRED)",
+    r"printenv\b[^\n]{0,80}\|\s*(grep|awk)\b",
+    r"grep\s+-r[^\n]{0,80}(AWS_|GITHUB_TOKEN|api[_-]?key|ssh-rsa)",
     r"cat\s+~?/\.ssh/(id_rsa|id_ed25519|authorized_keys)",
     # RTA-05 fix: curl with secret in URL (original pattern — http after secret)
-    r"curl\b[^\n]*\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]*http",
+    r"curl\b[^\n]{0,160}\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]{0,160}http",
     # RTA-05 fix: secret passed as HTTP auth header (-H / --header), works
     # even when curl spans multiple lines with backslash continuation.
     r"(?:-H|--header)\s+[\"'][^\"']*\$\{\{\s*secrets\.[A-Z_]+\s*\}\}",
     # RTA-02 fix: secret exfiltrated via GITHUB_OUTPUT or GITHUB_STEP_SUMMARY
-    r"echo\b[^\n]*\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]*>>\s*\$GITHUB_OUTPUT",
-    r"echo\b[^\n]*\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]*>>\s*\$GITHUB_STEP_SUMMARY",
+    r"echo\b[^\n]{0,80}\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]{0,80}>>\s*\$GITHUB_OUTPUT",
+    r"echo\b[^\n]{0,80}\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]{0,80}>>\s*\$GITHUB_STEP_SUMMARY",
 ]
 
 # Signal 7: GitHub environment file injection — poisons PATH, LD_PRELOAD, or
@@ -301,9 +312,82 @@ def _is_oidc_consumer_typosquatted(action_string):
 # is HIGH; combined with any write permission it is CRITICAL because an attacker
 # can both read secrets and push code/artifacts.
 _ACTIONS_DANGEROUS_TRIGGERS = re.compile(r"\bpull_request_target\b", re.IGNORECASE)
+
+# NF-15: the previous pattern named four scopes, so a pull_request_target
+# workflow asking for checks:, issues: or id-token: write — or declaring no
+# permissions at all — evaded the CRITICAL escalation. Cover every write scope
+# the permissions key accepts, plus the write-all shorthand.
 _ACTIONS_WRITE_PERMISSIONS = re.compile(
-    r"contents:\s*write|pull-requests:\s*write|packages:\s*write|deployments:\s*write",
-    re.IGNORECASE,
+    r"^\s*(?:actions|attestations|checks|contents|deployments|discussions|id-token|"
+    r"issues|packages|pages|pull-requests|repository-projects|security-events|"
+    r"statuses):\s*write\b"
+    r"|^\s*permissions:\s*write-all\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Does the workflow declare a permissions block at all? An absent block is not
+# neutral: the job inherits the repository default, which on older repositories
+# is read-write across every scope. Under a privileged trigger that is an
+# elevation, so it is reported rather than treated as the safe case.
+_ACTIONS_PERMISSIONS_BLOCK = re.compile(r"^\s*permissions:", re.IGNORECASE | re.MULTILINE)
+
+# A `ref:` value that resolves to the pull request's head — i.e. attacker
+# controlled content. Under pull_request_target this is the canonical
+# compromise: privileged context, untrusted code, executed.
+#
+# Deliberately anchored to a `ref:` key rather than matched anywhere in the
+# file. Passing a head SHA to an API call (PR_HEAD_SHA in an env: block, as
+# this project's own action does) is safe; checking it out is not.
+_ACTIONS_PR_HEAD_REF = re.compile(
+    r"^\s*ref:\s*[^\n]*?(?:"
+    r"github\.event\.pull_request\.head\.(?:sha|ref)"
+    r"|github\.head_ref"
+    r"|github\.event\.workflow_run\.head_(?:sha|branch)"
+    r"|refs/pull/[^\s'\"]+/(?:head|merge)"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# NF-17: remote code fetched and piped straight into a shell. Scored on the
+# payload, independent of trigger — the previous composite only fired when the
+# trigger was dormant, so the immediately-executing variant scored nothing.
+# The {0,140} bounds are load-bearing, for the reason recorded above the
+# credential_harvest family: these run against _normalize_yaml_content output,
+# which has no newlines, so an unbounded [^\n]* spans the whole file. Measured,
+# genuine one-liners put 30-98 characters between the fetch and the pipe (the
+# longest being a full raw.githubusercontent installer URL); a curl writing to a
+# file in one step and an unrelated `cat local.sh | bash` four steps later sit
+# 247 apart and must not be stitched into one match.
+_ACTIONS_REMOTE_EXEC = [
+    r"\b(?:curl|wget)\b[^\n]{0,140}\|\s*(?:sudo\s+)?(?:ba|z|k|da)?sh\b",
+    r"\b(?:curl|wget)\b[^\n]{0,140}\|\s*(?:sudo\s+)?python[0-9.]*\b",
+    r"\b(?:iwr|Invoke-WebRequest)\b[^\n]{0,140}\|\s*(?:iex|Invoke-Expression)\b",
+]
+
+# Hosts whose install-script-piped-to-shell is an accepted, if inelegant,
+# convention. An allowlisted host downgrades the signal to HIGH; anything else
+# is CRITICAL. Extended per-repo via payloadguard.yml actions.trusted_installer_hosts,
+# mirroring the trusted_oidc_consumers mechanism rather than inventing a second one.
+_TRUSTED_INSTALLER_HOSTS = (
+    'sh.rustup.rs',
+    'get.docker.com',
+    'install.python-poetry.org',
+    'astral.sh/uv/install.sh',
+    'astral.sh/ruff/install.sh',
+    'get.pnpm.io',
+    'bun.sh/install',
+    'deno.land/install.sh',
+    'cli.github.com',
+    'sdk.cloud.google.com',
+)
+
+# Triggers that fire without a human in the loop. Used to escalate, never to
+# gate: dormancy is a mitigating property and must not be the condition under
+# which a payload is noticed.
+_ACTIONS_AUTO_TRIGGERS = re.compile(
+    r"^\s*on:\s*\[?\s*(?:push|pull_request|pull_request_target)\b"
+    r"|^\s{2,}(?:push|pull_request|pull_request_target):",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 # ==============================================================================
@@ -1650,6 +1734,19 @@ class PayloadAnalyzer:
                    re.search(pat, normalized, re.IGNORECASE):
                     signals.append({'type': 'credential_harvest', 'pattern': pat})
 
+            # NF-17: score the payload, not the trigger. The former composite
+            # required a dormant trigger before a shell payload was noticed,
+            # which meant the same `curl … | bash` on `on: push` — executing
+            # immediately on merge — produced no signal at all. Dormancy is a
+            # mitigating property and must not gate detection.
+            rce = _remote_exec_payload(
+                content, self.config.actions.get("trusted_installer_hosts", [])
+            )
+            if rce:
+                signals.append(rce)
+
+            # Retained as context, no longer a precondition: a dormant trigger
+            # paired with any shell execution is still worth reporting.
             has_dormant_trigger = any(
                 re.search(p, content, re.IGNORECASE | re.MULTILINE)
                 for p in _ACTIONS_DORMANT_TRIGGER
@@ -1658,7 +1755,7 @@ class PayloadAnalyzer:
                 re.search(p, content, re.IGNORECASE | re.MULTILINE)
                 for p in _CONTENT_SHELL_PATTERNS
             )
-            if has_dormant_trigger and has_shell_exec:
+            if has_dormant_trigger and has_shell_exec and not rce:
                 signals.append({'type': 'dormant_trigger_with_payload', 'pattern': 'composite'})
 
             if _ACTIONS_FORGED_AUTHOR.search(content):
@@ -1709,21 +1806,10 @@ class PayloadAnalyzer:
                             'severity': 'HIGH'
                         })
 
-            # Fix 1: pull_request_target as a standalone signal.
-            # Alone → HIGH: the trigger is sometimes legitimate (e.g. posting a
-            # comment from a fork PR). Combined with any write permission → CRITICAL
-            # because the workflow can both read secrets and modify the repository.
-            if _ACTIONS_DANGEROUS_TRIGGERS.search(content):
-                if _ACTIONS_WRITE_PERMISSIONS.search(content):
-                    signals.append({
-                        'type': 'pull_request_target_with_write_permissions',
-                        'pattern': 'pull_request_target + write permissions',
-                    })
-                else:
-                    signals.append({
-                        'type': 'dangerous_trigger_pull_request_target',
-                        'pattern': 'pull_request_target trigger',
-                    })
+            # NF-15: pull_request_target severity now derives from whether the
+            # workflow checks out the pull request head, not from which
+            # permissions it declares. See _prt_signals.
+            signals.extend(_prt_signals(content))
 
             # Signal 7: GITHUB_ENV path/loader injection
             if _ACTIONS_GITHUB_ENV_INJECTION.search(content):
@@ -1738,8 +1824,19 @@ class PayloadAnalyzer:
                     'credential_harvest',
                     'pull_request_target_with_write_permissions',
                     'oidc_elevation_typosquatted',
+                    # NF-15: privileged trigger executing pull-request code.
+                    'prt_untrusted_checkout',
+                    # NF-17: PATH / LD_PRELOAD / NODE_OPTIONS written into
+                    # $GITHUB_ENV hijack execution for every later step. There is
+                    # no benign reading, so this is critical irrespective of trigger.
+                    'github_env_injection',
                 }
-                severity = 'CRITICAL' if any(s['type'] in critical_types for s in signals) else 'HIGH'
+                # workflow_remote_code_execution carries its own severity: CRITICAL
+                # for an arbitrary host, HIGH when the host is an allowlisted installer.
+                severity = 'CRITICAL' if any(
+                    s['type'] in critical_types or s.get('severity') == 'CRITICAL'
+                    for s in signals
+                ) else 'HIGH'
                 flags.append({
                     'file': path,
                     'signals': signals,
@@ -1747,6 +1844,72 @@ class PayloadAnalyzer:
                     'change_type': d.change_type,
                 })
         return flags
+
+
+def _remote_exec_payload(content: str, trusted_hosts=()) -> Optional[dict]:
+    """Return a remote-code-execution signal for a workflow, or None.
+
+    NF-17: severity comes from the payload, not the trigger. An allowlisted
+    installer host downgrades to HIGH; every other host is CRITICAL. The trigger
+    is recorded as context and escalates, but never gates detection.
+    """
+    normalized = _normalize_yaml_content(content)
+    for pat in _ACTIONS_REMOTE_EXEC:
+        for haystack in (content, normalized):
+            m = re.search(pat, haystack, re.IGNORECASE | re.MULTILINE)
+            if not m:
+                continue
+            matched = m.group(0)
+            allowlist = tuple(_TRUSTED_INSTALLER_HOSTS) + tuple(trusted_hosts)
+            trusted = any(h.lower() in matched.lower() for h in allowlist)
+            return {
+                'type': 'workflow_remote_code_execution',
+                'pattern': pat,
+                'risk': 'Workflow fetches remote code and pipes it directly to an interpreter',
+                'severity': 'HIGH' if trusted else 'CRITICAL',
+                'trusted_installer': trusted,
+                'auto_trigger': bool(_ACTIONS_AUTO_TRIGGERS.search(content)),
+            }
+    return None
+
+
+def _prt_signals(content: str) -> list:
+    """Return pull_request_target signals for a workflow.
+
+    NF-15: the discriminator is whether the workflow checks out the pull
+    request's head, not which permissions it happens to declare. A privileged
+    trigger that checks out and runs untrusted code is the compromise; the
+    permission block only widens what the compromise reaches.
+    """
+    if not _ACTIONS_DANGEROUS_TRIGGERS.search(content):
+        return []
+
+    out = []
+    if _ACTIONS_PR_HEAD_REF.search(content):
+        out.append({
+            'type': 'prt_untrusted_checkout',
+            'pattern': 'pull_request_target + checkout of the pull request head',
+            'risk': 'Privileged trigger executes pull-request-controlled code',
+            'severity': 'CRITICAL',
+        })
+    if _ACTIONS_WRITE_PERMISSIONS.search(content):
+        out.append({
+            'type': 'pull_request_target_with_write_permissions',
+            'pattern': 'pull_request_target + write permissions',
+        })
+    elif not _ACTIONS_PERMISSIONS_BLOCK.search(content):
+        out.append({
+            'type': 'prt_inherited_permissions',
+            'pattern': 'pull_request_target with no permissions block',
+            'risk': 'Job inherits the repository default token scopes, which may be read-write',
+            'severity': 'HIGH',
+        })
+    if not out:
+        out.append({
+            'type': 'dangerous_trigger_pull_request_target',
+            'pattern': 'pull_request_target trigger',
+        })
+    return out
 
 
 def _iter_workflow_file_diffs(diffs):
