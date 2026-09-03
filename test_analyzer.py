@@ -2160,6 +2160,47 @@ class TestGitHubActionsPoisoningScanning(unittest.TestCase):
         types = [s['type'] for f in flags for s in f['signals']]
         self.assertNotIn("workflow_remote_code_execution", types)
 
+    def test_remote_exec_not_stitched_across_steps(self):
+        """Regression: the payload signal must not span unrelated steps.
+
+        Normalisation removes newlines, so an unbounded wildcard let a curl
+        writing to a file in one step and an unrelated `cat local.sh | bash`
+        four steps later match as one remote-fetch-piped-to-shell — CRITICAL,
+        and blocking. Neither construct fetches and executes remote code.
+        """
+        content = (
+            "name: Setup\non:\n  push:\n\n"
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - name: Download release asset\n"
+            "        run: curl -fsSL https://example.com/tool.tar.gz -o /tmp/tool.tar.gz\n"
+            "      - name: Verify checksum\n"
+            "        run: sha256sum -c checksums.txt\n"
+            "      - name: Extract\n"
+            "        run: tar -xzf /tmp/tool.tar.gz -C /opt\n"
+            "      - name: Run the repo's own bootstrap\n"
+            "        run: cat scripts/bootstrap.sh | bash\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/setup.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        flags = a.analyze()["actions_poisoning"]["flagged_workflows"]
+        types = [s["type"] for f in flags for s in f["signals"]]
+        self.assertNotIn("workflow_remote_code_execution", types)
+
+    def test_remote_exec_still_matches_a_long_installer_url(self):
+        """The bound must not blind the signal to a realistic long URL."""
+        content = (
+            "name: Setup\non:\n  push:\n\n"
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: curl -fsSL https://raw.githubusercontent.com/"
+            "some-org/some-repo/v1.2.3/scripts/install-linux-amd64.sh | sudo bash\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/setup.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        wf = a.analyze()["actions_poisoning"]["flagged_workflows"][0]
+        self.assertIn(
+            "workflow_remote_code_execution", [s["type"] for s in wf["signals"]]
+        )
+
     def test_github_env_injection_is_now_critical(self):
         """NF-17 — PATH / LD_PRELOAD / NODE_OPTIONS hijack every later step.
 

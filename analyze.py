@@ -351,10 +351,17 @@ _ACTIONS_PR_HEAD_REF = re.compile(
 # NF-17: remote code fetched and piped straight into a shell. Scored on the
 # payload, independent of trigger — the previous composite only fired when the
 # trigger was dormant, so the immediately-executing variant scored nothing.
+# The {0,140} bounds are load-bearing, for the reason recorded above the
+# credential_harvest family: these run against _normalize_yaml_content output,
+# which has no newlines, so an unbounded [^\n]* spans the whole file. Measured,
+# genuine one-liners put 30-98 characters between the fetch and the pipe (the
+# longest being a full raw.githubusercontent installer URL); a curl writing to a
+# file in one step and an unrelated `cat local.sh | bash` four steps later sit
+# 247 apart and must not be stitched into one match.
 _ACTIONS_REMOTE_EXEC = [
-    r"\b(?:curl|wget)\b[^\n]*\|\s*(?:sudo\s+)?(?:ba|z|k|da)?sh\b",
-    r"\b(?:curl|wget)\b[^\n]*\|\s*(?:sudo\s+)?python[0-9.]*\b",
-    r"\b(?:iwr|Invoke-WebRequest)\b[^\n]*\|\s*(?:iex|Invoke-Expression)\b",
+    r"\b(?:curl|wget)\b[^\n]{0,140}\|\s*(?:sudo\s+)?(?:ba|z|k|da)?sh\b",
+    r"\b(?:curl|wget)\b[^\n]{0,140}\|\s*(?:sudo\s+)?python[0-9.]*\b",
+    r"\b(?:iwr|Invoke-WebRequest)\b[^\n]{0,140}\|\s*(?:iex|Invoke-Expression)\b",
 ]
 
 # Hosts whose install-script-piped-to-shell is an accepted, if inelegant,
