@@ -6,7 +6,7 @@
 - **Status:** v1.3.0 on main (`a892575`). Sprint 1 (L2d) is merged to main via PR #93. An external audit was received and independently verified on 2026-09-02; remediation has not started.
 
 - **AUDIT — 2026-09-02 (read this before any code change):**
-  - External three-document audit asserted 16 findings. All 16 verified and confirmed; none contradicted; two revised upward in scope. 13 further findings recorded, four critical.
+  - External three-document audit asserted 16 findings. All 16 verified and confirmed; none contradicted; two revised upward in scope. 16 further findings recorded (NF-1 to NF-16), five critical.
   - Full register, evidence and six-phase remediation sequence: **`AUDIT_VERIFICATION_20260902.md`** on this branch. Security-relevant specifics live there, not in DEVLOG or this file.
   - **Phase 0 is time-critical** and gates everything else. Nothing downstream is trustworthy until it lands.
   - **Phase 0.2 — DONE.** Template injection removed. Every `${{ }}` interpolation is out of every `run:` body in `action.yml` and all five workflows; attacker-influenced refs now travel via `env:` and are dereferenced as quoted shell variables. `trigger-regression.yml` builds its dispatch payload with `jq` instead of string interpolation. Regression guard: `TestOwnWorkflowsNotInjectable` in `test_analyzer.py` parses this repo's own action and workflows and fails on reintroduction — verified by planting the old construct in a copy.
@@ -54,7 +54,7 @@
   - `verification/dafny/temporal_drift.dfy`: L5a — T1–T8 linear drift, zero-input guarantees
   - `.github/workflows/verify-dafny.yml`: CI — Dafny 4.9.1; runs on PR/push touching `verification/dafny/**`
   - `verify-dafny.log` placeholder in place — replace with actual `dafny verify` output after local run
-- **Vericoding Phase 2 — CrossHair (all 4 layers verified):**
+- **Vericoding Phase 2 — CrossHair (3 of 4 layers clean; `temporal_pure` has 2 counterexamples — see the verification-status block above):**
   - `verification/consequence_pure.py`: Layer 3 — C1–C12 contracts + POST-12 implication. `_MAX_SCORE` updated 31→36 (Sprint 1). `_no_signals` and `assess_consequence_pure` updated with new params.
   - `verification/temporal_pure.py`: Layer 5a — T1–T7
   - `verification/structural_pure.py`: Layer 4 — S1–S7
