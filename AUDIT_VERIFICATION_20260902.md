@@ -26,7 +26,7 @@ is marked as such rather than inferred.
 | Audit findings confirmed | 16 of 16 |
 | Audit findings contradicted | 0 |
 | Audit findings refined upward in severity or scope | 2 (BA-001, BA-011) |
-| Additional findings identified | 18 (NF-1 to NF-18), 6 of them critical |
+| Additional findings identified | 19 (NF-1 to NF-19), 6 of them critical |
 
 Three conclusions follow from the combined set that no individual finding states.
 
@@ -858,6 +858,71 @@ L2c fixture expectation from the threat model rather than from observed output.
 
 This finding outranks NF-5 in priority. NF-5 is a detector that does not exist; NF-15 is a detector
 that exists, is relied upon, and can be stepped around by writing one fewer line of YAML.
+
+### NF-19 — YAML normalisation turns line-scoped patterns into file-scoped ones — HIGH
+
+`_normalize_yaml_content` strips every newline so that folded and literal block scalars match as
+one string — the mechanism that lets a multi-line `curl` with backslash continuations be detected
+(the RTA02 fix in v1.2.0). L2c matches several pattern families against **both** the raw file and
+that normalised text.
+
+The families use `[^\n]*` to express "elsewhere on this line". After normalisation there are no
+newlines, so `[^\n]*` means **anywhere in the file**. Every such pattern silently changes meaning
+between its two invocations.
+
+Measured on this repository's own `action.yml`, which normalises from 194 lines to a single
+6,125-character line. The pattern
+
+```
+env\b[^\n]*\|\s*(grep|awk|sed)\b[^\n]*(KEY|TOKEN|SECRET|PASSWORD|CRED)
+```
+
+matched by stitching three unrelated constructs together:
+
+| Fragment | Position | What it actually is |
+|---|---|---|
+| `env` | char 2674 | an ordinary `env:` block |
+| `\| sed` | char 2954 | `uname -m \| sed 's/x86_64/amd64/'`, architecture detection |
+| `KEY` | later | the substring inside `PAYLOADGUARD_PRIVATE_KEY` |
+
+`credential_harvest` is CRITICAL, so the verdict is DESTRUCTIVE and the exit code 2. **This is a
+blocking false positive**, and therefore materially worse than NF-16, which caps at CAUTION. Any
+workflow carrying an `env:` block, a pipe to `sed`/`grep`/`awk` anywhere, and a token-shaped
+identifier anywhere would be refused.
+
+Six patterns in the `credential_harvest` family carried unbounded wildcards.
+
+**How it surfaced, which is the part worth keeping.** Three findings interlocked:
+
+1. The NF-1 remediation introduced the `env:` blocks that trigger it.
+2. NF-18 means production L2c never scans a repo-root `action.yml`, so it stayed invisible.
+3. The dogfooding gate added alongside NF-15/NF-17 bypasses that path filter by design, and caught
+   it on the next merge.
+
+A defect introduced by one fix, concealed by a second, and exposed by a third — one turn after the
+third was written. It is the strongest available argument for the dogfooding gate as a standing
+control rather than a one-off.
+
+**The same defect was then found in the NF-17 patterns**, written in the same session by the same
+hand that had just diagnosed it. A benign workflow — a `curl` writing an asset to a file, and an
+unrelated `cat scripts/bootstrap.sh | bash` four steps and 247 characters later — matched as one
+remote-fetch-piped-to-shell, CRITICAL, exit 2. Diagnosing a defect is not the same as recognising
+it in your own new code.
+
+**Remediation, applied on `claude/a1-l2c-detection-nf15-nf17`.** Bound the wildcards: `{0,80}` for
+the credential family, `{0,160}` for the multi-line curl case, `{0,140}` for remote-exec. Bounds
+were chosen by measuring genuine one-liners rather than guessed — 30 characters for a short attack,
+54 for rustup, 98 for a full `raw.githubusercontent` installer URL — against a 247-character false
+stitch.
+
+Every change is paired with two tests: a benign construct that must not flag, and a genuine attack
+that must still flag. The second is not optional. A bound tight enough to remove a false positive
+can also blind the signal entirely, and a test suite that only checks the false positive would
+report success either way.
+
+The bound is a heuristic and the code says so. The principled fix is to scope matching to a single
+`run:` block, which requires structural parsing rather than regex and is a larger change than the
+remediation branch should carry. Recorded here as the follow-up.
 
 ### NF-18 — L2c does not scan composite actions at their conventional paths — HIGH
 

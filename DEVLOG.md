@@ -2,6 +2,56 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-09-03 (later still) — NF-19: normalisation makes line patterns match the whole file
+
+Found by the dogfooding gate when `main` (carrying the merged NF-1 fix) was merged into the L2c
+remediation branch. The gate went red on this repository's own `action.yml`:
+
+    action.yml: CRITICAL ['credential_harvest']
+
+### Cause
+
+`_normalize_yaml_content` strips every newline so folded and literal block scalars match as one
+string — the mechanism behind the v1.2.0 RTA02 fix. L2c matches several pattern families against
+both the raw file and that normalised text. The families use `[^\n]*` for "elsewhere on this
+line", but after normalisation there are no newlines, so it means anywhere in the file.
+
+`action.yml` normalises from 194 lines to a single 6,125-character line. The credential pattern
+stitched an `env:` block at char 2674, `uname -m | sed` at 2954, and the substring `KEY` inside
+`PAYLOADGUARD_PRIVATE_KEY`. `credential_harvest` is CRITICAL, so: DESTRUCTIVE, exit 2. A blocking
+false positive — worse than NF-16, which caps at CAUTION.
+
+### Why it had not been seen
+
+Three findings interlocked. NF-1's fix introduced the `env:` blocks that trigger it. NF-18 means
+production L2c never scans a repo-root `action.yml`, so it stayed invisible. The dogfooding gate
+added alongside NF-15/NF-17 bypasses that path filter by design, and caught it on the next merge —
+one turn after being written.
+
+### The same defect, in the same session's new code
+
+Self-review after diagnosing it found the NF-17 patterns carried it too. A benign workflow — `curl`
+writing an asset to a file, and an unrelated `cat scripts/bootstrap.sh | bash` four steps and 247
+characters later — matched as one remote-fetch-piped-to-shell. CRITICAL, exit 2.
+
+### Fix
+
+Wildcards bounded. Bounds chosen by measuring genuine one-liners rather than guessed: 30 characters
+for a short attack, 54 for rustup, 98 for a full `raw.githubusercontent` installer URL, against a
+247-character false stitch. `{0,80}` for the credential family, `{0,160}` for the multi-line curl,
+`{0,140}` for remote-exec.
+
+Each change is paired with two tests — a benign construct that must not flag, and a genuine attack
+that must still flag. A bound tight enough to remove a false positive can also blind the signal,
+and a suite that only tests the false positive passes either way.
+
+The bound is a heuristic. The principled fix is scoping matches to one `run:` block, which needs
+structural parsing; recorded as follow-up.
+
+All seven fixture decisions re-verified afterwards and unchanged.
+
+Fixed on `claude/a1-l2c-detection-nf15-nf17`. Recorded here; no source file modified on this branch.
+
 ## 2026-09-03 (later) — NF-18: L2c misses composite actions at their conventional paths
 
 Found by self-scanning the analyser's own repository after building the NF-15/NF-17 branch: its own
