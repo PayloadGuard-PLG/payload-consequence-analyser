@@ -26,7 +26,7 @@ is marked as such rather than inferred.
 | Audit findings confirmed | 16 of 16 |
 | Audit findings contradicted | 0 |
 | Audit findings refined upward in severity or scope | 2 (BA-001, BA-011) |
-| Additional findings identified | 17 (NF-1 to NF-17), 6 of them critical |
+| Additional findings identified | 18 (NF-1 to NF-18), 6 of them critical |
 
 Three conclusions follow from the combined set that no individual finding states.
 
@@ -859,6 +859,60 @@ L2c fixture expectation from the threat model rather than from observed output.
 This finding outranks NF-5 in priority. NF-5 is a detector that does not exist; NF-15 is a detector
 that exists, is relied upon, and can be stepped around by writing one fewer line of YAML.
 
+### NF-18 — L2c does not scan composite actions at their conventional paths — HIGH
+
+Found while self-scanning the analyser's own repository after the NF-15/NF-17 work: its own
+`action.yml` produced no L2c signals. The layer's path filter is
+
+```python
+_ACTIONS_WORKFLOW_PATTERN = r"(^|/)\.github/(workflows|actions)/[^/]*\.(yml|yaml)$"
+```
+
+`[^/]*` does not cross a directory separator, so the file must sit *directly* under
+`.github/workflows/` or `.github/actions/`. Measured against real paths:
+
+| Path | In L2c scope |
+|---|---|
+| `.github/workflows/ci.yml` | yes |
+| `.github/actions/action.yml` | yes |
+| `.github/actions/my-action/action.yml` | **no** |
+| `action.yml` (repo root) | **no** |
+| `ci/action.yaml` | **no** |
+
+The two misses are the two that matter. `.github/actions/<name>/action.yml` is the documented,
+conventional layout for a local composite action — a bare `.github/actions/action.yml` is the
+unusual one. And a repository publishing an action puts `action.yml` at its root, which is exactly
+what PayloadGuard itself does.
+
+A composite action is not inert YAML. Its `runs.steps[].run` bodies execute on the runner in the
+calling workflow's context, with the same privileges. It is workflow code by another name.
+
+Measured with an identical malicious composite action — remote script piped to a shell, plus
+`LD_PRELOAD` written into `$GITHUB_ENV` — placed at each location:
+
+| Path | Before NF-15/NF-17 | After NF-15/NF-17 |
+|---|---|---|
+| `.github/actions/evil.yml` | CAUTION (3.0) | **DESTRUCTIVE (5.0)** |
+| `.github/actions/evil/action.yml` | REVIEW (2.0) | REVIEW (2.0) |
+| `action.yml` | REVIEW (2.0) | REVIEW (2.0) |
+
+The unscanned paths fall through to L2's `_scan_added_file_content`, which sees `.yml` as a
+non-code file and matches only its generic shell patterns — worth +2, capped at +4, never blocking.
+
+Note the direction of travel: **fixing NF-15 and NF-17 widened this gap from one verdict band to
+three.** The same bytes are now DESTRUCTIVE or REVIEW depending only on how deep the directory is.
+Improving the detector without correcting its scope increases the payoff for placing the payload
+one directory further down.
+
+**Remediation.** Widen the path filter to any `action.yml`/`action.yaml` at any depth, plus
+`.github/workflows/**`. Scan composite `runs.steps[].run` bodies with the same signal set as
+workflow `run` bodies — they are the same execution surface. Add fixtures at all three locations
+asserting identical verdicts, since equality across paths is the property that matters, not the
+verdict of any one of them.
+
+This was found by dogfooding, and would have been found earlier by it. The analyser has never
+scanned its own `action.yml`.
+
 ### NF-17 — L2c's workflow shell-execution signal is keyed on the wrong axis — CRITICAL
 
 Raised while deciding whether the dormant-trigger discount should survive. It should not, but not
@@ -1146,6 +1200,12 @@ written the wrong way round.
 
 This precedes the other two. It is an active bypass of a detector consumers rely on, whereas 5.2 is
 a detector that has never existed and 5.3 is noise.
+
+**5.1b — NF-18, with 5.1.** Widen the L2c path filter to `action.yml`/`action.yaml` at any depth
+and scan composite `runs.steps[].run` bodies with the workflow signal set. This belongs beside
+5.1 rather than after it: 5.1 and 5.2 both increase what L2c catches inside its scope, and every
+such improvement increases the payoff for moving the payload outside that scope. Fixtures must
+assert equal verdicts across all three locations.
 
 **5.2 — NF-5.** Add an `expression_injection` signal for untrusted context expressions
 (`github.head_ref`, `github.base_ref`, `github.event.*.body`, `.title`, `.ref`, `.label`,

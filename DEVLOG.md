@@ -2,6 +2,35 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-09-03 (later) — NF-18: L2c misses composite actions at their conventional paths
+
+Found by self-scanning the analyser's own repository after building the NF-15/NF-17 branch: its own
+`action.yml` produced no L2c signals at all.
+
+`_ACTIONS_WORKFLOW_PATTERN` is `(^|/)\.github/(workflows|actions)/[^/]*\.(yml|yaml)$`. `[^/]*` does
+not cross a separator, so the file must sit directly under those directories. Missed:
+`.github/actions/<name>/action.yml`, the documented layout for a local composite action, and a
+repo-root `action.yml`, which is what any published action uses — this one included.
+
+A composite action's `runs.steps[].run` bodies execute on the runner with the calling workflow's
+privileges. It is workflow code by another name.
+
+Measured with one malicious composite action (remote script piped to shell, plus `LD_PRELOAD` into
+`$GITHUB_ENV`) placed at three locations:
+
+| Path | Before NF-15/17 | After NF-15/17 |
+|---|---|---|
+| `.github/actions/evil.yml` | CAUTION (3.0) | DESTRUCTIVE (5.0) |
+| `.github/actions/evil/action.yml` | REVIEW (2.0) | REVIEW (2.0) |
+| `action.yml` | REVIEW (2.0) | REVIEW (2.0) |
+
+The direction matters: improving the detector widened the gap from one verdict band to three. The
+same bytes now score DESTRUCTIVE or REVIEW purely by directory depth, so raising L2c's ceiling
+without correcting its scope increases the payoff for moving the payload one directory down.
+Sequenced as Phase 5.1b, alongside 5.1 rather than after it.
+
+Recorded on the audit branch only. No source file modified.
+
 ## 2026-09-03 — NF-17: the workflow shell-exec signal is keyed on the wrong axis
 
 ### Origin
