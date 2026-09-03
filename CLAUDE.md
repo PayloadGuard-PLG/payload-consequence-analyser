@@ -123,6 +123,17 @@ DEVLOG.md           — chronological session log
   buckets already existed, so no propagation to `consequence_pure.py`, `assess_consequence.dfy` or
   the Z3 bounds was required.
 
+### Dogfooding gate
+
+`TestAnalyserScansItselfClean` runs L2c over this repository's own workflow files and its
+`action.yml`, and fails on any poisoning signal. It bypasses `_ACTIONS_WORKFLOW_PATTERN`
+deliberately: that filter does not cover a repo-root `action.yml` or
+`.github/actions/<name>/action.yml` (NF-18), so a self-scan built on it would skip the files that
+motivate it. Two supporting tests keep it honest — one asserts the collection is non-empty and
+includes `action.yml`, the other plants a payload and requires detection.
+
+NF-1 and NF-18 were both found by pointing the analyser at itself, which had never been done.
+
 ### L2c severity model (NF-15 / NF-17)
 
 - `pull_request_target` severity derives from **whether the workflow checks out the pull request

