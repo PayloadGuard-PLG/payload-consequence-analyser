@@ -67,7 +67,7 @@ Adds four layers that catch sophisticated evasion: workflow-based attacks, struc
 
 | Layer | What it adds |
 |---|---|
-| **L2c — Actions Poisoning** | Workflow files scanned for base64 payloads, credential exfiltration, OIDC escalation, forged identities, dormant triggers, unsafe `pull_request_target` |
+| **L2c — Actions Poisoning** | Workflow files scanned for base64 payloads, credential exfiltration, remote-code execution, `$GITHUB_ENV` hijacking, OIDC escalation, forged identities, and `pull_request_target` checking out untrusted code |
 | **L2d — AI Config Poisoning** | AI tooling config files scanned for shell commands in session hooks, folder-open tasks, lifecycle scripts, `binding.gyp` shell chains, MCP local server commands, and Cursor NL imperatives — 9 file surfaces |
 | **L4 — Structural Drift** | AST-level diff — which named classes, functions, and constants were deleted, per file and cross-file |
 | **L5a — Temporal Drift** | Branch age × target commit velocity — quantified staleness score to catch slow-burn campaigns |
@@ -404,12 +404,29 @@ The three deletion sub-scores (files, ratio, lines) are correlated and capped to
 |---|---|---|
 | `base64_payload` | CRITICAL | Base64-encoded content piped to a shell interpreter |
 | `credential_harvest` | CRITICAL | Env var exfiltration, cloud metadata endpoint, secret grep |
-| `pull_request_target_with_write_permissions` | CRITICAL | pwn-request attack vector |
+| `prt_untrusted_checkout` | CRITICAL | `pull_request_target` that checks out the PR head — privileged context executing untrusted code |
+| `pull_request_target_with_write_permissions` | CRITICAL | `pull_request_target` granting any write scope |
+| `workflow_remote_code_execution` | CRITICAL | Remote script fetched and piped to an interpreter. HIGH when the host is an allowlisted installer |
+| `github_env_injection` | CRITICAL | `PATH`, `LD_PRELOAD` or `NODE_OPTIONS` written to `$GITHUB_ENV`, hijacking every later step |
 | `oidc_elevation_typosquatted` | CRITICAL | OIDC consumer name typosquatted against a known-safe prefix |
-| `dormant_trigger_with_payload` | HIGH | `workflow_dispatch` or `schedule` + shell execution — hidden activation |
+| `prt_inherited_permissions` | HIGH | `pull_request_target` with no `permissions:` block — inherits the repository default |
+| `dormant_trigger_with_payload` | HIGH | `workflow_dispatch` or `schedule` + shell execution, where no remote-execution payload was found |
 | `forged_bot_author` | HIGH | Git identity configured to impersonate a known bot |
 | `oidc_elevation_no_consumer` | HIGH | `id-token: write` with no recognised OIDC consumer |
-| `dangerous_trigger_pull_request_target` | HIGH | `pull_request_target` without write permissions |
+| `dangerous_trigger_pull_request_target` | HIGH | `pull_request_target` with read-only permissions and no untrusted checkout |
+
+Severity for `pull_request_target` derives from whether the workflow checks out the pull request's
+head, not from which permissions it declares. Severity for a shell payload derives from the payload
+itself, not from the trigger — an automatically firing trigger escalates, it never gates detection.
+
+`workflow_remote_code_execution` allows an installer allowlist (rustup, Docker, Poetry, uv, pnpm,
+Bun, Deno and similar), extensible per repository:
+
+```yaml
+actions:
+  trusted_installer_hosts:
+    - install.internal.example
+```
 
 ### AI Config Poisoning Signals (L2d)
 

