@@ -3013,5 +3013,97 @@ class TestAIToolingConfigPoisoning(unittest.TestCase):
         self.assertEqual(v["severity_score"], 0)
 
 
+# ==============================================================================
+# Self-audit: PayloadGuard's own workflows must not be template-injectable
+# ==============================================================================
+
+# Contexts an outside party can influence on a pull_request event. A branch name
+# or PR title reaching a `run:` body is executed as shell, because Actions
+# substitutes ${{ }} before bash parses the script. Values must travel through
+# `env:` and be dereferenced as quoted shell variables instead.
+_UNTRUSTED_CONTEXT_RE = re.compile(
+    r"\$\{\{[^}]*\b(?:"
+    r"github\.head_ref|github\.base_ref|github\.ref|github\.ref_name|"
+    r"github\.actor|github\.triggering_actor|"
+    r"github\.event\.(?:pull_request|issue|comment|review|head_commit|workflow_run)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+_ACTION_FILES = ("action.yml",)
+_WORKFLOW_DIR = ".github/workflows"
+
+
+def _iter_run_bodies():
+    """Yield (path, step_name, run_body) for every step with a `run:` in this repo."""
+    import glob
+
+    import yaml
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    paths = [os.path.join(root, f) for f in _ACTION_FILES]
+    paths += sorted(glob.glob(os.path.join(root, _WORKFLOW_DIR, "*.yml")))
+    paths += sorted(glob.glob(os.path.join(root, _WORKFLOW_DIR, "*.yaml")))
+
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        with open(path, encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh) or {}
+
+        step_groups = []
+        runs = doc.get("runs")
+        if isinstance(runs, dict) and isinstance(runs.get("steps"), list):
+            step_groups.append(runs["steps"])
+        jobs = doc.get("jobs")
+        if isinstance(jobs, dict):
+            for job in jobs.values():
+                if isinstance(job, dict) and isinstance(job.get("steps"), list):
+                    step_groups.append(job["steps"])
+
+        rel = os.path.relpath(path, root)
+        for steps in step_groups:
+            for step in steps:
+                if isinstance(step, dict) and isinstance(step.get("run"), str):
+                    yield rel, step.get("name", "<unnamed>"), step["run"]
+
+
+class TestOwnWorkflowsNotInjectable(unittest.TestCase):
+    """Regression guard for the template-injection class in this repo's own CI.
+
+    PayloadGuard's L2c layer does not yet detect this class in the diffs it
+    scans, so this test is the only thing preventing reintroduction here.
+    """
+
+    def test_no_untrusted_context_in_any_run_body(self):
+        offenders = [
+            f"{path} :: {name} :: {m.group(0)}"
+            for path, name, body in _iter_run_bodies()
+            for m in [_UNTRUSTED_CONTEXT_RE.search(body)]
+            if m
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            "Attacker-influenced context interpolated into a run: body. Move the "
+            "value into the step's env: block and dereference it as a quoted "
+            "shell variable, e.g. PG_HEAD_REF: ${{ github.head_ref }} then "
+            '"$PG_HEAD_REF". Offenders:\n  ' + "\n  ".join(offenders),
+        )
+
+    def test_scanner_finds_a_planted_offender(self):
+        """The guard above is only meaningful if the pattern actually matches."""
+        planted = 'python analyze.py . "${{ github.head_ref }}" main'
+        self.assertIsNotNone(_UNTRUSTED_CONTEXT_RE.search(planted))
+        safe = 'python analyze.py . "$PG_HEAD_REF" "$PG_BASE_REF"'
+        self.assertIsNone(_UNTRUSTED_CONTEXT_RE.search(safe))
+
+    def test_run_body_iterator_finds_steps(self):
+        """Guard against the audit silently passing because nothing was scanned."""
+        bodies = list(_iter_run_bodies())
+        self.assertGreater(len(bodies), 5)
+        self.assertIn("action.yml", {path for path, _, _ in bodies})
+
+
 if __name__ == "__main__":
     unittest.main()

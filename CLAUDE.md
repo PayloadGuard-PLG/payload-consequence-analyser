@@ -236,6 +236,29 @@ The agent preflight canary will warn and exit 0 gracefully if tracepoints are un
 
 ---
 
+## CI trust boundary
+
+Untrusted GitHub context values must never reach a `run:` body. Actions substitutes `${{ }}` before
+bash parses the script, so a branch name or PR title containing shell metacharacters is executed as
+code, and quoting the expression does not help. Pass the value through the step's `env:` block and
+dereference it as a quoted shell variable:
+
+```yaml
+- name: Example
+  env:
+    PG_HEAD_REF: ${{ github.head_ref }}
+  run: some-command "$PG_HEAD_REF"
+```
+
+This applies to `github.head_ref`, `github.base_ref`, `github.ref`, `github.actor` and any
+`github.event.*` field, in `action.yml` and in every workflow. `$GITHUB_ACTION_PATH` and
+`$GITHUB_WORKSPACE` are available as environment variables and are preferred over interpolating
+their expression equivalents.
+
+`TestOwnWorkflowsNotInjectable` parses this repository's own action and workflow files and fails on
+reintroduction. It is a project invariant, not a general proof: `actionlint` and `zizmor` are the
+broad checks and belong in CI.
+
 ## Development Rules
 
 - **Assumption is the mother of all fuck ups. Don't guess, verify or ask. Don't make decisions that require user input. If you hit a 404 when pushing, stop — it is likely PayloadGuard.org blocking the push. Verification of code quality, determinism, and honest capability is everything; otherwise the work means nothing.**
