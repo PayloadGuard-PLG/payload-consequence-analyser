@@ -2,6 +2,62 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-09-02 (later still) — Two L2c detection defects recorded: NF-15, NF-16
+
+### Origin
+
+A pre-branch question — would the planned trusted-boundary workflow be flagged by the analyser it
+protects? It would be, at CAUTION, which is non-blocking and therefore not an obstacle. Establishing
+that surfaced two defects in the layers involved. Both were measured by running the real scanners
+over constructed fixtures, not by reading the patterns.
+
+### NF-15 — `pull_request_target` detection is bypassable (CRITICAL)
+
+L2c derives `pull_request_target` severity from the declared permission block, which is a proxy.
+The attack signature — privileged trigger, checkout of the pull request head, execution of it — is
+not modelled. Holding the workflow constant and varying only the permission line:
+
+| Declared permission | Verdict | Exit |
+|---|---|---|
+| `contents: write` | DESTRUCTIVE | 2 |
+| `checks:` / `issues:` / `id-token: write` | CAUTION | 0 |
+| no `permissions:` block | CAUTION | 0 |
+
+Omitting the block is not the safe case: the job inherits the repository default, which is often
+read-write. The configuration that evades detection is frequently the more dangerous one.
+
+Harness fixture `RTA03` (`rta/prt-untrusted-checkout`, red-team category) carries exactly this
+workflow — `on: pull_request_target`, checkout of `head.sha`, then `npm test` and `npm run lint`,
+which execute the pull request's own package scripts — and records `expected_verdict: CAUTION`,
+`expected_exit_code: 0`. It is listed PASS in the 34/34 baseline. The suite has encoded the bypass
+as the specification.
+
+The methodological point matters more than the single fixture: that expectation was derived from
+observed behaviour rather than from a threat model, which converts any detector gap into a
+specification. Same failure mode as NF-11.
+
+### NF-16 — Added-content scanner flags documentation prose (MEDIUM)
+
+`_scan_added_file_content` scans `.md` and matches shell patterns anywhere in the file with no
+notion of instruction versus description. Measured: a `SECURITY.md` quoting an advisory and an
+ordinary `CONTRIBUTING.md` (`rm -rf dist/`, `sudo apt-get install`) each score CAUTION (4.0) from
+`content_flags` alone. Capped at +4, so it cannot block on its own; the cost is noise on exactly
+the governance files still to be added. Observed live on the diagnostic pull request, where this
+register scored +2 on the `chmod +x` inside a quoted code block.
+
+### Consequences for the remediation order
+
+Phase 5 is now three ordered items rather than one, with NF-15 first: it is an active bypass of a
+detector consumers rely on, where NF-5 is a detector that has never existed and NF-16 is noise.
+All three change scoring and share a commit boundary with the propagation requirement.
+
+Correcting `RTA03` changes the 34/34 baseline and is a specification decision, not a bug fix. It is
+recorded as an open maintainer decision.
+
+### Files changed
+
+`AUDIT_VERIFICATION_20260902.md` only. No source file modified; 280 passed, 4 skipped.
+
 ## 2026-09-02 (later) — Phase 0.2: template injection removed from the action and workflows
 
 ### Change

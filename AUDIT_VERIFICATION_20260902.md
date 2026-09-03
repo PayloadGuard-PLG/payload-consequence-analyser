@@ -26,7 +26,7 @@ is marked as such rather than inferred.
 | Audit findings confirmed | 16 of 16 |
 | Audit findings contradicted | 0 |
 | Audit findings refined upward in severity or scope | 2 (BA-001, BA-011) |
-| Additional findings identified | 14 (NF-1 to NF-14), 4 of them critical |
+| Additional findings identified | 16 (NF-1 to NF-16), 5 of them critical |
 
 Three conclusions follow from the combined set that no individual finding states.
 
@@ -770,6 +770,119 @@ and `README.md` match it exactly. The drift is concentrated in the analyser's pr
 
 ---
 
+### NF-15 — The `pull_request_target` detector is bypassable, and the harness ratifies the bypass — CRITICAL
+
+L2c decides `pull_request_target` severity from the workflow's declared permissions:
+
+```python
+if _ACTIONS_DANGEROUS_TRIGGERS.search(content):
+    if _ACTIONS_WRITE_PERMISSIONS.search(content):
+        signals.append({'type': 'pull_request_target_with_write_permissions', ...})  # CRITICAL
+    else:
+        signals.append({'type': 'dangerous_trigger_pull_request_target', ...})        # HIGH
+```
+
+`_ACTIONS_WRITE_PERMISSIONS` matches exactly four scopes: `contents`, `pull-requests`, `packages`
+and `deployments`. The permission block is being used as a proxy for the attack. The actual attack
+signature — a privileged trigger that checks out the pull request's head and then executes it — is
+not modelled anywhere.
+
+Measured against one workflow, varying only the permission line. Every row checks out
+`${{ github.event.pull_request.head.sha }}` and then runs `npm install && npm run build`:
+
+| Declared permission | Severity | Verdict | Exit |
+|---|---|---|---|
+| `contents: write` | CRITICAL | DESTRUCTIVE | 2 |
+| `checks: write` | HIGH | CAUTION | **0** |
+| `issues: write` | HIGH | CAUTION | **0** |
+| `id-token: write` | HIGH | CAUTION | **0** |
+| *no `permissions:` block at all* | HIGH | CAUTION | **0** |
+
+The last row is the decisive one. Omitting the block does not mean the job is unprivileged — it
+means the job inherits the repository default, which on repositories created before the default
+changed is read-write across every scope. So the configuration that evades detection is also,
+frequently, the more dangerous one, and it is the configuration an attacker reaches for by writing
+less rather than more.
+
+**The harness has encoded this as correct behaviour.** Fixture `RTA03`
+(`rta/prt-untrusted-checkout`), in the `red-team` category, carries exactly this workflow:
+
+```yaml
+on: pull_request_target
+jobs:
+  check:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: npm test
+      - run: npm run lint
+```
+
+`npm test` and `npm run lint` execute scripts from the pull request's own `package.json`. The
+recorded expectation is `expected_verdict: CAUTION`, `expected_exit_code: 0` — do not block — with
+the stated rationale "No explicit write permissions declared → HIGH signal only (+3)". `RTA03` is
+listed as PASS in the 34/34 baseline.
+
+Two consequences follow.
+
+1. **The product does not block the canonical `pull_request_target` compromise.** A consumer
+   relying on PayloadGuard to catch a poisoned workflow in a pull request gets `CAUTION` and exit 0.
+2. **The expectation was derived from observed behaviour rather than from a threat model.** A
+   fixture written to match what the analyser currently does converts any detector gap into a
+   specification. This is the same failure mode as NF-11 — a check that passes for reasons
+   unrelated to the property it is named for — and it is more consequential here, because the
+   red-team suite is the artefact that is supposed to model an adversary.
+
+Fixture `AW02` (`adversarial/workflow-prt-only`) is defensible by comparison: read-only permissions
+with no untrusted checkout is a legitimate pattern. The distinction `RTA03` misses is the checkout.
+
+**Remediation.** Model the signature rather than the proxy: `pull_request_target` combined with a
+checkout whose `ref` resolves to a pull-request head is CRITICAL irrespective of declared
+permissions. Treat an absent `permissions:` block under that trigger as elevated, not neutral.
+Broaden `_ACTIONS_WRITE_PERMISSIONS` to the remaining write scopes as defence in depth, but not as
+the primary control. Then correct `RTA03`'s expectation to DESTRUCTIVE / exit 2 and re-derive every
+L2c fixture expectation from the threat model rather than from observed output.
+
+This finding outranks NF-5 in priority. NF-5 is a detector that does not exist; NF-15 is a detector
+that exists, is relied upon, and can be stepped around by writing one fewer line of YAML.
+
+### NF-16 — The added-content scanner flags documentation prose — MEDIUM
+
+`_scan_added_file_content` scans every added file that is not a known code or binary extension.
+`.md` is neither, so Markdown is scanned, and `_CONTENT_SHELL_PATTERNS` matches
+`sudo`, `setfacl`, `chmod`, `rm -[rf]`, and pipe-to-shell anywhere in the file, with no notion of
+whether the text is an instruction or a description. Each match scores +2, capped at +4.
+
+Measured on realistic governance files:
+
+| Added file | Matched | Verdict |
+|---|---|---|
+| `SECURITY.md` quoting a past advisory | `sudo`, `chmod` | **CAUTION (4.0)** |
+| `CONTRIBUTING.md` with ordinary setup steps | `sudo`, `rm -rf` | **CAUTION (4.0)** |
+| A runbook mentioning `chmod 600` once | `chmod` | REVIEW (2.0) |
+| `CHANGELOG.md` with no shell text | — | clean |
+
+A stock `CONTRIBUTING.md` containing `rm -rf dist/` and `sudo apt-get install libssl-dev` scores
+CAUTION. This document trips it too, at line 547, on the `chmod +x` inside the code block quoted to
+*describe* NF-9 — observed live on the diagnostic pull request, not merely predicted.
+
+The cap means this dimension cannot reach DESTRUCTIVE alone, so the practical cost is noise rather
+than a false block. Noise is still the relevant harm: a tool that flags every new governance
+document teaches its users to dismiss its output, which erodes the signal that the accurate layers
+provide.
+
+The scanner only inspects **added** files, so editing an existing document is clean. The exposure is
+therefore concentrated exactly on the governance work that remains outstanding: adding `SECURITY.md`
+and `CONTRIBUTING.md` is the change that will trip it.
+
+**Remediation.** The discriminator the scanner lacks is intent. Its origin (INC-1/INC-4) was a
+non-code file with *runnable* intent — something CI actually consumes. A fenced block inside a
+Markdown advisory has documentary intent and is never executed. Gate the +2 on co-occurrence: a
+shell pattern **and** a CI-trigger string, or the file residing in a path CI reads. Keep an
+unaccompanied prose match as an advisory flag carrying no score, following the precedent already
+set by the McCabe complexity advisory, which reports without scoring.
+
 ## Part 3 — Remediation specifications
 
 Ordering is forced by two constraints: the Node 20 removal date, and the fact that no harness
@@ -954,15 +1067,34 @@ the branch and ruleset design is settled so required checks are deliberate and n
 Add **`zizmor`** or `actionlint` to CI: `zizmor` detects the NF-1 template-injection class directly
 and would have caught it. Closes BA-014.
 
-### Phase 5 — Close the detection gap NF-1 exposed
+### Phase 5 — Close the L2c detection defects
 
-Add an L2c signal `expression_injection`: untrusted context expressions — `github.head_ref`,
-`github.base_ref`, `github.event.*.body`, `.title`, `.ref`, `.label`, `github.actor` — appearing
-inside a `run:` block, scored HIGH. This raises `MAX_SCORE` and therefore requires propagation in
-the same commit to `verification/consequence_pure.py` (`_MAX_SCORE`),
-`verification/dafny/assess_consequence.dfy` (`MAX_SCORE`) and `tests/proofs/test_z3_properties.py`,
-per the CLAUDE.md scoring rule — and, after 2.3a, the refinement test will enforce it. Add harness
-fixtures: a safe case with the expression in `env:`, a destructive case with it in `run:`.
+Three items, sharing a commit boundary because all three change scoring and therefore require the
+propagation in 2.3d to `consequence_pure.py`, `assess_consequence.dfy` and the Z3 bounds. After
+2.3a the refinement test enforces that propagation rather than the convention doing so.
+
+**5.1 — NF-15 first.** Model the `pull_request_target` attack signature rather than the permissions
+proxy: the trigger combined with a checkout resolving to a pull-request head is CRITICAL regardless
+of declared permissions, and an absent `permissions:` block under that trigger is elevated rather
+than neutral. Broaden `_ACTIONS_WRITE_PERMISSIONS` to the remaining write scopes as defence in
+depth. Then correct `RTA03` to DESTRUCTIVE / exit 2, and re-derive every L2c fixture expectation
+from the threat model rather than from observed output — `RTA03` is evidence that at least one was
+written the wrong way round.
+
+This precedes the other two. It is an active bypass of a detector consumers rely on, whereas 5.2 is
+a detector that has never existed and 5.3 is noise.
+
+**5.2 — NF-5.** Add an `expression_injection` signal for untrusted context expressions
+(`github.head_ref`, `github.base_ref`, `github.event.*.body`, `.title`, `.ref`, `.label`,
+`github.actor`) appearing inside a `run:` body, scored HIGH. Harness fixtures: a safe case with the
+expression in `env:`, a destructive case with it in `run:`. Note the fixture values must be
+constrained per context — refnames cannot contain spaces or newlines, pull request titles can — or
+the tests will assert on unreachable inputs.
+
+**5.3 — NF-16.** Gate the `_scan_added_file_content` shell-pattern score on co-occurrence with a
+CI-trigger string or a CI-consumed path; keep an unaccompanied prose match as a zero-score advisory.
+Fixtures: a `SECURITY.md` quoting shell in a fenced block scores nothing; a non-code file combining
+a shell pattern with a CI trigger still scores.
 
 ---
 
@@ -974,6 +1106,12 @@ fixtures: a safe case with the expression in `env:`, a destructive case with it 
 2. **Branch protection evidence.** Still required from an owner-authenticated session, per BA-006's
    list. Recommend deferring the safety case until after Phase 0.1 and 0.3.
 3. **Version target.** `1.4.0` is assumed throughout Phase 2.1; confirm before the release tag.
+3b. **`RTA03` and the L2c fixture expectations.** `RTA03` records the canonical
+   `pull_request_target` compromise as correctly not blocked (NF-15). Correcting it to DESTRUCTIVE
+   changes the 34/34 baseline and is a specification decision, not a bug fix: it asserts that
+   PayloadGuard's job is to block that workflow. Every other L2c fixture should be re-derived the
+   same way, from the threat model rather than from observed output. Until that is settled, treat
+   L2c fixture PASSes as evidence that behaviour is unchanged, not that behaviour is correct.
 4. **Z3 suite disposition.** Rewrite (2.3b, first branch) or withdraw the claim (second branch).
    This is a positioning decision as much as a technical one.
 
@@ -1155,6 +1293,23 @@ The value agreement is a genuine positive result and NF-12 is qualified accordin
 is a structural risk, not a present defect in the scoring values. The type divergence is a present
 defect, and one that a naive refinement test would miss, since `36.0 == 36`.
 
+### Experiment 4 — Does L2c detect the attacks it names? (NF-15, NF-16)
+
+Prompted by a question about whether the remediation plan's trusted-boundary design would be
+flagged by the analyser it protects. It would be, at CAUTION — non-blocking, so not an obstacle.
+Establishing that surfaced two defects, both measured by running the real scanners over
+constructed fixtures rather than by reading the patterns:
+
+| Probe | Result |
+|---|---|
+| `pull_request_target` + untrusted checkout, varying only the permission line | CRITICAL with `contents: write`; **CAUTION with `checks:`/`issues:`/`id-token: write` or no permissions block** |
+| Harness fixture `RTA03`, which is that exact workflow | recorded `expected_verdict: CAUTION`, `expected_exit_code: 0`, PASS in the baseline |
+| `SECURITY.md` / `CONTRIBUTING.md` with ordinary shell text | CAUTION (4.0) from `content_flags` alone |
+| `CHANGELOG.md` with no shell text | clean |
+
+The `RTA03` result is the significant one: the red-team suite records the canonical
+`pull_request_target` compromise as correctly not blocked. See NF-15.
+
 ## Method and limitations
 
 Verified directly: all file and line citations, by reading the files at the audited commits; the
@@ -1170,7 +1325,9 @@ specifically because GitHub disabled its schedule.
 Bounds on the experiments. Experiment 1 tests one sabotage — total removal of the function.
 It establishes that the proofs do not detect that, which is sufficient for the claim made, but it
 does not enumerate every mutation. Experiment 2 tests four mutations, not the full mutation space.
-Experiment 3 is exhaustive over the chosen grid, not over the unbounded integer domain; the grid
+Experiment 4 constructs fixtures rather than enumerating the space of evasions; it establishes
+that specific bypasses work, not that no others do. Experiment 3 is exhaustive over the chosen
+grid, not over the unbounded integer domain; the grid
 straddles every documented threshold and cap, so it exercises every branch, but a defect reachable
 only at a value outside it would not appear. CrossHair explores symbolically under a per-condition
 timeout, so a clean result bounds rather than eliminates the possibility of a counterexample.

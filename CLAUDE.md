@@ -11,6 +11,9 @@
   - **Phase 0 is time-critical** and gates everything else. Nothing downstream is trustworthy until it lands.
   - **Phase 0.2 — DONE.** Template injection removed. Every `${{ }}` interpolation is out of every `run:` body in `action.yml` and all five workflows; attacker-influenced refs now travel via `env:` and are dereferenced as quoted shell variables. `trigger-regression.yml` builds its dispatch payload with `jq` instead of string interpolation. Regression guard: `TestOwnWorkflowsNotInjectable` in `test_analyzer.py` parses this repo's own action and workflows and fails on reintroduction — verified by planting the old construct in a copy.
   - **Phase 0.1 / 0.3 / 0.4 remain open**, and 0.4 is date-bound.
+  - **NF-15 (CRITICAL) — L2c `pull_request_target` detection is bypassable.** Severity is derived from the declared permission block, not from the attack signature. `checks:`/`issues:`/`id-token: write`, or omitting `permissions:` entirely, drops the canonical PRT compromise to CAUTION/exit 0. Omitting the block is the *more* dangerous config (inherits repo default) and the one that evades detection. Harness `RTA03` carries exactly that workflow and records `expected CAUTION / exit 0` — the red-team suite has encoded the bypass as the specification. Correcting it changes the 34/34 baseline and is a specification decision.
+  - **NF-16 (MEDIUM) — `_scan_added_file_content` flags documentation prose.** A stock `SECURITY.md` or `CONTRIBUTING.md` scores CAUTION (4.0) on `sudo`/`chmod`/`rm -rf` in prose or fenced blocks. Capped at +4 so it cannot block; the cost is noise on the governance files still to be added.
+  - **Treat L2c fixture PASSes as evidence that behaviour is unchanged, not that it is correct**, until the expectations are re-derived from a threat model.
   - No source file has been modified. The repositories are exactly as audited.
 
 - **Verification status — corrected by first actual execution (2026-09-02):**
