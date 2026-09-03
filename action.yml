@@ -73,26 +73,34 @@ runs:
 
     - name: Install dependencies
       shell: bash
-      run: pip install -r "${{ github.action_path }}/requirements.txt"
+      run: pip install -r "$GITHUB_ACTION_PATH/requirements.txt"
 
     - name: Fetch base branch
       shell: bash
-      run: git fetch origin ${{ github.base_ref }}:${{ github.base_ref }}
+      # PG_BASE_REF is passed through the environment rather than interpolated
+      # into the script body. Actions substitutes ${{ }} before bash parses the
+      # line, so a branch name containing shell metacharacters would otherwise
+      # be executed as code. See also the scan step below.
+      env:
+        PG_BASE_REF: ${{ github.base_ref }}
+      run: git fetch origin "$PG_BASE_REF":"$PG_BASE_REF"
 
     - name: PayloadGuard Runtime Agent
       id: runtime
       if: inputs.runtime-mode != 'disabled'
       shell: bash
+      env:
+        PG_RUNTIME_MODE: ${{ inputs.runtime-mode }}
       run: |
         PG_VERSION=v2.0.0
         ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-        EVENTS_PATH="${{ github.workspace }}/pg-runtime-events.json"
+        EVENTS_PATH="${GITHUB_WORKSPACE}/pg-runtime-events.json"
         curl -fsSL \
           "https://github.com/PayloadGuard-PLG/payload-consequence-analyser/releases/download/${PG_VERSION}/pg-agent-linux-${ARCH}" \
           -o /tmp/pg-agent && chmod +x /tmp/pg-agent
         sudo /tmp/pg-agent \
-          --mode=${{ inputs.runtime-mode }} \
-          --policy="${{ github.workspace }}/payloadguard-policy.yaml" \
+          --mode="$PG_RUNTIME_MODE" \
+          --policy="${GITHUB_WORKSPACE}/payloadguard-policy.yaml" \
           --out="${EVENTS_PATH}" &
         echo "events_path=${EVENTS_PATH}" >> "$GITHUB_OUTPUT"
 
@@ -102,12 +110,14 @@ runs:
       env:
         PYTHONUTF8: "1"
         PG_PR_DESCRIPTION: ${{ inputs.pr-description }}
+        PG_HEAD_REF: ${{ github.head_ref }}
+        PG_BASE_REF: ${{ github.base_ref }}
         REPORT_PATH: ${{ github.workspace }}/${{ inputs.save-markdown }}
         JSON_REPORT_PATH: ${{ github.workspace }}/payloadguard-report.json
       run: |
         set +e
-        python "${{ github.action_path }}/analyze.py" . \
-          "${{ github.head_ref }}" "${{ github.base_ref }}" \
+        python "$GITHUB_ACTION_PATH/analyze.py" . \
+          "$PG_HEAD_REF" "$PG_BASE_REF" \
           --pr-description "$PG_PR_DESCRIPTION" \
           --save-markdown "$REPORT_PATH" \
           --save-json "$JSON_REPORT_PATH"
@@ -169,7 +179,7 @@ runs:
         JSON_REPORT_PATH: ${{ steps.scan.outputs.json_report_path }}
         PR_BASE_BRANCH: ${{ github.base_ref }}
         REPO_FULL_NAME: ${{ github.repository }}
-      run: python "${{ github.action_path }}/remediate.py"
+      run: python "$GITHUB_ACTION_PATH/remediate.py"
 
     - name: Post Check Run
       if: always()
@@ -181,4 +191,4 @@ runs:
         PAYLOADGUARD_EXIT_CODE: ${{ steps.scan.outputs.exit_code }}
         PAYLOADGUARD_REPORT_PATH: ${{ steps.scan.outputs.report_path }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      run: python "${{ github.action_path }}/post_check_run.py"
+      run: python "$GITHUB_ACTION_PATH/post_check_run.py"

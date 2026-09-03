@@ -22,6 +22,9 @@ jobs:
       - name: Dispatch analyser-updated to test harness
         env:
           REGRESSION_PAT: ${{ secrets.REGRESSION_PAT }}
+          PG_SHA: ${{ github.sha }}
+          PG_REF: ${{ github.ref }}
+          PG_ACTOR: ${{ github.actor }}
         run: |
           if [ -z "$REGRESSION_PAT" ]; then
             echo "::warning::REGRESSION_PAT secret is not configured — skipping regression dispatch."
@@ -32,12 +35,7 @@ jobs:
             -H "Authorization: token $REGRESSION_PAT" \
             -H "Accept: application/vnd.github.v3+json" \
             https://api.github.com/repos/PayloadGuard-PLG/payloadguard-test-harness/dispatches \
-            -d "{
-              \"event_type\": \"analyser-updated\",
-              \"client_payload\": {
-                \"sha\": \"${{ github.sha }}\",
-                \"ref\": \"${{ github.ref }}\",
-                \"actor\": \"${{ github.actor }}\"
-              }
-            }"
-          echo "Dispatched analyser-updated to payloadguard-test-harness (sha: ${{ github.sha }})"
+            -d "$(jq -nc \
+                  --arg sha "$PG_SHA" --arg ref "$PG_REF" --arg actor "$PG_ACTOR" \
+                  '{event_type:"analyser-updated",client_payload:{sha:$sha,ref:$ref,actor:$actor}}')"
+          echo "Dispatched analyser-updated to payloadguard-test-harness (sha: $PG_SHA)"
