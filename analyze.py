@@ -156,20 +156,31 @@ _ACTIONS_BASE64_PAYLOAD = [
 ]
 
 # Signal 2: Credential harvesting — env dumps, secret grep, metadata endpoints
+#
+# The bounded {0,N} quantifiers are load-bearing. These patterns are matched
+# against both the raw file and _normalize_yaml_content() output, and
+# normalisation strips every newline — so an unbounded [^\n]* stops meaning
+# "nearby on this line" and starts meaning "anywhere in the file". An ordinary
+# action.yml with an env: block, a `| sed` in an unrelated step, and the
+# substring KEY in a variable name was stitched into a single false
+# credential_harvest match, scoring CRITICAL and blocking the merge.
+#
+# The bound is a heuristic. The principled fix is to scope matching to one
+# `run:` block, which needs structural parsing rather than regex.
 _ACTIONS_CREDENTIAL_HARVEST = [
     r"curl\s+http://169\.254\.169\.254",
-    r"env\b[^\n]*\|\s*(grep|awk|sed)\b[^\n]*(KEY|TOKEN|SECRET|PASSWORD|CRED)",
-    r"printenv\b[^\n]*\|\s*(grep|awk)\b",
-    r"grep\s+-r[^\n]*(AWS_|GITHUB_TOKEN|api[_-]?key|ssh-rsa)",
+    r"env\b[^\n]{0,80}\|\s*(grep|awk|sed)\b[^\n]{0,80}(KEY|TOKEN|SECRET|PASSWORD|CRED)",
+    r"printenv\b[^\n]{0,80}\|\s*(grep|awk)\b",
+    r"grep\s+-r[^\n]{0,80}(AWS_|GITHUB_TOKEN|api[_-]?key|ssh-rsa)",
     r"cat\s+~?/\.ssh/(id_rsa|id_ed25519|authorized_keys)",
     # RTA-05 fix: curl with secret in URL (original pattern — http after secret)
-    r"curl\b[^\n]*\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]*http",
+    r"curl\b[^\n]{0,160}\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]{0,160}http",
     # RTA-05 fix: secret passed as HTTP auth header (-H / --header), works
     # even when curl spans multiple lines with backslash continuation.
     r"(?:-H|--header)\s+[\"'][^\"']*\$\{\{\s*secrets\.[A-Z_]+\s*\}\}",
     # RTA-02 fix: secret exfiltrated via GITHUB_OUTPUT or GITHUB_STEP_SUMMARY
-    r"echo\b[^\n]*\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]*>>\s*\$GITHUB_OUTPUT",
-    r"echo\b[^\n]*\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]*>>\s*\$GITHUB_STEP_SUMMARY",
+    r"echo\b[^\n]{0,80}\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]{0,80}>>\s*\$GITHUB_OUTPUT",
+    r"echo\b[^\n]{0,80}\$\{\{\s*secrets\.[A-Z_]+\s*\}\}[^\n]{0,80}>>\s*\$GITHUB_STEP_SUMMARY",
 ]
 
 # Signal 7: GitHub environment file injection — poisons PATH, LD_PRELOAD, or

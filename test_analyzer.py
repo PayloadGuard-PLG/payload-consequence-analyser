@@ -2031,6 +2031,50 @@ class TestGitHubActionsPoisoningScanning(unittest.TestCase):
         self.assertNotIn("prt_untrusted_checkout", [s['type'] for s in wf['signals']])
         self.assertEqual(wf['severity'], 'HIGH')
 
+    def test_credential_harvest_not_stitched_across_the_file(self):
+        """Regression: normalisation must not turn line patterns into file patterns.
+
+        _normalize_yaml_content strips every newline, so an unbounded [^\\n]* in
+        the credential_harvest patterns matched across the whole file. An env:
+        block, a `| sed` in an unrelated step and the substring KEY in a
+        variable name were stitched into one match — CRITICAL, and blocking.
+        Every construct below is innocuous and they are far apart.
+        """
+        content = (
+            "name: Build\n"
+            "on:\n  push:\n\n"
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - name: Set the ref\n"
+            "        env:\n"
+            "          PG_BASE_REF: ${{ github.base_ref }}\n"
+            "        run: git fetch origin \"$PG_BASE_REF\"\n"
+            "      - name: Detect architecture\n"
+            "        run: ARCH=$(uname -m | sed 's/x86_64/amd64/')\n"
+            "      - name: Publish\n"
+            "        env:\n"
+            "          PAYLOADGUARD_PRIVATE_KEY: ${{ inputs.private-key }}\n"
+            "        run: python post_check_run.py\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/build.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        flags = a.analyze()["actions_poisoning"]["flagged_workflows"]
+        types = [s["type"] for f in flags for s in f["signals"]]
+        self.assertNotIn("credential_harvest", types)
+
+    def test_real_credential_harvest_still_detected(self):
+        """The bound must not blind the pattern to the attack it exists for."""
+        content = (
+            "name: Deploy\non:\n  push:\n\n"
+            "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: |\n"
+            "          env | grep -E 'AWS_|GITHUB_TOKEN|SECRET|PASSWORD'\n"
+        )
+        d = self._build_workflow_diff(".github/workflows/deploy.yml", content)
+        a = self._make_analyzer_with_diffs([d])
+        wf = a.analyze()["actions_poisoning"]["flagged_workflows"][0]
+        self.assertIn("credential_harvest", [s["type"] for s in wf["signals"]])
+        self.assertEqual(wf["severity"], "CRITICAL")
+
     # ---- NF-17: payload scored independently of trigger --------------------
 
     def test_remote_exec_detected_on_every_trigger(self):
