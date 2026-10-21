@@ -24,7 +24,9 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Union
 from dataclasses import dataclass, field
+import os
 import structural_parser
+import consequence_engine
 
 __version__ = "1.3.0"
 
@@ -893,15 +895,21 @@ DEFAULT_CONFIG = {
         "high_signal_score": 3,
         "trusted_oidc_consumers": [],
     },
+    "consequence": {
+        "enabled": True,
+        "mode": "shadow",
+        "max_repo_files": 200,
+    },
 }
 
 
 @dataclass
 class PayloadGuardConfig:
-    thresholds: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["thresholds"]))
-    semantic: dict   = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["semantic"]))
-    sca: dict        = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["sca"]))
-    actions: dict    = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["actions"]))
+    thresholds: dict  = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["thresholds"]))
+    semantic: dict    = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["semantic"]))
+    sca: dict         = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["sca"]))
+    actions: dict     = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["actions"]))
+    consequence: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["consequence"]))
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -940,6 +948,7 @@ def load_config(repo_path: str) -> PayloadGuardConfig:
         semantic=merged.get("semantic", copy.deepcopy(DEFAULT_CONFIG["semantic"])),
         sca=merged.get("sca",           copy.deepcopy(DEFAULT_CONFIG["sca"])),
         actions=merged.get("actions",   copy.deepcopy(DEFAULT_CONFIG["actions"])),
+        consequence=merged.get("consequence", copy.deepcopy(DEFAULT_CONFIG["consequence"])),
     )
     
 # ==============================================================================
@@ -1061,6 +1070,7 @@ class PayloadAnalyzer:
             # ('-' entries) and avoids loading blobs into memory.
             lines_added = 0
             lines_deleted = 0
+            per_file_numstat: dict[str, tuple[int, int]] = {}
             try:
                 numstat = self.repo.git.diff(
                     '--numstat', merge_base[0].hexsha, branch_ref
@@ -1068,11 +1078,12 @@ class PayloadAnalyzer:
                 for line in numstat.splitlines():
                     parts = line.split('\t')
                     if len(parts) == 3:
-                        added_str, deleted_str = parts[0], parts[1]
-                        if added_str != '-':
-                            lines_added += int(added_str)
-                        if deleted_str != '-':
-                            lines_deleted += int(deleted_str)
+                        added_str, deleted_str, npath = parts[0], parts[1], parts[2]
+                        f_add = int(added_str) if added_str != '-' else 0
+                        f_del = int(deleted_str) if deleted_str != '-' else 0
+                        lines_added += f_add
+                        lines_deleted += f_del
+                        per_file_numstat[npath] = (f_add, f_del)
             except Exception:
                 pass
 
@@ -1210,6 +1221,93 @@ class PayloadAnalyzer:
             # Mutable action ref advisory (no score impact)
             mutable_tag_warnings = _scan_mutable_action_refs(diffs)
 
+            # SEMANTIC CHANGE GRAPH & DIFFERENTIAL CONSEQUENCE ENGINE (consequence.v1)
+            consequence_cfg = getattr(self.config, "consequence", DEFAULT_CONFIG["consequence"])
+            consequence_mode = (
+                os.environ.get("PAYLOADGUARD_CONSEQUENCE_MODE")
+                or consequence_cfg.get("mode", "shadow")
+            ).lower()
+            max_repo_files = int(consequence_cfg.get("max_repo_files", 200))
+            consequence_report_dict: dict = {}
+
+            if consequence_cfg.get("enabled", True):
+                try:
+                    file_deltas: list[consequence_engine.FileDeltaInput] = []
+                    for d in diffs:
+                        fpath = d.b_path or d.a_path or ""
+                        old_p = d.a_path if d.change_type == "R" else None
+                        base_src = None
+                        head_src = None
+                        if d.a_blob is not None and d.change_type in ("D", "M", "R"):
+                            try:
+                                base_src = d.a_blob.data_stream.read().decode("utf-8", errors="ignore")
+                            except Exception:
+                                base_src = None
+                        if d.b_blob is not None and d.change_type in ("A", "M", "R"):
+                            try:
+                                head_src = d.b_blob.data_stream.read().decode("utf-8", errors="ignore")
+                            except Exception:
+                                head_src = None
+                        f_add, f_del = per_file_numstat.get(fpath, (0, 0))
+                        file_deltas.append(
+                            consequence_engine.FileDeltaInput(
+                                file_path=fpath,
+                                old_path=old_p,
+                                change_type=d.change_type or "M",
+                                base_source=base_src,
+                                head_source=head_src,
+                                lines_added=f_add,
+                                lines_deleted=f_del,
+                            )
+                        )
+
+                    repo_head_files: dict[str, str] = {}
+                    try:
+                        count_blobs = 0
+                        for item in branch_commit.tree.traverse():
+                            if getattr(item, "type", None) != "blob":
+                                continue
+                            if structural_parser.language_for_path(item.path) is None:
+                                continue
+                            if count_blobs >= max_repo_files:
+                                break
+                            try:
+                                repo_head_files[item.path] = item.data_stream.read().decode("utf-8", errors="ignore")
+                                count_blobs += 1
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    c_engine = consequence_engine.ConsequenceEngine(
+                        mode=consequence_mode,
+                        max_repo_files=max_repo_files,
+                    )
+                    c_report = c_engine.analyze_deltas(file_deltas, repo_head_files)
+                    consequence_report_dict = c_report.to_dict()
+
+                    # In enforce mode, if legacy L4 flagged CRITICAL solely due to pure renames/moves
+                    # (0 unmatched REMOVED and 0 GUTTED symbols with complete parsing), suppress L4 false positive
+                    if consequence_mode == "enforce" and overall_structural_severity == "CRITICAL":
+                        t_counts = consequence_report_dict.get("graph_summary", {}).get("transition_counts", {})
+                        p_comp = consequence_report_dict.get("parser_completeness", {}).get("complete", False)
+                        if (
+                            p_comp
+                            and t_counts.get("REMOVED", 0) == 0
+                            and t_counts.get("GUTTED", 0) == 0
+                            and t_counts.get("RENAMED_AND_GUTTED", 0) == 0
+                            and t_counts.get("MOVED_AND_GUTTED", 0) == 0
+                            and (t_counts.get("RENAMED", 0) > 0 or t_counts.get("MOVED", 0) > 0)
+                        ):
+                            overall_structural_severity = "LOW"
+                except Exception as ce_exc:
+                    consequence_report_dict = {
+                        "schema_version": consequence_engine.CONSEQUENCE_SCHEMA_VERSION,
+                        "mode": consequence_mode,
+                        "error": str(ce_exc),
+                        "findings": [],
+                    }
+
             # LAYER 3: CONSEQUENCE VERDICT
             unverified_dep_count = len(sca_flags) if self.config.sca.get("fail_on_unknown", True) else 0
             verdict = self._assess_consequence(
@@ -1231,6 +1329,32 @@ class PayloadAnalyzer:
                     f['severity'] == 'CRITICAL' for f in ai_config_flags
                 ),
             )
+
+            # Apply SCG Consequence Engine policy when mode is 'advisory' or 'enforce'
+            if consequence_mode in ("advisory", "enforce") and consequence_report_dict.get("findings"):
+                c_findings = consequence_report_dict.get("findings", [])
+                block_findings = [f for f in c_findings if f.get("policy_recommendation") == "BLOCK"]
+                review_findings = [f for f in c_findings if f.get("policy_recommendation") == "REVIEW"]
+
+                for f in block_findings + review_findings:
+                    verdict["flags"].append(f"[{f['detector_id']}] {f['summary']}")
+
+                if consequence_mode == "enforce":
+                    if block_findings:
+                        verdict["status"] = "DESTRUCTIVE"
+                        verdict["severity"] = "CRITICAL"
+                        verdict["severity_score"] = max(verdict.get("severity_score", 0.0), 5.0)
+                        verdict["recommendation"] = "❌ DO NOT MERGE — Verified destructive code consequence detected"
+                    elif review_findings and verdict["status"] == "SAFE":
+                        verdict["status"] = "REVIEW"
+                        verdict["severity"] = "MEDIUM"
+                        verdict["severity_score"] = max(verdict.get("severity_score", 0.0), 1.0)
+                        verdict["recommendation"] = "→ Proceed with normal review process, but note the flags above"
+                elif consequence_mode == "advisory":
+                    if (block_findings or review_findings) and verdict["status"] == "SAFE":
+                        verdict["status"] = "REVIEW"
+                        verdict["severity"] = "MEDIUM"
+                        verdict["severity_score"] = max(verdict.get("severity_score", 0.0), 1.0)
 
             # LAYER 5a: TEMPORAL DRIFT
             temporal_th = self.config.thresholds["temporal"]
@@ -1348,6 +1472,7 @@ class PayloadAnalyzer:
                     "critical": critical_deletions[:10],
                     "all": deleted_files[:30],
                 },
+                "consequence_analysis": consequence_report_dict,
                 "runtime_events": _load_runtime_events(),
             }
 
@@ -2351,6 +2476,25 @@ def format_markdown_report(report: dict) -> str:
             )
         out.append("")
 
+    # ── Consequence Analysis (consequence.v1) ─────────────────────────────────
+    ca_rep = report.get('consequence_analysis', {})
+    ca_findings = ca_rep.get('findings', [])
+    if ca_findings:
+        out.append("### 🧠 Consequence Analysis (`consequence.v1`)")
+        out.append(
+            f"**Mode:** `{ca_rep.get('mode', 'shadow')}`  |  "
+            f"**Recommended Verdict:** `{ca_rep.get('recommended_verdict', 'SAFE')}`"
+        )
+        out.append("")
+        out.append("| Detector | Class | Tier | Confidence | Policy | Summary |")
+        out.append("|---|---|---|---|---|---|")
+        for cf in ca_findings[:10]:
+            out.append(
+                f"| `{cf['detector_id']}` | `{cf['consequence_class']}` | `{cf['tier']}` | "
+                f"`{cf['confidence']}` | `{cf['policy_recommendation']}` | {_md_escape(cf['summary'])} |"
+            )
+        out.append("")
+
     # ── Deleted Files ─────────────────────────────────────────────────────────
     if deleted['total'] > 0:
         out.append(f"### 🗑️ Deleted Files ({deleted['total']} total)")
@@ -2428,9 +2572,14 @@ def main():
     parser.add_argument("--save-markdown", nargs="?", const="payloadguard-report.md",
                         metavar="FILE",
                         help="Save GitHub-flavoured markdown report (default: payloadguard-report.md)")
+    parser.add_argument("--consequence-mode", choices=["shadow", "advisory", "enforce"],
+                        default=None,
+                        help="Consequence engine policy mode (default: shadow or payloadguard.yml setting)")
     args = parser.parse_args()
 
-    config   = load_config(args.repo_path)
+    config = load_config(args.repo_path)
+    if args.consequence_mode:
+        config.consequence["mode"] = args.consequence_mode
     analyzer = PayloadAnalyzer(args.repo_path, args.branch, args.target, config=config)
     report   = analyzer.analyze(pr_description=args.pr_description)
     print_report(report)

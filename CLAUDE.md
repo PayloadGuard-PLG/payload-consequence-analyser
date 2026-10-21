@@ -2,9 +2,14 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Active branch:** `claude/general-conversation-klxctt` (both repos)
-- **Status:** v1.3.0 on main. Branch `claude/general-conversation-klxctt` carries Sprint 1 (L2d) — not yet merged. Version will bump to v1.4.0 at merge.
-- **Sprint 1 — COMPLETE (2026-06-11, SHA 257d1f3):**
+- **Active branch:** `feat/consequence-analysis-v1` (analyser) / `feat/harness-oracle-v2` (harness)
+- **Consequence Engine v1 (`consequence.v1`) — COMPLETE (2026-10-21):**
+  - `structural_parser.py`: Upgraded with `SymbolFact` v1, `CallSiteFact`, `ParseResult`, 7-dimension capability vectors (`universal`, `syntax`, `symbolic`, `typed`, `reachability`, `flow`, `runtime`), and explicit parser completeness (`AVAILABLE`, `PARSE_ERROR`, `GRAMMAR_UNAVAILABLE`, `UNSUPPORTED_EXTENSION`, `TIMEOUT`) across `.py`, `.js`/`.jsx`, `.ts`/`.tsx`, `.go`, `.rs`, and `.java`. Legacy `extract_named_nodes(source, path) -> set[str]` preserved 100% unchanged.
+  - `consequence_engine.py`: Semantic Change Graph (SCG) 5-stage symbol matching pipeline + 6 deterministic consequence detectors (`D01_PARSER_INCOMPLETE`, `D02_BODY_WEAKENING` / `D02_AMBIGUOUS_REFACTOR`, `D03_COMPOUND_LOSS`, `D04_PUBLIC_API_BREAK`, `D05_BUILD_DEPENDENCY_DELTA`, `D06_GUARD_REGRESSION`).
+  - `analyze.py`: Integrated `consequence_analysis` report section (`consequence.v1`) with configurable policy mode (`shadow` default, `advisory`, `enforce` via `payloadguard.yml` or `--consequence-mode`).
+  - **A03 & A06 Detection Breakthrough**: Both previously bypassing adversarial cases (`adversarial/slow-deletion` and `adversarial/threshold-gaming`) are deterministically detected as `DESTRUCTIVE` (`BLOCK`) in `enforce` mode with concrete symbol, guard (`Database.transaction` removing `self._rollback`), and cross-file caller (`test_auth.py` calling removed `Auth.deactivate` and `SessionManager.revoke_all`) evidence, while keeping all safe/refactor cases (`T01`, `T02`, `T12`, `WS07`, `AW04`, and 5-file pure move refactors) `SAFE`.
+  - **Test suite:** `309 passed in 2.55s` (`284` in `test_analyzer.py` + `25` in `test_consequence_engine.py`).
+- **Previous Sprint 1 — COMPLETE (2026-06-11, SHA 257d1f3):**
   - L2d AI tooling config poisoning detection shipped: `_scan_ai_tooling_configs()` + 8 helper functions.
   - Confirmed Miasma surfaces covered: `.claude/settings.json`, `.gemini/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, `package.json` lifecycle scripts, `composer.json` post-install-cmd, `Gemfile` system(), `binding.gyp` shell chain, `mcp.json`.
   - `_assess_consequence`: `ai_config_poisoning_flags` / `ai_config_poisoning_critical` params added. CRITICAL +5 → DESTRUCTIVE floor, HIGH +3 → CAUTION.
@@ -83,20 +88,23 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 | L5a Temporal | Branch age × target velocity drift score | `TemporalDriftAnalyzer` |
 | L5b Semantic | PR-MCI three-phase heuristic — deceptive description detection | `SemanticTransparencyAnalyzer` |
 | L5c Runtime | eBPF tracepoint agent — execve/connect/ptrace/procmem, audit+block | `agent/`, `_load_runtime_events()` |
+| SCG Consequence (`consequence.v1`) | 5-stage symbol matching + D01–D06 differential consequence detectors (`shadow`/`advisory`/`enforce`) | `consequence_engine.py`, `ConsequenceEngine` |
 
 ### Key Files
 
 ```
-analyze.py               — core analyser, all layers, CLI entry point
-structural_parser.py — tree-sitter AST node extraction (Python/JS/TS/Go/Rust/Ruby)
-post_check_run.py    — posts GitHub Check Run via App JWT (RS256)
-remediate.py         — auto-remediation: resolves action tags to SHAs, opens PR
-action.yml           — GitHub Action composite wrapper
-agent/               — eBPF runtime defence agent (Go + cilium/ebpf)
-agent/bpf/probe.c    — 4 tracepoint probes + pg_config/egress_allow_ipv4 BPF maps
-scripts/pc-smoke-test.sh — one-command build+verify on real kernel
-test_analyzer.py     — pytest suite (267 tests, + 5 CrossHair = 272 total)
-tests/proofs/        — Z3 formal property proofs (P1–P10) + CrossHair pytest wrapper
+analyze.py                  — core analyser, all layers, CLI entry point
+structural_parser.py        — AST & Tree-sitter SymbolFact v1 + legacy node extraction (Python/JS/TS/TSX/Go/Rust/Java)
+consequence_engine.py       — Semantic Change Graph (SCG) 5-stage matcher & D01-D06 consequence detectors
+post_check_run.py           — posts GitHub Check Run via App JWT (RS256)
+remediate.py                — auto-remediation: resolves action tags to SHAs, opens PR
+action.yml                  — GitHub Action composite wrapper
+agent/                      — eBPF runtime defence agent (Go + cilium/ebpf)
+agent/bpf/probe.c           — 4 tracepoint probes + pg_config/egress_allow_ipv4 BPF maps
+scripts/pc-smoke-test.sh    — one-command build+verify on real kernel
+test_analyzer.py            — legacy & layer pytest suite (284 tests)
+test_consequence_engine.py  — SCG & consequence engine pytest suite (25 tests)
+tests/proofs/               — Z3 formal property proofs (P1–P10) + CrossHair pytest wrapper
 verification/        — CrossHair verification targets: consequence_pure (C1-C12), temporal_pure (T1-T7), structural_pure (S1-S7), semantic_pure (M1-M9)
 allowlist.yml        — SCA package allowlist (user-created, not in repo by default)
 payloadguard.yml     — per-repo threshold config (user-created, not in repo by default)

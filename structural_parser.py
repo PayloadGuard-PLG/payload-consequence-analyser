@@ -1,18 +1,41 @@
 """
-Language-aware structural node extraction for Layer 4 (Structural Drift).
+Language-aware structural node and semantic symbol extraction for Layer 4
+(Structural Drift) and the Semantic Change Graph (SCG).
 
 Python uses stdlib ast (always available, no extra dep). All other languages
 use tree-sitter grammar packages and a recursive node walker — no query-string
 API, so it works across tree-sitter versions.
 
-If a grammar package is not installed the file is silently skipped.
+Legacy public API `extract_named_nodes(source, path) -> set[str]` is preserved
+unchanged for backwards compatibility.
+
+Structured API `extract_symbols(source, path) -> ParseResult` provides:
+- Explicit parser completeness status (AVAILABLE, PARSE_ERROR,
+  GRAMMAR_UNAVAILABLE, UNSUPPORTED_EXTENSION, TIMEOUT)
+- Per-file capability vectors (universal, syntax, symbolic, typed,
+  reachability, flow, runtime)
+- Qualified, source-located `SymbolFact` v1 records with normalized signatures,
+  parameter counts, visibility, export status, decorators, normalized body
+  hashes, statement counts, stub detection, and call-site extraction.
 
 Supported:  .py  .js  .jsx  .ts  .tsx  .go  .rs  .java
 """
 
 import ast
+import hashlib
+import re
+import sys
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+SYMBOL_FACT_SCHEMA_VERSION = "1.0"
+
+PARSER_STATUS_AVAILABLE = "AVAILABLE"
+PARSER_STATUS_PARSE_ERROR = "PARSE_ERROR"
+PARSER_STATUS_GRAMMAR_UNAVAILABLE = "GRAMMAR_UNAVAILABLE"
+PARSER_STATUS_UNSUPPORTED_EXTENSION = "UNSUPPORTED_EXTENSION"
+PARSER_STATUS_TIMEOUT = "TIMEOUT"
 
 _EXT_TO_LANG: dict[str, str] = {
     ".py":   "python",
@@ -32,9 +55,11 @@ _JS_RULES: dict[str, str] = {
 }
 _LANG_RULES: dict[str, dict[str, str]] = {
     "javascript": _JS_RULES,
-    "typescript": {**_JS_RULES,
-                   "interface_declaration":    "name",
-                   "type_alias_declaration":   "name"},
+    "typescript": {
+        **_JS_RULES,
+        "interface_declaration":  "name",
+        "type_alias_declaration": "name",
+    },
     "go": {
         "function_declaration": "name",
         "method_declaration":   "name",
@@ -59,8 +84,183 @@ _LANG_RULES: dict[str, dict[str, str]] = {
 _LANG_RULES["tsx"] = _LANG_RULES["typescript"]
 
 
+@dataclass(frozen=True)
+class SymbolFact:
+    """Versioned, source-located structural symbol record (SymbolFact v1)."""
+    schema_version: str
+    symbol_id: str
+    language: str
+    kind: str
+    name: str
+    qualified_name: str
+    file_path: str
+    start_line: int
+    end_line: int
+    visibility: str
+    is_exported: bool
+    normalized_signature: str
+    parameter_count: int
+    required_parameter_count: int
+    decorators: Tuple[str, ...]
+    body_hash: str
+    statement_count: int
+    is_stub: bool
+    calls: Tuple[str, ...]
+    parent_symbol: Optional[str] = None
+    frontend: str = ""
+    frontend_version: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        d["decorators"] = list(self.decorators)
+        d["calls"] = list(self.calls)
+        return d
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SymbolFact":
+        payload = dict(data)
+        payload["decorators"] = tuple(payload.get("decorators", ()))
+        payload["calls"] = tuple(payload.get("calls", ()))
+        return cls(**payload)
+
+
+@dataclass(frozen=True)
+class CallSiteFact:
+    """Source-located function or method invocation site."""
+    file_path: str
+    line: int
+    caller_qualified_name: str
+    callee_name: str
+    qualifier: str
+    arg_count: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CallSiteFact":
+        return cls(**data)
+
+
+@dataclass
+class ParseResult:
+    """Structured output of parsing a single file, including completeness state."""
+    file_path: str
+    language: Optional[str]
+    status: str
+    complete: bool
+    incomplete_reason: Optional[str] = None
+    error_detail: Optional[str] = None
+    frontend: str = "none"
+    frontend_version: str = "0"
+    symbols: List[SymbolFact] = field(default_factory=list)
+    named_nodes: List[str] = field(default_factory=list)
+    call_sites: List[CallSiteFact] = field(default_factory=list)
+    imports: List[str] = field(default_factory=list)
+    exports: List[str] = field(default_factory=list)
+    capabilities: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "file_path": self.file_path,
+            "language": self.language,
+            "status": self.status,
+            "complete": self.complete,
+            "incomplete_reason": self.incomplete_reason,
+            "error_detail": self.error_detail,
+            "frontend": self.frontend,
+            "frontend_version": self.frontend_version,
+            "symbols": [s.to_dict() for s in self.symbols],
+            "named_nodes": list(self.named_nodes),
+            "call_sites": [c.to_dict() for c in self.call_sites],
+            "imports": list(self.imports),
+            "exports": list(self.exports),
+            "capabilities": dict(self.capabilities),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ParseResult":
+        return cls(
+            file_path=data["file_path"],
+            language=data.get("language"),
+            status=data["status"],
+            complete=bool(data["complete"]),
+            incomplete_reason=data.get("incomplete_reason"),
+            error_detail=data.get("error_detail"),
+            frontend=data.get("frontend", "none"),
+            frontend_version=data.get("frontend_version", "0"),
+            symbols=[SymbolFact.from_dict(s) for s in data.get("symbols", [])],
+            named_nodes=list(data.get("named_nodes", [])),
+            call_sites=[CallSiteFact.from_dict(c) for c in data.get("call_sites", [])],
+            imports=list(data.get("imports", [])),
+            exports=list(data.get("exports", [])),
+            capabilities=dict(data.get("capabilities", {})),
+        )
+
+
+def build_capability_vector(
+    syntax_state: str,
+    syntax_provenance: str,
+    syntax_reason: str,
+    symbolic_state: str = "unavailable",
+    symbolic_reason: str = "No symbolic extraction performed",
+    reachability_state: str = "unavailable",
+    reachability_reason: str = "Cross-file reachability not computed at single-file stage",
+    flow_state: str = "unavailable",
+    flow_reason: str = "Intra-procedural guard/call inspection only",
+    runtime_state: str = "unavailable",
+    runtime_reason: str = "No runtime trace attached",
+) -> Dict[str, Dict[str, str]]:
+    """Construct the standard 7-dimension capability vector for a file/module."""
+    return {
+        "universal": {
+            "state": "available",
+            "provenance": "git-diff",
+            "reason": "Git object and path metadata available",
+        },
+        "syntax": {
+            "state": syntax_state,
+            "provenance": syntax_provenance,
+            "reason": syntax_reason,
+        },
+        "symbolic": {
+            "state": symbolic_state,
+            "provenance": syntax_provenance if symbolic_state != "unavailable" else "none",
+            "reason": symbolic_reason,
+        },
+        "typed": {
+            "state": "unavailable",
+            "provenance": "none",
+            "reason": "Compiler/type-checker frontend not invoked in fast static lane",
+        },
+        "reachability": {
+            "state": reachability_state,
+            "provenance": syntax_provenance if reachability_state != "unavailable" else "none",
+            "reason": reachability_reason,
+        },
+        "flow": {
+            "state": flow_state,
+            "provenance": syntax_provenance if flow_state != "unavailable" else "none",
+            "reason": flow_reason,
+        },
+        "runtime": {
+            "state": runtime_state,
+            "provenance": "ebpf-agent" if runtime_state == "available" else "none",
+            "reason": runtime_reason,
+        },
+    }
+
+
 def language_for_path(path: str) -> Optional[str]:
     return _EXT_TO_LANG.get(Path(path).suffix.lower())
+
+
+def _treesitter_version() -> str:
+    try:
+        import importlib.metadata
+        return importlib.metadata.version("tree-sitter")
+    except Exception:
+        return "unknown"
 
 
 def _load_language(lang_key: str):
@@ -92,6 +292,27 @@ def _load_language(lang_key: str):
     return None
 
 
+def get_parser_capabilities() -> Dict[str, Dict[str, Any]]:
+    """Return installed parser availability across all supported languages."""
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    caps: Dict[str, Dict[str, Any]] = {
+        "python": {
+            "available": True,
+            "frontend": "python-ast",
+            "version": py_ver,
+        }
+    }
+    ts_ver = _treesitter_version()
+    for lang_key in ("javascript", "typescript", "tsx", "go", "rust", "java"):
+        loaded = _load_language(lang_key) is not None
+        caps[lang_key] = {
+            "available": loaded,
+            "frontend": "tree-sitter",
+            "version": ts_ver if loaded else "unavailable",
+        }
+    return caps
+
+
 def _collect(node, rules: dict[str, str], names: set[str]) -> None:
     name_field = rules.get(node.type)
     if name_field:
@@ -121,6 +342,7 @@ def _extract_via_treesitter(source: str, lang_key: str) -> set[str]:
 
 
 def extract_named_nodes(source: str, path: str) -> set[str]:
+    """Legacy L4 API: returns a flat set of simple declaration names."""
     lang_key = language_for_path(path)
     if lang_key is None:
         return set()
@@ -146,3 +368,936 @@ def extract_named_nodes(source: str, path: str) -> set[str]:
         return _extract_via_treesitter(source, lang_key)
     except Exception as e:
         raise ValueError(str(e)) from e
+
+
+# ==============================================================================
+# SYMBOL FACT v1 EXTRACTION HELPERS
+# ==============================================================================
+
+def _hash_normalized_text(text: str) -> str:
+    norm = re.sub(r"\s+", " ", text.strip())
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
+
+
+class _PythonIdentNormalizer(ast.NodeTransformer):
+    """Strip docstrings and normalize function/class names for body digesting."""
+
+    def _strip_docstring(self, body: list) -> list:
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(getattr(body[0], "value", None), ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            return body[1:]
+        return body
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        self.generic_visit(node)
+        node.body = self._strip_docstring(node.body)
+        node.decorator_list = []
+        return node
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+        self.generic_visit(node)
+        node.body = self._strip_docstring(node.body)
+        node.decorator_list = []
+        return node
+
+    def visit_ClassDef(self, node: ast.ClassDef):
+        self.generic_visit(node)
+        node.body = self._strip_docstring(node.body)
+        node.decorator_list = []
+        return node
+
+
+def _python_body_metrics(stmts: list) -> Tuple[str, int, bool]:
+    """Compute (body_hash, statement_count, is_stub) for a Python AST body."""
+    import copy as _copy
+    cleaned = []
+    for idx, stmt in enumerate(stmts):
+        if (
+            idx == 0
+            and isinstance(stmt, ast.Expr)
+            and isinstance(getattr(stmt, "value", None), ast.Constant)
+            and isinstance(stmt.value.value, str)
+        ):
+            continue
+        cleaned.append(_PythonIdentNormalizer().visit(_copy.deepcopy(stmt)))
+
+    if not cleaned:
+        return _hash_normalized_text("STUB"), 0, True
+
+    # Check if all remaining statements are pass, `...`, or `return None`
+    is_stub = all(
+        isinstance(s, ast.Pass)
+        or (
+            isinstance(s, ast.Expr)
+            and isinstance(getattr(s, "value", None), ast.Constant)
+            and s.value.value is Ellipsis
+        )
+        or (
+            isinstance(s, ast.Return)
+            and (
+                s.value is None
+                or (isinstance(s.value, ast.Constant) and s.value.value is None)
+            )
+        )
+        for s in cleaned
+    )
+
+    stmt_count = sum(
+        1
+        for s in cleaned
+        for sub in ast.walk(s)
+        if isinstance(sub, ast.stmt) and not isinstance(sub, ast.Pass)
+    )
+    dumped = "|".join(ast.dump(s, annotate_fields=True, include_attributes=False) for s in cleaned)
+    if is_stub:
+        return _hash_normalized_text("STUB"), stmt_count, True
+    return _hash_normalized_text(dumped), max(stmt_count, 1), False
+
+
+def _python_signature(node: ast.AST, is_method: bool = False) -> Tuple[str, int, int]:
+    """Return (normalized_signature, param_count, required_param_count) for a Python function."""
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return "()", 0, 0
+    args = node.args
+    all_args = list(args.posonlyargs) + list(args.args)
+    if is_method and all_args and all_args[0].arg in ("self", "cls"):
+        all_args = all_args[1:]
+    num_defaults = len(args.defaults)
+    req_positional = max(0, len(all_args) - num_defaults)
+
+    kwonly = list(args.kwonlyargs)
+    req_kwonly = sum(1 for d in args.kw_defaults if d is None)
+
+    param_parts = []
+    for a in all_args:
+        ann = f":{ast.unparse(a.annotation)}" if a.annotation else ""
+        param_parts.append(f"{a.arg}{ann}")
+    if args.vararg:
+        param_parts.append(f"*{args.vararg.arg}")
+    for a in kwonly:
+        ann = f":{ast.unparse(a.annotation)}" if a.annotation else ""
+        param_parts.append(f"{a.arg}{ann}")
+    if args.kwarg:
+        param_parts.append(f"**{args.kwarg.arg}")
+
+    ret = f"->{ast.unparse(node.returns)}" if node.returns else ""
+    sig = f"({','.join(param_parts)}){ret}"
+    sig = re.sub(r"\s+", "", sig)
+    total_params = len(all_args) + len(kwonly) + (1 if args.vararg else 0) + (1 if args.kwarg else 0)
+    required_params = req_positional + req_kwonly
+    return sig, total_params, required_params
+
+
+def _python_extract_calls(
+    node: ast.AST,
+    caller_qual: str,
+    file_path: str,
+    stop_at_nested_defs: bool = True,
+) -> Tuple[Tuple[str, ...], List[CallSiteFact]]:
+    """Extract called symbol names and CallSiteFacts within a Python AST node."""
+    calls: List[str] = []
+    call_sites: List[CallSiteFact] = []
+
+    def _walk(curr: ast.AST, is_root: bool = False):
+        if not is_root and stop_at_nested_defs and isinstance(
+            curr, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            return
+        if isinstance(curr, ast.Call):
+            callee = ""
+            qualifier = ""
+            if isinstance(curr.func, ast.Name):
+                callee = curr.func.id
+            elif isinstance(curr.func, ast.Attribute):
+                callee = curr.func.attr
+                try:
+                    qualifier = ast.unparse(curr.func.value)
+                except Exception:
+                    qualifier = ""
+            if callee:
+                full_call = f"{qualifier}.{callee}" if qualifier else callee
+                calls.append(full_call)
+                call_sites.append(
+                    CallSiteFact(
+                        file_path=file_path,
+                        line=getattr(curr, "lineno", 1),
+                        caller_qualified_name=caller_qual,
+                        callee_name=callee,
+                        qualifier=qualifier,
+                        arg_count=len(curr.args) + len(curr.keywords),
+                    )
+                )
+        for ch in ast.iter_child_nodes(curr):
+            _walk(ch, False)
+
+    _walk(node, True)
+    return tuple(dict.fromkeys(calls)), call_sites
+
+
+def _extract_python_parse_result(source: str, file_path: str) -> ParseResult:
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        caps = build_capability_vector(
+            syntax_state="failed",
+            syntax_provenance=f"python-ast@{py_ver}",
+            syntax_reason=f"SyntaxError at line {e.lineno}: {e.msg}",
+        )
+        return ParseResult(
+            file_path=file_path,
+            language="python",
+            status=PARSER_STATUS_PARSE_ERROR,
+            complete=False,
+            incomplete_reason="Python syntax error prevented AST construction",
+            error_detail=f"SyntaxError: {e}",
+            frontend="python-ast",
+            frontend_version=py_ver,
+            capabilities=caps,
+        )
+
+    symbols: List[SymbolFact] = []
+    call_sites: List[CallSiteFact] = []
+    imports: List[str] = []
+    explicit_all: Optional[set[str]] = None
+
+    # First pass on module body: imports and __all__
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            for alias in node.names:
+                imports.append(f"{mod}.{alias.name}" if mod else alias.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "__all__":
+                    if isinstance(node.value, (ast.List, ast.Tuple, ast.Set)):
+                        explicit_all = {
+                            elt.value
+                            for elt in node.value.elts
+                            if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                        }
+
+    # Module-level calls
+    _, mod_calls = _python_extract_calls(tree, "<module>", file_path, stop_at_nested_defs=True)
+    call_sites.extend(mod_calls)
+
+    def _is_public_name(name: str, parent_public: bool = True) -> Tuple[str, bool]:
+        if not parent_public:
+            return "private", False
+        if explicit_all is not None and "." not in name:
+            is_exp = name in explicit_all
+            return ("public" if is_exp else "private"), is_exp
+        if name.startswith("__") and name.endswith("__"):
+            return "public", True
+        if name.startswith("_"):
+            return "private", False
+        return "public", True
+
+    def _visit_container(stmts: list, parent_qual: Optional[str], parent_public: bool):
+        for node in stmts:
+            if isinstance(node, ast.ClassDef):
+                qual = f"{parent_qual}.{node.name}" if parent_qual else node.name
+                vis, is_exp = _is_public_name(node.name, parent_public)
+                decos = tuple(ast.unparse(d) for d in node.decorator_list)
+                bases = ",".join(ast.unparse(b) for b in node.bases)
+                sig = f"({bases})"
+                body_hash, stmt_count, is_stub = _python_body_metrics(node.body)
+                calls, cs = _python_extract_calls(node, qual, file_path, stop_at_nested_defs=True)
+                call_sites.extend(cs)
+                symbols.append(
+                    SymbolFact(
+                        schema_version=SYMBOL_FACT_SCHEMA_VERSION,
+                        symbol_id=f"{file_path}::{qual}",
+                        language="python",
+                        kind="class",
+                        name=node.name,
+                        qualified_name=qual,
+                        file_path=file_path,
+                        start_line=getattr(node, "lineno", 1),
+                        end_line=getattr(node, "end_lineno", getattr(node, "lineno", 1)),
+                        visibility=vis,
+                        is_exported=is_exp,
+                        normalized_signature=sig,
+                        parameter_count=len(node.bases),
+                        required_parameter_count=len(node.bases),
+                        decorators=decos,
+                        body_hash=body_hash,
+                        statement_count=stmt_count,
+                        is_stub=is_stub,
+                        calls=calls,
+                        parent_symbol=parent_qual,
+                        frontend="python-ast",
+                        frontend_version=py_ver,
+                    )
+                )
+                _visit_container(node.body, qual, vis == "public")
+
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                is_method = parent_qual is not None
+                qual = f"{parent_qual}.{node.name}" if parent_qual else node.name
+                vis, is_exp = _is_public_name(node.name, parent_public)
+                decos = tuple(ast.unparse(d) for d in node.decorator_list)
+                sig, p_cnt, req_cnt = _python_signature(node, is_method=is_method)
+                body_hash, stmt_count, is_stub = _python_body_metrics(node.body)
+                calls, cs = _python_extract_calls(node, qual, file_path, stop_at_nested_defs=True)
+                call_sites.extend(cs)
+                symbols.append(
+                    SymbolFact(
+                        schema_version=SYMBOL_FACT_SCHEMA_VERSION,
+                        symbol_id=f"{file_path}::{qual}",
+                        language="python",
+                        kind="method" if is_method else "function",
+                        name=node.name,
+                        qualified_name=qual,
+                        file_path=file_path,
+                        start_line=getattr(node, "lineno", 1),
+                        end_line=getattr(node, "end_lineno", getattr(node, "lineno", 1)),
+                        visibility=vis,
+                        is_exported=is_exp,
+                        normalized_signature=sig,
+                        parameter_count=p_cnt,
+                        required_parameter_count=req_cnt,
+                        decorators=decos,
+                        body_hash=body_hash,
+                        statement_count=stmt_count,
+                        is_stub=is_stub,
+                        calls=calls,
+                        parent_symbol=parent_qual,
+                        frontend="python-ast",
+                        frontend_version=py_ver,
+                    )
+                )
+                _visit_container(node.body, qual, False)
+
+            elif parent_qual is None and isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                val_node = getattr(node, "value", None)
+                val_dump = ast.dump(val_node, include_attributes=False) if val_node else "None"
+                b_hash = _hash_normalized_text(val_dump)
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        vis, is_exp = _is_public_name(target.id, True)
+                        kind = "constant" if target.id.isupper() else "variable"
+                        symbols.append(
+                            SymbolFact(
+                                schema_version=SYMBOL_FACT_SCHEMA_VERSION,
+                                symbol_id=f"{file_path}::{target.id}",
+                                language="python",
+                                kind=kind,
+                                name=target.id,
+                                qualified_name=target.id,
+                                file_path=file_path,
+                                start_line=getattr(node, "lineno", 1),
+                                end_line=getattr(node, "end_lineno", getattr(node, "lineno", 1)),
+                                visibility=vis,
+                                is_exported=is_exp,
+                                normalized_signature="=",
+                                parameter_count=0,
+                                required_parameter_count=0,
+                                decorators=(),
+                                body_hash=b_hash,
+                                statement_count=1,
+                                is_stub=False,
+                                calls=(),
+                                parent_symbol=None,
+                                frontend="python-ast",
+                                frontend_version=py_ver,
+                            )
+                        )
+
+    _visit_container(tree.body, None, True)
+    symbols.sort(key=lambda s: (s.start_line, s.end_line, s.qualified_name, s.kind))
+    legacy_names = sorted(extract_named_nodes(source, file_path))
+    exports = sorted({s.qualified_name for s in symbols if s.is_exported})
+
+    caps = build_capability_vector(
+        syntax_state="available",
+        syntax_provenance=f"python-ast@{py_ver}",
+        syntax_reason="AST parsed cleanly via stdlib ast",
+        symbolic_state="partial",
+        symbolic_reason="Intra-file declarations, scopes, and call sites extracted via AST",
+        flow_state="partial",
+        flow_reason="Intra-function guard calls and decorators extracted",
+    )
+
+    return ParseResult(
+        file_path=file_path,
+        language="python",
+        status=PARSER_STATUS_AVAILABLE,
+        complete=True,
+        frontend="python-ast",
+        frontend_version=py_ver,
+        symbols=symbols,
+        named_nodes=legacy_names,
+        call_sites=call_sites,
+        imports=sorted(set(imports)),
+        exports=exports,
+        capabilities=caps,
+    )
+
+
+# ==============================================================================
+# TREE-SITTER SYMBOL FACT EXTRACTION (JS, TS, TSX, Go, Rust, Java)
+# ==============================================================================
+
+_COMMENT_NODE_TYPES = frozenset({
+    "comment", "line_comment", "block_comment", "doc_comment",
+})
+
+
+def _ts_node_text(node) -> str:
+    if node is None or node.text is None:
+        return ""
+    return node.text.decode("utf-8", errors="replace")
+
+
+def _ts_non_comment_tokens(node) -> List[str]:
+    """Collect leaf token strings excluding comments."""
+    tokens: List[str] = []
+
+    def _walk(n):
+        if n.type in _COMMENT_NODE_TYPES:
+            return
+        if len(n.children) == 0:
+            txt = _ts_node_text(n).strip()
+            if txt:
+                tokens.append(txt)
+        else:
+            for c in n.children:
+                _walk(c)
+
+    if node is not None:
+        _walk(node)
+    return tokens
+
+
+def _ts_body_metrics(body_node) -> Tuple[str, int, bool]:
+    if body_node is None:
+        return _hash_normalized_text("STUB"), 0, True
+    tokens = _ts_non_comment_tokens(body_node)
+    # Strip enclosing braces { }
+    if len(tokens) >= 2 and tokens[0] == "{" and tokens[-1] == "}":
+        inner = tokens[1:-1]
+    else:
+        inner = tokens
+    inner_clean = [t for t in inner if t not in (";", ",")]
+    if not inner_clean:
+        return _hash_normalized_text("STUB"), 0, True
+    joined = " ".join(inner_clean)
+    if joined in ("return", "return null", "return nil", "todo ! ( )", "unimplemented ! ( )"):
+        return _hash_normalized_text("STUB"), 1, True
+    # Approximate statement count by counting statement-like child nodes
+    stmt_count = sum(
+        1
+        for ch in body_node.children
+        if ch.type not in ("{", "}", ";") and ch.type not in _COMMENT_NODE_TYPES
+    )
+    return _hash_normalized_text(joined), max(stmt_count, 1), False
+
+
+def _ts_param_metrics(params_node, lang_key: str) -> Tuple[str, int, int]:
+    if params_node is None:
+        return "()", 0, 0
+    tokens = _ts_non_comment_tokens(params_node)
+    sig = "".join(tokens)
+    # Count parameters excluding receiver/self
+    param_children = [
+        c for c in params_node.children
+        if c.type not in ("(", ")", ",", "self_parameter") and c.type not in _COMMENT_NODE_TYPES
+    ]
+    total = len(param_children)
+    required = 0
+    for c in param_children:
+        txt = _ts_node_text(c)
+        if c.type in ("optional_parameter", "assignment_pattern", "rest_pattern", "variadic_parameter_declaration"):
+            continue
+        if "?" in txt or "=" in txt or "..." in txt:
+            continue
+        required += 1
+    return sig, total, required
+
+
+def _ts_extract_calls(node, caller_qual: str, file_path: str, lang_key: str) -> Tuple[Tuple[str, ...], List[CallSiteFact]]:
+    calls: List[str] = []
+    call_sites: List[CallSiteFact] = []
+    nested_stop = {
+        "function_declaration", "method_definition", "arrow_function",
+        "function_item", "method_declaration", "class_declaration",
+    }
+
+    def _walk(curr, is_root: bool = False):
+        if not is_root and curr.type in nested_stop:
+            return
+        if curr.type in ("call_expression", "method_invocation"):
+            callee = ""
+            qualifier = ""
+            args_node = curr.child_by_field_name("arguments")
+            arg_count = 0
+            if args_node is not None:
+                arg_count = sum(
+                    1 for c in args_node.children
+                    if c.type not in ("(", ")", ",") and c.type not in _COMMENT_NODE_TYPES
+                )
+            if curr.type == "method_invocation":
+                name_n = curr.child_by_field_name("name")
+                obj_n = curr.child_by_field_name("object")
+                callee = _ts_node_text(name_n)
+                qualifier = _ts_node_text(obj_n)
+            else:
+                fn_n = curr.child_by_field_name("function")
+                if fn_n is not None:
+                    if fn_n.type == "identifier":
+                        callee = _ts_node_text(fn_n)
+                    elif fn_n.type in ("member_expression", "selector_expression", "field_expression", "scoped_identifier"):
+                        parts = _ts_node_text(fn_n).rsplit(".", 1)
+                        if len(parts) == 2:
+                            qualifier, callee = parts[0].strip(), parts[1].strip()
+                        elif "::" in _ts_node_text(fn_n):
+                            parts = _ts_node_text(fn_n).rsplit("::", 1)
+                            qualifier, callee = parts[0].strip(), parts[1].strip()
+                        else:
+                            callee = _ts_node_text(fn_n)
+            if callee:
+                full = f"{qualifier}.{callee}" if qualifier else callee
+                calls.append(full)
+                call_sites.append(
+                    CallSiteFact(
+                        file_path=file_path,
+                        line=curr.start_point[0] + 1,
+                        caller_qualified_name=caller_qual,
+                        callee_name=callee,
+                        qualifier=qualifier,
+                        arg_count=arg_count,
+                    )
+                )
+        for ch in curr.children:
+            _walk(ch, False)
+
+    if node is not None:
+        _walk(node, True)
+    return tuple(dict.fromkeys(calls)), call_sites
+
+
+def _extract_commonjs_exports(root_node) -> set[str]:
+    """Detect `module.exports = { a, b }` or `exports.a = ...` in JS/TS."""
+    exported: set[str] = set()
+
+    def _walk(n):
+        if n.type == "assignment_expression":
+            left = n.child_by_field_name("left")
+            right = n.child_by_field_name("right")
+            left_txt = _ts_node_text(left)
+            if left_txt in ("module.exports", "exports") and right is not None:
+                if right.type == "object":
+                    for ch in right.children:
+                        if ch.type == "shorthand_property_identifier":
+                            exported.add(_ts_node_text(ch))
+                        elif ch.type == "pair":
+                            k = ch.child_by_field_name("key")
+                            if k:
+                                exported.add(_ts_node_text(k))
+                elif right.type == "identifier":
+                    exported.add(_ts_node_text(right))
+            elif left_txt.startswith("exports.") or left_txt.startswith("module.exports."):
+                prop = left_txt.split(".")[-1]
+                if prop:
+                    exported.add(prop)
+        for c in n.children:
+            _walk(c)
+
+    _walk(root_node)
+    return exported
+
+
+def _extract_treesitter_parse_result(source: str, file_path: str, lang_key: str) -> ParseResult:
+    ts_ver = _treesitter_version()
+    ts_lang = _load_language(lang_key)
+    if ts_lang is None:
+        caps = build_capability_vector(
+            syntax_state="unavailable",
+            syntax_provenance="tree-sitter",
+            syntax_reason=f"Tree-sitter grammar for '{lang_key}' is not installed",
+        )
+        return ParseResult(
+            file_path=file_path,
+            language=lang_key,
+            status=PARSER_STATUS_GRAMMAR_UNAVAILABLE,
+            complete=False,
+            incomplete_reason=f"Missing Tree-sitter grammar package for '{lang_key}'",
+            frontend="tree-sitter",
+            frontend_version=ts_ver,
+            capabilities=caps,
+        )
+
+    from tree_sitter import Parser
+    parser = Parser(ts_lang)
+    tree = parser.parse(bytes(source, "utf-8"))
+    root = tree.root_node
+
+    has_syntax_error = bool(getattr(root, "has_error", False))
+    symbols: List[SymbolFact] = []
+    call_sites: List[CallSiteFact] = []
+    imports: List[str] = []
+    commonjs_exports = _extract_commonjs_exports(root) if lang_key in ("javascript", "typescript", "tsx") else set()
+
+    def _has_export_ancestor(n) -> bool:
+        curr = n.parent
+        while curr is not None:
+            if curr.type == "export_statement":
+                return True
+            curr = curr.parent
+        return False
+
+    def _child_modifiers_text(n) -> str:
+        parts = []
+        for ch in n.children:
+            if ch.type in ("modifiers", "visibility_modifier", "accessibility_modifier"):
+                parts.append(_ts_node_text(ch))
+        return " ".join(parts)
+
+    def _decorators_for_node(n) -> Tuple[str, ...]:
+        decos = []
+        for ch in n.children:
+            if ch.type in ("decorator", "marker_annotation", "annotation", "attribute_item"):
+                decos.append(_ts_node_text(ch).strip())
+            elif ch.type == "modifiers":
+                for sub in ch.children:
+                    if sub.type in ("marker_annotation", "annotation"):
+                        decos.append(_ts_node_text(sub).strip())
+        return tuple(decos)
+
+    def _go_receiver_type(method_node) -> Optional[str]:
+        rec = method_node.child_by_field_name("receiver")
+        if rec is None:
+            return None
+        # Look for type_identifier inside receiver parameter_list
+        for ch in rec.children:
+            if ch.type == "parameter_declaration":
+                t_node = ch.child_by_field_name("type")
+                if t_node is not None:
+                    return _ts_node_text(t_node).lstrip("*").strip()
+        txt = _ts_node_text(rec).strip("()")
+        parts = txt.split()
+        if parts:
+            return parts[-1].lstrip("*")
+        return None
+
+    def _walk(node, parent_qual: Optional[str], parent_exported: bool):
+        ntype = node.type
+
+        # Collect imports
+        if ntype in ("import_statement", "import_declaration", "use_declaration"):
+            imports.append(_ts_node_text(node).strip())
+
+        # Rust impl blocks qualify their inner function_items
+        if lang_key == "rust" and ntype == "impl_item":
+            type_node = node.child_by_field_name("type")
+            impl_type = _ts_node_text(type_node).split("<")[0].strip() if type_node else "impl"
+            body = node.child_by_field_name("body")
+            if body:
+                for ch in body.children:
+                    _walk(ch, impl_type, True)
+            return
+
+        rules = _LANG_RULES[lang_key]
+        name_field = rules.get(ntype)
+
+        # Also handle Rust trait signature items
+        if lang_key == "rust" and ntype == "function_signature_item":
+            name_field = "name"
+
+        if name_field:
+            name_node = node.child_by_field_name(name_field)
+            name = _ts_node_text(name_node).strip() if name_node else ""
+            if name:
+                container = parent_qual
+                if lang_key == "go" and ntype == "method_declaration":
+                    rec_type = _go_receiver_type(node)
+                    if rec_type:
+                        container = rec_type
+
+                qual = f"{container}.{name}" if container else name
+
+                # Kind mapping
+                if ntype in ("class_declaration",):
+                    kind = "class"
+                elif ntype in ("interface_declaration",):
+                    kind = "interface"
+                elif ntype in ("struct_item",):
+                    kind = "struct"
+                elif ntype in ("enum_item", "enum_declaration"):
+                    kind = "enum"
+                elif ntype in ("trait_item",):
+                    kind = "trait"
+                elif ntype in ("type_alias_declaration", "type_spec"):
+                    t_child = node.child_by_field_name("type")
+                    if t_child is not None and t_child.type == "struct_type":
+                        kind = "struct"
+                    elif t_child is not None and t_child.type == "interface_type":
+                        kind = "interface"
+                    else:
+                        kind = "type_alias"
+                elif ntype in ("const_spec", "const_item", "static_item"):
+                    kind = "constant"
+                elif ntype in ("method_definition", "method_declaration") or container is not None:
+                    kind = "method"
+                else:
+                    kind = "function"
+
+                # Visibility & export resolution
+                mods = _child_modifiers_text(node)
+                if lang_key == "go":
+                    is_exp = bool(name and name[0].isupper()) and (parent_exported if container else True)
+                    vis = "public" if is_exp else "private"
+                elif lang_key == "rust":
+                    has_pub = "pub" in mods.split() or mods.startswith("pub(")
+                    is_exp = (has_pub or ntype == "function_signature_item") and (parent_exported if container else True)
+                    vis = "public" if is_exp else "private"
+                elif lang_key == "java":
+                    if "private" in mods.split():
+                        vis, is_exp = "private", False
+                    elif "protected" in mods.split():
+                        vis, is_exp = "protected", True
+                    elif "public" in mods.split() or ntype == "method_declaration" and parent_exported:
+                        vis, is_exp = "public", True
+                    else:
+                        vis, is_exp = "package", False
+                else:
+                    # JS / TS / TSX
+                    if "private" in mods.split() or name.startswith("_") or name.startswith("#"):
+                        vis, is_exp = "private", False
+                    elif "protected" in mods.split():
+                        vis, is_exp = "protected", False
+                    else:
+                        vis = "public"
+                        if container:
+                            is_exp = parent_exported
+                        else:
+                            is_exp = _has_export_ancestor(node) or (name in commonjs_exports)
+
+                params_node = node.child_by_field_name("parameters")
+                sig, p_cnt, req_cnt = _ts_param_metrics(params_node, lang_key)
+                ret_node = (
+                    node.child_by_field_name("return_type")
+                    or node.child_by_field_name("result")
+                    or node.child_by_field_name("type")
+                )
+                if ret_node is not None and ntype not in ("type_spec", "const_item"):
+                    ret_txt = "".join(_ts_non_comment_tokens(ret_node)).lstrip(":")
+                    if ret_txt:
+                        sig = f"{sig}->{ret_txt}"
+
+                body_node = (
+                    node.child_by_field_name("body")
+                    or node.child_by_field_name("value")
+                    or (node.child_by_field_name("type") if ntype == "type_spec" else None)
+                )
+                b_hash, stmt_cnt, is_stub = _ts_body_metrics(body_node)
+                calls, cs = _ts_extract_calls(body_node or node, qual, file_path, lang_key)
+                call_sites.extend(cs)
+
+                symbols.append(
+                    SymbolFact(
+                        schema_version=SYMBOL_FACT_SCHEMA_VERSION,
+                        symbol_id=f"{file_path}::{qual}",
+                        language=lang_key,
+                        kind=kind,
+                        name=name,
+                        qualified_name=qual,
+                        file_path=file_path,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        visibility=vis,
+                        is_exported=is_exp,
+                        normalized_signature=sig,
+                        parameter_count=p_cnt,
+                        required_parameter_count=req_cnt,
+                        decorators=_decorators_for_node(node),
+                        body_hash=b_hash,
+                        statement_count=stmt_cnt,
+                        is_stub=is_stub,
+                        calls=calls,
+                        parent_symbol=container,
+                        frontend="tree-sitter",
+                        frontend_version=ts_ver,
+                    )
+                )
+
+                # Recurse into class/interface/trait/function/method bodies with container context
+                if kind in ("class", "interface", "trait", "enum", "struct", "function", "method"):
+                    child_exported = is_exp if kind in ("class", "interface", "trait", "enum", "struct") else False
+                    for ch in node.children:
+                        _walk(ch, qual, child_exported)
+                    return
+
+        elif ntype == "variable_declarator" and "function_declaration" in rules and parent_qual is None:
+            name_node = node.child_by_field_name("name")
+            val_node = node.child_by_field_name("value")
+            name = _ts_node_text(name_node).strip() if name_node else ""
+            if name:
+                is_arrow = val_node is not None and val_node.type in ("arrow_function", "function_expression", "function")
+                kind = "function" if is_arrow else ("constant" if name.isupper() else "variable")
+                is_exp = _has_export_ancestor(node) or (name in commonjs_exports)
+                vis = "private" if name.startswith("_") else ("public" if is_exp else "module")
+                if is_arrow:
+                    params_node = val_node.child_by_field_name("parameters")
+                    sig, p_cnt, req_cnt = _ts_param_metrics(params_node, lang_key)
+                    body_node = val_node.child_by_field_name("body")
+                    b_hash, stmt_cnt, is_stub = _ts_body_metrics(body_node)
+                    calls, cs = _ts_extract_calls(val_node, name, file_path, lang_key)
+                    call_sites.extend(cs)
+                else:
+                    sig, p_cnt, req_cnt = "=", 0, 0
+                    b_hash, stmt_cnt, is_stub = _ts_body_metrics(val_node)
+                    calls, cs = _ts_extract_calls(val_node, name, file_path, lang_key)
+                    call_sites.extend(cs)
+                symbols.append(
+                    SymbolFact(
+                        schema_version=SYMBOL_FACT_SCHEMA_VERSION,
+                        symbol_id=f"{file_path}::{name}",
+                        language=lang_key,
+                        kind=kind,
+                        name=name,
+                        qualified_name=name,
+                        file_path=file_path,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        visibility=vis,
+                        is_exported=is_exp,
+                        normalized_signature=sig,
+                        parameter_count=p_cnt,
+                        required_parameter_count=req_cnt,
+                        decorators=(),
+                        body_hash=b_hash,
+                        statement_count=stmt_cnt,
+                        is_stub=is_stub,
+                        calls=calls,
+                        parent_symbol=None,
+                        frontend="tree-sitter",
+                        frontend_version=ts_ver,
+                    )
+                )
+                return
+
+        for ch in node.children:
+            _walk(ch, parent_qual, parent_exported)
+
+    _, mod_cs = _ts_extract_calls(root, "<module>", file_path, lang_key)
+    call_sites.extend(mod_cs)
+    _walk(root, None, True)
+    symbols.sort(key=lambda s: (s.start_line, s.end_line, s.qualified_name, s.kind))
+    # Deduplicate call sites deterministically (prefer specific caller over <module>)
+    dedup_cs: Dict[Tuple[str, int, str, str], CallSiteFact] = {}
+    for cs in call_sites:
+        key = (cs.file_path, cs.line, cs.callee_name, cs.qualifier)
+        if key not in dedup_cs or dedup_cs[key].caller_qualified_name == "<module>":
+            dedup_cs[key] = cs
+    call_sites = sorted(dedup_cs.values(), key=lambda c: (c.line, c.callee_name, c.caller_qualified_name))
+    legacy_names: set[str] = set()
+    _collect(root, _LANG_RULES[lang_key], legacy_names)
+    exports = sorted({s.qualified_name for s in symbols if s.is_exported})
+
+    if has_syntax_error:
+        caps = build_capability_vector(
+            syntax_state="partial",
+            syntax_provenance=f"tree-sitter@{ts_ver}",
+            syntax_reason="Tree-sitter syntax tree contains ERROR/MISSING nodes; partial recovery only",
+            symbolic_state="partial",
+            symbolic_reason="Symbols extracted from error-recovered syntax tree",
+        )
+        return ParseResult(
+            file_path=file_path,
+            language=lang_key,
+            status=PARSER_STATUS_PARSE_ERROR,
+            complete=False,
+            incomplete_reason="Syntax error node(s) detected in Tree-sitter parse tree",
+            error_detail="tree.root_node.has_error == True",
+            frontend="tree-sitter",
+            frontend_version=ts_ver,
+            symbols=symbols,
+            named_nodes=sorted(legacy_names),
+            call_sites=call_sites,
+            imports=sorted(set(imports)),
+            exports=exports,
+            capabilities=caps,
+        )
+
+    caps = build_capability_vector(
+        syntax_state="available",
+        syntax_provenance=f"tree-sitter@{ts_ver}",
+        syntax_reason=f"Tree-sitter '{lang_key}' grammar parsed cleanly",
+        symbolic_state="partial",
+        symbolic_reason="Intra-file declarations, scopes, and call sites extracted via Tree-sitter",
+        flow_state="partial",
+        flow_reason="Intra-function call sites extracted",
+    )
+
+    return ParseResult(
+        file_path=file_path,
+        language=lang_key,
+        status=PARSER_STATUS_AVAILABLE,
+        complete=True,
+        frontend="tree-sitter",
+        frontend_version=ts_ver,
+        symbols=symbols,
+        named_nodes=sorted(legacy_names),
+        call_sites=call_sites,
+        imports=sorted(set(imports)),
+        exports=exports,
+        capabilities=caps,
+    )
+
+
+def extract_symbols(source: str, path: str) -> ParseResult:
+    """
+    Extract rich SymbolFact records, call sites, and explicit completeness
+    status for a source file. Never silently equates missing grammar or
+    unsupported extensions with 'nothing removed'.
+    """
+    lang_key = language_for_path(path)
+    if lang_key is None:
+        ext = Path(path).suffix.lower() or "<no-extension>"
+        caps = build_capability_vector(
+            syntax_state="unavailable",
+            syntax_provenance="none",
+            syntax_reason=f"Extension '{ext}' has no registered structural parser",
+        )
+        return ParseResult(
+            file_path=path,
+            language=None,
+            status=PARSER_STATUS_UNSUPPORTED_EXTENSION,
+            complete=False,
+            incomplete_reason=f"Unsupported file extension '{ext}'",
+            frontend="none",
+            frontend_version="0",
+            capabilities=caps,
+        )
+    if lang_key == "python":
+        return _extract_python_parse_result(source, path)
+    try:
+        return _extract_treesitter_parse_result(source, path, lang_key)
+    except Exception as e:
+        ts_ver = _treesitter_version()
+        caps = build_capability_vector(
+            syntax_state="failed",
+            syntax_provenance=f"tree-sitter@{ts_ver}",
+            syntax_reason=f"Exception during Tree-sitter extraction: {e}",
+        )
+        return ParseResult(
+            file_path=path,
+            language=lang_key,
+            status=PARSER_STATUS_PARSE_ERROR,
+            complete=False,
+            incomplete_reason="Parser raised exception during syntax extraction",
+            error_detail=str(e),
+            frontend="tree-sitter",
+            frontend_version=ts_ver,
+            capabilities=caps,
+        )
