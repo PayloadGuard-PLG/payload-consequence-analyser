@@ -24,7 +24,9 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Union
 from dataclasses import dataclass, field
+import os
 import structural_parser
+import consequence_engine
 
 __version__ = "1.3.0"
 
@@ -893,15 +895,21 @@ DEFAULT_CONFIG = {
         "high_signal_score": 3,
         "trusted_oidc_consumers": [],
     },
+    "consequence": {
+        "enabled": True,
+        "mode": "shadow",
+        "max_repo_files": 200,
+    },
 }
 
 
 @dataclass
 class PayloadGuardConfig:
-    thresholds: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["thresholds"]))
-    semantic: dict   = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["semantic"]))
-    sca: dict        = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["sca"]))
-    actions: dict    = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["actions"]))
+    thresholds: dict  = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["thresholds"]))
+    semantic: dict    = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["semantic"]))
+    sca: dict         = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["sca"]))
+    actions: dict     = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["actions"]))
+    consequence: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG["consequence"]))
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -940,6 +948,7 @@ def load_config(repo_path: str) -> PayloadGuardConfig:
         semantic=merged.get("semantic", copy.deepcopy(DEFAULT_CONFIG["semantic"])),
         sca=merged.get("sca",           copy.deepcopy(DEFAULT_CONFIG["sca"])),
         actions=merged.get("actions",   copy.deepcopy(DEFAULT_CONFIG["actions"])),
+        consequence=merged.get("consequence", copy.deepcopy(DEFAULT_CONFIG["consequence"])),
     )
     
 # ==============================================================================
@@ -1061,6 +1070,7 @@ class PayloadAnalyzer:
             # ('-' entries) and avoids loading blobs into memory.
             lines_added = 0
             lines_deleted = 0
+            per_file_numstat: dict[str, tuple[int, int]] = {}
             try:
                 numstat = self.repo.git.diff(
                     '--numstat', merge_base[0].hexsha, branch_ref
@@ -1068,11 +1078,12 @@ class PayloadAnalyzer:
                 for line in numstat.splitlines():
                     parts = line.split('\t')
                     if len(parts) == 3:
-                        added_str, deleted_str = parts[0], parts[1]
-                        if added_str != '-':
-                            lines_added += int(added_str)
-                        if deleted_str != '-':
-                            lines_deleted += int(deleted_str)
+                        added_str, deleted_str, npath = parts[0], parts[1], parts[2]
+                        f_add = int(added_str) if added_str != '-' else 0
+                        f_del = int(deleted_str) if deleted_str != '-' else 0
+                        lines_added += f_add
+                        lines_deleted += f_del
+                        per_file_numstat[npath] = (f_add, f_del)
             except Exception:
                 pass
 
@@ -1210,6 +1221,93 @@ class PayloadAnalyzer:
             # Mutable action ref advisory (no score impact)
             mutable_tag_warnings = _scan_mutable_action_refs(diffs)
 
+            # SEMANTIC CHANGE GRAPH & DIFFERENTIAL CONSEQUENCE ENGINE (consequence.v1)
+            consequence_cfg = getattr(self.config, "consequence", DEFAULT_CONFIG["consequence"])
+            consequence_mode = (
+                os.environ.get("PAYLOADGUARD_CONSEQUENCE_MODE")
+                or consequence_cfg.get("mode", "shadow")
+            ).lower()
+            max_repo_files = int(consequence_cfg.get("max_repo_files", 200))
+            consequence_report_dict: dict = {}
+
+            if consequence_cfg.get("enabled", True):
+                try:
+                    file_deltas: list[consequence_engine.FileDeltaInput] = []
+                    for d in diffs:
+                        fpath = d.b_path or d.a_path or ""
+                        old_p = d.a_path if d.change_type == "R" else None
+                        base_src = None
+                        head_src = None
+                        if d.a_blob is not None and d.change_type in ("D", "M", "R"):
+                            try:
+                                base_src = d.a_blob.data_stream.read().decode("utf-8", errors="ignore")
+                            except Exception:
+                                base_src = None
+                        if d.b_blob is not None and d.change_type in ("A", "M", "R"):
+                            try:
+                                head_src = d.b_blob.data_stream.read().decode("utf-8", errors="ignore")
+                            except Exception:
+                                head_src = None
+                        f_add, f_del = per_file_numstat.get(fpath, (0, 0))
+                        file_deltas.append(
+                            consequence_engine.FileDeltaInput(
+                                file_path=fpath,
+                                old_path=old_p,
+                                change_type=d.change_type or "M",
+                                base_source=base_src,
+                                head_source=head_src,
+                                lines_added=f_add,
+                                lines_deleted=f_del,
+                            )
+                        )
+
+                    repo_head_files: dict[str, str] = {}
+                    try:
+                        count_blobs = 0
+                        for item in branch_commit.tree.traverse():
+                            if getattr(item, "type", None) != "blob":
+                                continue
+                            if structural_parser.language_for_path(item.path) is None:
+                                continue
+                            if count_blobs >= max_repo_files:
+                                break
+                            try:
+                                repo_head_files[item.path] = item.data_stream.read().decode("utf-8", errors="ignore")
+                                count_blobs += 1
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    c_engine = consequence_engine.ConsequenceEngine(
+                        mode=consequence_mode,
+                        max_repo_files=max_repo_files,
+                    )
+                    c_report = c_engine.analyze_deltas(file_deltas, repo_head_files)
+                    consequence_report_dict = c_report.to_dict()
+
+                    # In enforce mode, if legacy L4 flagged CRITICAL solely due to pure renames/moves
+                    # (0 unmatched REMOVED and 0 GUTTED symbols with complete parsing), suppress L4 false positive
+                    if consequence_mode == "enforce" and overall_structural_severity == "CRITICAL":
+                        t_counts = consequence_report_dict.get("graph_summary", {}).get("transition_counts", {})
+                        p_comp = consequence_report_dict.get("parser_completeness", {}).get("complete", False)
+                        if (
+                            p_comp
+                            and t_counts.get("REMOVED", 0) == 0
+                            and t_counts.get("GUTTED", 0) == 0
+                            and t_counts.get("RENAMED_AND_GUTTED", 0) == 0
+                            and t_counts.get("MOVED_AND_GUTTED", 0) == 0
+                            and (t_counts.get("RENAMED", 0) > 0 or t_counts.get("MOVED", 0) > 0)
+                        ):
+                            overall_structural_severity = "LOW"
+                except Exception as ce_exc:
+                    consequence_report_dict = {
+                        "schema_version": consequence_engine.CONSEQUENCE_SCHEMA_VERSION,
+                        "mode": consequence_mode,
+                        "error": str(ce_exc),
+                        "findings": [],
+                    }
+
             # LAYER 3: CONSEQUENCE VERDICT
             unverified_dep_count = len(sca_flags) if self.config.sca.get("fail_on_unknown", True) else 0
             verdict = self._assess_consequence(
@@ -1231,6 +1329,32 @@ class PayloadAnalyzer:
                     f['severity'] == 'CRITICAL' for f in ai_config_flags
                 ),
             )
+
+            # Apply SCG Consequence Engine policy when mode is 'advisory' or 'enforce'
+            if consequence_mode in ("advisory", "enforce") and consequence_report_dict.get("findings"):
+                c_findings = consequence_report_dict.get("findings", [])
+                block_findings = [f for f in c_findings if f.get("policy_recommendation") == "BLOCK"]
+                review_findings = [f for f in c_findings if f.get("policy_recommendation") == "REVIEW"]
+
+                for f in block_findings + review_findings:
+                    verdict["flags"].append(f"[{f['detector_id']}] {f['summary']}")
+
+                if consequence_mode == "enforce":
+                    if block_findings:
+                        verdict["status"] = "DESTRUCTIVE"
+                        verdict["severity"] = "CRITICAL"
+                        verdict["severity_score"] = max(verdict.get("severity_score", 0.0), 5.0)
+                        verdict["recommendation"] = "❌ DO NOT MERGE — Verified destructive code consequence detected"
+                    elif review_findings and verdict["status"] == "SAFE":
+                        verdict["status"] = "REVIEW"
+                        verdict["severity"] = "MEDIUM"
+                        verdict["severity_score"] = max(verdict.get("severity_score", 0.0), 1.0)
+                        verdict["recommendation"] = "→ Proceed with normal review process, but note the flags above"
+                elif consequence_mode == "advisory":
+                    if (block_findings or review_findings) and verdict["status"] == "SAFE":
+                        verdict["status"] = "REVIEW"
+                        verdict["severity"] = "MEDIUM"
+                        verdict["severity_score"] = max(verdict.get("severity_score", 0.0), 1.0)
 
             # LAYER 5a: TEMPORAL DRIFT
             temporal_th = self.config.thresholds["temporal"]
@@ -1348,6 +1472,7 @@ class PayloadAnalyzer:
                     "critical": critical_deletions[:10],
                     "all": deleted_files[:30],
                 },
+                "consequence_analysis": consequence_report_dict,
                 "runtime_events": _load_runtime_events(),
             }
 
@@ -2043,6 +2168,24 @@ def print_report(report):
         for cf in commit_flags[:5]:
             print(f"   [{cf['sha']}] {cf['message']}")
 
+    ca_rep = report.get('consequence_analysis', {})
+    ca_findings = ca_rep.get('findings', [])
+    if ca_findings or ca_rep.get('mode', 'shadow') != 'shadow':
+        gs = ca_rep.get('graph_summary', {})
+        t_counts = gs.get('transition_counts', {})
+        t_summary = ", ".join(f"{k}={v}" for k, v in sorted(t_counts.items())) if t_counts else "none"
+        print(f"\n🧠 CONSEQUENCE ANALYSIS ({ca_rep.get('schema_version', 'consequence.v1')})")
+        print(f"   Mode: {ca_rep.get('mode', 'shadow')} | Recommended: {ca_rep.get('recommended_verdict', 'SAFE')} (score: {ca_rep.get('recommended_score', 0)})")
+        print(f"   Transitions: {t_summary}")
+        for cf in ca_findings[:10]:
+            print(f"   [{cf['severity']}/{cf['policy_recommendation']}] {cf['detector_id']} ({cf['consequence_class']}) [{cf['tier']}]")
+            print(f"      Summary: {cf['summary']}")
+            for ev in cf.get('evidence', [])[:3]:
+                loc = f"{ev['file']}:{ev['line']}" if ev.get('file') else "repo"
+                print(f"      Evidence ({loc}): {ev['detail']}")
+            if cf.get('remediation'):
+                print(f"      Fix: {cf['remediation']}")
+
     print(f"\n🔍 VERDICT: {verdict['status']} [{verdict['severity']}]")
     for flag in verdict['flags']:
         print(f"   ⚠️  {flag}")
@@ -2351,6 +2494,37 @@ def format_markdown_report(report: dict) -> str:
             )
         out.append("")
 
+    # ── Consequence Analysis (consequence.v1) ─────────────────────────────────
+    ca_rep = report.get('consequence_analysis', {})
+    ca_findings = ca_rep.get('findings', [])
+    if ca_findings:
+        out.append("### 🧠 Consequence Analysis (`consequence.v1`)")
+        out.append(
+            f"**Mode:** `{ca_rep.get('mode', 'shadow')}`  |  "
+            f"**Recommended Verdict:** `{ca_rep.get('recommended_verdict', 'SAFE')}`"
+        )
+        out.append("")
+        out.append("| Detector | Class | Tier | Confidence | Policy | Summary |")
+        out.append("|---|---|---|---|---|---|")
+        for cf in ca_findings[:10]:
+            out.append(
+                f"| `{cf['detector_id']}` | `{cf['consequence_class']}` | `{cf['tier']}` | "
+                f"`{cf['confidence']}` | `{cf['policy_recommendation']}` | {_md_escape(cf['summary'])} |"
+            )
+        out.append("")
+        out.append("<details><summary>Evidence & Remediation</summary>")
+        out.append("")
+        for cf in ca_findings[:10]:
+            out.append(f"#### `{cf['detector_id']}` — `{cf['consequence_class']}` (`{cf['policy_recommendation']}`)")
+            for ev in cf.get('evidence', [])[:5]:
+                loc = f"{ev['file']}:{ev['line']}" if ev.get('file') else "repo"
+                out.append(f"- **`{_md_escape(loc)}`** (`{ev['kind']}`): {_md_escape(ev['detail'])}")
+            if cf.get('remediation'):
+                out.append(f"- **Remediation:** {_md_escape(cf['remediation'])}")
+            out.append("")
+        out.append("</details>")
+        out.append("")
+
     # ── Deleted Files ─────────────────────────────────────────────────────────
     if deleted['total'] > 0:
         out.append(f"### 🗑️ Deleted Files ({deleted['total']} total)")
@@ -2378,6 +2552,116 @@ def format_markdown_report(report: dict) -> str:
     out.append(f"_PayloadGuard scan — {ts}_")
 
     return "\n".join(out)
+
+
+def format_sarif_report(report: dict) -> dict:
+    """
+    Generate a SARIF 2.1.0 dictionary from a PayloadGuard report for native
+    GitHub Code Scanning and IDE inline annotations.
+    """
+    ca_rep = report.get("consequence_analysis", {})
+    ca_findings = ca_rep.get("findings", [])
+
+    level_map = {
+        "CRITICAL": "error",
+        "HIGH": "error",
+        "MEDIUM": "warning",
+        "LOW": "note",
+        "INFO": "note",
+    }
+
+    rules_by_id = {}
+    results = []
+
+    for cf in ca_findings:
+        rule_id = cf.get("detector_id", "PG-CONSEQUENCE")
+        c_class = cf.get("consequence_class", "CONSEQUENCE")
+        sev = cf.get("severity", "MEDIUM")
+        level = level_map.get(sev, "warning")
+
+        if rule_id not in rules_by_id:
+            rules_by_id[rule_id] = {
+                "id": rule_id,
+                "name": c_class,
+                "shortDescription": {"text": f"PayloadGuard {rule_id}: {c_class}"},
+                "help": {
+                    "text": cf.get("remediation") or "Review consequence evidence before merging."
+                },
+                "defaultConfiguration": {"level": level},
+            }
+
+        locations = []
+        for ev in cf.get("evidence", []):
+            fpath = ev.get("file")
+            line = max(int(ev.get("line") or 1), 1)
+            if fpath:
+                locations.append(
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": fpath},
+                            "region": {"startLine": line},
+                        }
+                    }
+                )
+        if not locations:
+            for fpath in cf.get("affected_files", []):
+                locations.append(
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": fpath},
+                            "region": {"startLine": 1},
+                        }
+                    }
+                )
+
+        msg_text = f"[{c_class} | {cf.get('tier', '')} | {cf.get('policy_recommendation', '')}] {cf.get('summary', '')}"
+        if cf.get("remediation"):
+            msg_text += f" Remediation: {cf['remediation']}"
+
+        results.append(
+            {
+                "ruleId": rule_id,
+                "level": level,
+                "message": {"text": msg_text},
+                "locations": locations,
+                "properties": {
+                    "finding_id": cf.get("finding_id"),
+                    "consequence_class": c_class,
+                    "tier": cf.get("tier"),
+                    "confidence": cf.get("confidence"),
+                    "severity": sev,
+                    "policy_recommendation": cf.get("policy_recommendation"),
+                    "affected_symbols": cf.get("affected_symbols", []),
+                },
+            }
+        )
+
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "PayloadGuard",
+                        "informationUri": "https://github.com/PayloadGuard-PLG/payload-consequence-analyser",
+                        "version": ca_rep.get("schema_version", "consequence.v1"),
+                        "rules": list(rules_by_id.values()),
+                    }
+                },
+                "results": results,
+            }
+        ],
+    }
+
+
+def save_sarif_report(report, filename="payloadguard.sarif"):
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(format_sarif_report(report), f, indent=2)
+        print(f"✓ SARIF report saved to {filename}")
+    except Exception as e:
+        print(f"⚠️  Could not save SARIF report: {e}", file=sys.stderr)
 
 
 def save_json_report(report, filename="consequence_report.json"):
@@ -2428,9 +2712,17 @@ def main():
     parser.add_argument("--save-markdown", nargs="?", const="payloadguard-report.md",
                         metavar="FILE",
                         help="Save GitHub-flavoured markdown report (default: payloadguard-report.md)")
+    parser.add_argument("--save-sarif", nargs="?", const="payloadguard.sarif",
+                        metavar="FILE",
+                        help="Save SARIF 2.1.0 report for GitHub Code Scanning (default: payloadguard.sarif)")
+    parser.add_argument("--consequence-mode", choices=["shadow", "advisory", "enforce"],
+                        default=None,
+                        help="Consequence engine policy mode (default: shadow or payloadguard.yml setting)")
     args = parser.parse_args()
 
-    config   = load_config(args.repo_path)
+    config = load_config(args.repo_path)
+    if args.consequence_mode:
+        config.consequence["mode"] = args.consequence_mode
     analyzer = PayloadAnalyzer(args.repo_path, args.branch, args.target, config=config)
     report   = analyzer.analyze(pr_description=args.pr_description)
     print_report(report)
@@ -2440,6 +2732,9 @@ def main():
 
     if args.save_markdown:
         save_markdown_report(report, args.save_markdown)
+
+    if args.save_sarif:
+        save_sarif_report(report, args.save_sarif)
 
     if "error" in report:
         sys.exit(1)
