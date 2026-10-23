@@ -1095,4 +1095,88 @@ class TestDetectorAccuracyV2AndUsability:
             for loc in locs
         )
 
+    def test_d06_compound_boolop_guard_and_polyglot_state_guards(self):
+        """
+        Verify mutation-discovered edge cases:
+        1) Combining sequential `if` guards into an `or`-joined `if` preserves negated polarity (no FP).
+        2) Removing JS `if (!response.ok) throw ...` or Go `if s.started { return fmt.Errorf(...) }`
+           state-based abort guards fires D06_GUARD_REGRESSION (`GUARD_CLAUSE_REMOVED`).
+        """
+        engine = ConsequenceEngine(mode="enforce")
+
+        # 1. Benign compound BoolOp guard refactor -> SAFE
+        base_py = (
+            "class Auth:\n"
+            "    def login(self, user, password):\n"
+            "        if not user or not user['active']:\n"
+            "            return None\n"
+            "        if not self.validator.verify(password):\n"
+            "            return None\n"
+            "        return 'tok'\n"
+        )
+        head_py = (
+            "class Auth:\n"
+            "    def login(self, user, password):\n"
+            "        if not user or not user['active'] or not self.validator.verify(password):\n"
+            "            return None\n"
+            "        return 'tok'\n"
+        )
+        rep_py = engine.analyze_deltas([
+            FileDeltaInput("auth.py", change_type="M", base_source=base_py, head_source=head_py)
+        ])
+        assert rep_py.recommended_verdict == "SAFE"
+        assert [f for f in rep_py.findings if f.detector_id == DETECTOR_D06_GUARD] == []
+
+        # 2. JS state-guard removal (`if (!response.ok) throw new Error(...)`) -> DESTRUCTIVE
+        base_js = (
+            "async function fetchUser(userId) {\n"
+            "  const response = await fetch(`/users/${userId}`);\n"
+            "  if (!response.ok) {\n"
+            "    throw new Error('failed');\n"
+            "  }\n"
+            "  return response.json();\n"
+            "}\n"
+        )
+        head_js = (
+            "async function fetchUser(userId) {\n"
+            "  const response = await fetch(`/users/${userId}`);\n"
+            "  return response.json();\n"
+            "}\n"
+        )
+        rep_js = engine.analyze_deltas([
+            FileDeltaInput("api.js", change_type="M", base_source=base_js, head_source=head_js)
+        ])
+        assert rep_js.recommended_verdict == "DESTRUCTIVE"
+        d06_js = [f for f in rep_js.findings if f.detector_id == DETECTOR_D06_GUARD]
+        assert len(d06_js) == 1
+        assert any(e.kind == "GUARD_CLAUSE_REMOVED" for e in d06_js[0].evidence)
+
+        # 3. Go state-guard removal (`if s.started { return fmt.Errorf(...) }`) -> DESTRUCTIVE
+        base_go = (
+            "package main\n"
+            "import \"fmt\"\n"
+            "func (s *Server) Start() error {\n"
+            "\tif s.started {\n"
+            "\t\treturn fmt.Errorf(\"already started\")\n"
+            "\t}\n"
+            "\ts.started = true\n"
+            "\treturn nil\n"
+            "}\n"
+        )
+        head_go = (
+            "package main\n"
+            "func (s *Server) Start() error {\n"
+            "\ts.started = true\n"
+            "\treturn nil\n"
+            "}\n"
+        )
+        rep_go = engine.analyze_deltas([
+            FileDeltaInput("utils.go", change_type="M", base_source=base_go, head_source=head_go)
+        ])
+        assert rep_go.recommended_verdict == "DESTRUCTIVE"
+        d06_go = [f for f in rep_go.findings if f.detector_id == DETECTOR_D06_GUARD]
+        assert len(d06_go) == 1
+        assert any(e.kind == "GUARD_CLAUSE_REMOVED" for e in d06_go[0].evidence)
+
+
 

@@ -1215,6 +1215,31 @@ class ConsequenceEngine:
                     )
                 )
 
+            # State-guard clauses (`if (!response.ok) throw ...` / `if s.started { return fmt.Errorf(...) }`)
+            b_state_guards = {c for c in b_conds if c.startswith("if_state_guard:")}
+            h_state_guards = {c for c in h_conds if c.startswith("if_state_guard:")}
+            removed_state_guards = sorted(b_state_guards - h_state_guards)
+            # Only flag if the function did not replace the state guard with a new call-based guard
+            added_if_callees = set(h_if.keys()) - set(b_if.keys())
+            if removed_state_guards and not added_if_callees and not hs.is_stub:
+                for sg in removed_state_guards:
+                    parts = sg.split(":", 3)
+                    if len(parts) == 4:
+                        _, subj, pol, act = parts
+                        removed_calls.append(f"guard({subj})")
+                        ev_items.append(
+                            EvidenceItem(
+                                kind="GUARD_CLAUSE_REMOVED",
+                                file=hs.file_path,
+                                line=hs.start_line,
+                                symbol=hs.qualified_name,
+                                detail=(
+                                    f"Removed enforcing state guard on '{subj}' ({pol} -> {act}) "
+                                    f"from '{hs.qualified_name}'"
+                                ),
+                            )
+                        )
+
             # Exception handler swallowed (raise/rollback/return_deny -> swallowed_noop/swallowed_allow)
             b_exc = {c.split(":", 1)[1] for c in b_conds if c.startswith("except_handler:")}
             h_exc = {c.split(":", 1)[1] for c in h_conds if c.startswith("except_handler:")}
