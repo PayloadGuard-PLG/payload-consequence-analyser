@@ -2,6 +2,48 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-23 — SCG Consequence Engine (`consequence.v1`) & `D01`–`D06` v2 shipped + validated
+
+### What was built
+
+Implemented and validated the Semantic Consequence Graph (`consequence.v1`) differential analysis engine across Python and Tree-sitter languages (JS/TS/Go/Rust/Java), upgrading PayloadGuard from pure additive line/node counting to evidence-driven symbol consequence analysis. Merged via PR #95 (`5965664`) and PR #97 (`cb74a6e`) in `payload-consequence-analyser`, and PR #74 (`4e8e1df`) and PR #75 (`dcc5522`) in `payloadguard-test-harness`.
+
+### Files changed
+
+**`structural_parser.py`:**
+- Added `SymbolFact` dataclass and `extract_symbol_facts(content, filepath)` across Python (`ast`) and JS/TS/Go/Rust/Java (`tree-sitter`).
+- Extracted `qualified_name`, `signature_shape`, `body_norm_hash`, `body_tokens`, `calls`, `imports` (including `alias:module.target` tracking), `guard_conditions` (`if`/`assert`/guard predicates), `has_auth_signal`, `is_exported`, and `is_hollow_body`.
+
+**`consequence_engine/` (`models.py`, `matcher.py`, `detectors.py`, `engine.py`, `sarif.py`):**
+- 5-stage symbol matching algorithm (`match_symbols`) pairing base and head `SymbolFact` sets via exact qualified match, exact `body_norm_hash` rename/move match, and weighted signature/body/call Jaccard similarity (`RENAMED`, `MOVED`, `MODIFIED`, `DELETED`, `ADDED`).
+- Detectors `D01`–`D06` v2:
+  - `D01_RENAME_MOVE`: Reconciles renamed and moved symbols (`is_benign_refactor=True`), suppressing false positives on class renames (`T12`) and cross-file moves.
+  - `D02_HOLLOW_BODY`: Detects implementations gutted to pass/stub/constant returns while preserving signatures.
+  - `D03_COMPOUND_LOSS`: Resolves `A03` (`adversarial/slow-deletion`) and `A06` (`adversarial/threshold-gaming`) after filtering out `D01` renames/moves.
+  - `D04_PUBLIC_API_BREAK` v2: Detects removed or signature-broken exported symbols with static caller resolution across standard and aliased imports.
+  - `D05_SECURITY_TOUCH`: Flags deleted or hollowed security/auth/validation symbols (`CRITICAL`).
+  - `D06_GUARD_REGRESSION` v2: Detects removed `if`/`assert` guard predicates inside modified functions even when the function body remains non-hollow.
+- `sarif.py`: SARIF 2.1.0 generator (`generate_sarif_report`) with `reportingDescriptor` rules for `D01`–`D06`, physical locations, and remediation guidance.
+
+**`analyze.py`:**
+- Integrated `ConsequenceEngine` into `PayloadAnalyzer.analyze()` with `consequence.mode` (`shadow | enforce | off`), CLI `--consequence-mode`, and `--save-sarif`.
+- Upgraded `print_report()` and `generate_markdown_summary()` with structured consequence tables and collapsible `<details><summary>Evidence & Remediation</summary>` blocks.
+
+**`test_consequence_engine.py`:**
+- Added 31 unit and integration tests covering `SymbolFact` v1, 5-stage matching, `D01`–`D06` v2, CLI/Markdown/SARIF usability surfaces, and live harness branch validation (`A03`, `A06`, `T12`, `T01`).
+
+### Test & harness verification results
+
+```
+python -m pytest test_consequence_engine.py test_analyzer.py -q
+315 passed, 0 failed
+```
+
+- **Permanent harness verification (`tools/validate_manifest.py --verify-consequence`):** 38/38 active permanent branches pass all `expected_consequence` oracle assertions in both `shadow` and `enforce` modes.
+- **Synthesized payload verification:** 8/8 adversarial and benign refactoring payload branches passed (`synth/guard-regression-auth`, `synth/aliased-api-break`, `synth/cross-file-refactor`, `synth/hollow-auth-bypass`, `synth/distributed-slow-delete`, `synth/compound-subthreshold`, `synth/benign-guard-refactor`, `synth/benign-class-rename`) with 100% precision and 0% false positives.
+
+---
+
 ## 2026-06-11 — Sprint 1 complete: L2d AI tooling config poisoning detection shipped
 
 ### What was built
