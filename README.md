@@ -1,14 +1,14 @@
 # PayloadGuard
 
-**Version:** 1.4.0-dev &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Released:** May 2026
+**Version:** 1.4.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Updated:** October 2026
 
 [![Dafny Verification](https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml/badge.svg)](https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml)
 
-**Formally verified** — 36 CrossHair contracts · 10 Z3 SMT proofs · 12 Dafny postconditions · 274 tests pass · 3 independent proof methods. → [`PROOFS.md`](PROOFS.md)
+**Formally verified** — 36 CrossHair contracts · 10 Z3 SMT proofs · 12 Dafny postconditions · 315 tests pass · 3 independent proof methods. → [`PROOFS.md`](PROOFS.md)
 
-PayloadGuard is a GitHub Action that forensically scans pull requests for destructive, deceptive, or malicious code payloads before they reach your main branch.
+PayloadGuard is a GitHub Action and multi-language consequence analysis engine that forensically scans pull requests for destructive, deceptive, or malicious code payloads before they reach your main branch.
 
-It was built for the class of attack where a branch held open for months lands as a *"minor fix"* and wipes the codebase in a single merge. Wire it to branch protection and the merge button is blocked automatically — no human review required.
+It was built for the class of attack where a branch held open for months lands as a *"minor fix"* and wipes the codebase in a single merge — as well as subtle adversarial payloads that invert security guards, swallow transaction rollbacks, gut renamed symbols into no-op stubs, or distribute capability removals below per-file deletion thresholds. Wire it to branch protection and the merge button is blocked automatically.
 
 ---
 
@@ -17,11 +17,14 @@ It was built for the class of attack where a branch held open for months lands a
 | Threat | Example |
 |---|---|
 | Mass deletion disguised as a refactor | 312-day-old branch submitted as *"minor syntax fix"*, deleting 60 files and 11,967 lines |
-| Structural gutting | Authentication layer silently removed function by function across multiple files |
-| Deceptive PR descriptions | Description says *"update config"* — diff deletes the entire security module |
-| Workflow poisoning | Base64 payloads, credential exfiltration, OIDC token theft, dormant triggers |
-| AI tooling config poisoning | Malicious `.claude/settings.json` or `package.json` hook that executes when a developer opens the repo in an AI coding agent or IDE |
-| Supply chain injection | Unverified packages added to manifests under the radar |
+| Structural gutting & stub replacement | Authentication layer silently removed function by function across multiple files, or renamed and gutted into `pass` / `return None` stubs (`D02`) |
+| Distributed deletion & threshold gaming | Removing 1 capability per file across 5 files (`A03`) or padding deleted security methods with trivial 1-line getters (`A06`) (`D03`) |
+| Broken cross-file callers & API contracts | Deleting a function/method or tightening required parameters while callers (including aliased imports) still invoke the old contract (`D04`) |
+| Security guard & rollback regression | Removing `@require_auth` decorators, dropping `self._rollback()`, inverting guard polarity (`if not verify()` $\to$ `if verify()`), inserting early `return True` bypasses, or swallowing exceptions (`D06`) |
+| Deceptive PR descriptions | Description says *"update config"* — diff deletes the entire security module (`L5b`) |
+| Workflow poisoning | Base64 payloads, credential exfiltration, OIDC token theft, dormant triggers (`L2c`) |
+| AI tooling config poisoning | Malicious `.claude/settings.json` or `package.json` hook that executes when a developer opens the repo in an AI coding agent or IDE (`L2d`) |
+| Supply chain & manifest drift | Unverified packages added to manifests (`L2b`) or manifest dependencies changed without lockfile updates (`D05`) |
 | Typosquatted CI actions | `aws-actions-unofficial/` instead of `aws-actions/` — OIDC token handed to attacker |
 
 ---
@@ -61,15 +64,16 @@ The minimum viable deployment. Catches bulk deletion attacks, critical-path file
 **Verdict:** SAFE · REVIEW · CAUTION · DESTRUCTIVE  
 **Exit codes:** `0` = SAFE/REVIEW/CAUTION · `1` = analysis error · `2` = DESTRUCTIVE (merge blocked)
 
-### Standard — adds L2c, L4, L5a, L5b
+### Standard — adds L2c, L2d, L4, L5a, L5b, and SCG Consequence Engine (`consequence.v1`)
 
-Adds four layers that catch sophisticated evasion: workflow-based attacks, structural gutting distributed across files, stale branches from slow-burn campaigns, and PRs with descriptions designed to mislead reviewers.
+Adds layers that catch sophisticated evasion: workflow-based attacks, AI tooling config poisoning, structural gutting distributed across files, Semantic Change Graph (SCG) differential consequence analysis, stale branches from slow-burn campaigns, and PRs with descriptions designed to mislead reviewers.
 
 | Layer | What it adds |
 |---|---|
 | **L2c — Actions Poisoning** | Workflow files scanned for base64 payloads, credential exfiltration, OIDC escalation, forged identities, dormant triggers, unsafe `pull_request_target` |
 | **L2d — AI Config Poisoning** | AI tooling config files scanned for shell commands in session hooks, folder-open tasks, lifecycle scripts, `binding.gyp` shell chains, MCP local server commands, and Cursor NL imperatives — 9 file surfaces |
 | **L4 — Structural Drift** | AST-level diff — which named classes, functions, and constants were deleted, per file and cross-file |
+| **SCG Consequence Engine (`consequence.v1`)** | 5-stage symbol matching across renames/moves + 6 deterministic consequence detectors (`D01`–`D06`) covering stub weakening, distributed loss (`A03`), threshold gaming (`A06`), broken callers/API contracts, manifest drift, and guard/rollback regressions (`shadow`/`advisory`/`enforce`) |
 | **L5a — Temporal Drift** | Branch age × target commit velocity — quantified staleness score to catch slow-burn campaigns |
 | **L5b — Semantic Transparency** | Whether the PR description matches what the diff actually does |
 
@@ -201,16 +205,20 @@ pip install -r requirements.txt
 Scan a branch locally without opening a PR:
 
 ```bash
-# Core scan
+# Core scan (consequence engine runs in shadow mode by default)
 python analyze.py . feature/auth-refactor main
 
 # With PR description (enables semantic transparency — L5b)
 python analyze.py . feature/auth-refactor main \
   --pr-description "Refactor authentication module"
 
-# Save reports
+# Run with SCG Consequence Engine enforcement (shadow | advisory | enforce)
+python analyze.py . feature/auth-refactor main --consequence-mode enforce
+
+# Save JSON, GitHub Markdown, and SARIF 2.1.0 Code Scanning reports
 python analyze.py . feature/auth-refactor main --save-json
 python analyze.py . feature/auth-refactor main --save-markdown reports/scan.md
+python analyze.py . feature/auth-refactor main --save-sarif reports/payloadguard.sarif
 ```
 
 ---
@@ -325,6 +333,10 @@ actions:
 semantic:
   micro_scope_churn_limit: 50
   insertion_ratio_fix_threshold: 0.9
+
+consequence:
+  mode: shadow                       # shadow | advisory | enforce
+  max_repo_files: 200                # max head files indexed for cross-file caller verification
 ```
 
 ### SCA Allowlist (Layer 2b)
@@ -437,18 +449,31 @@ Scans added or modified AI tooling config files across 9 surfaces: `.claude/sett
 | STALE | 250–999 | Significant divergence — review diff carefully |
 | DANGEROUS | ≥ 1,000 | Rebase required before merging |
 
-### Structural Analysis Languages (L4)
+### Structural Analysis Languages (L4 & `consequence.v1`)
 
-| Language | Tracked constructs |
+| Language | Tracked constructs (`SymbolFact` v1 + legacy L4) |
 |---|---|
-| Python | Functions, classes, async functions, module-level assignments |
-| JavaScript / JSX | Functions, classes, arrow functions, variable declarators |
-| TypeScript / TSX | Functions, classes, interfaces, type aliases, enums |
-| Go | Functions, methods, type specs, const specs |
-| Rust | Functions, structs, enums, traits, const and static items |
-| Java | Methods, classes, interfaces, enums |
+| Python | Functions, methods, classes, async functions, module-level assignments, decorators, call sites, guard conditions, import aliases |
+| JavaScript / JSX | Functions, methods, classes, arrow functions, variable declarators, ES/CommonJS exports & imports, call sites, guard conditions |
+| TypeScript / TSX | Functions, methods, classes, interfaces, type aliases, enums, exports & imports, call sites, guard conditions |
+| Go | Functions, receiver-qualified methods, structs, interfaces, type specs, const specs, call sites, guard conditions |
+| Rust | Functions, `impl`-qualified methods, structs, enums, traits, const and static items, `use` aliases, call sites, guard conditions |
+| Java | Methods, classes, interfaces, enums, annotations, visibility modifiers, call sites, guard conditions |
 
-Files in languages without an installed grammar are skipped silently.
+Files in languages without an installed grammar or with syntax errors are reported explicitly via `D01_PARSER_INCOMPLETE` (`PARSE_ERROR`, `GRAMMAR_UNAVAILABLE`, `UNSUPPORTED_EXTENSION`).
+
+### SCG Consequence Engine (`consequence.v1`)
+
+The Consequence Engine (`consequence_engine.py`) matches `base` and `head` symbols through a 5-stage Semantic Change Graph (SCG) pipeline (exact ID $\to$ same-container signature/body match $\to$ cross-file move $\to$ container/member similarity rename $\to$ residual `REMOVED`/`ADDED`) and runs six deterministic detectors:
+
+| Detector ID | Consequence Classes | Epistemic Tier | Policy | What it detects |
+|---|---|---|---|---|
+| `D01_PARSER_INCOMPLETE` | `ANALYSIS_INCOMPLETE` | `ANALYSIS_INCOMPLETE` | `WARN` / `REVIEW` | Syntax errors (`PARSE_ERROR`), missing grammar packages, or unsupported extensions |
+| `D02_BODY_WEAKENING` / `D02_AMBIGUOUS_REFACTOR` | `BODY_GUTTED`, `RENAME_WITH_BODY_WEAKENING`, `AMBIGUOUS_REFACTOR` | `VERIFIED_CONSEQUENCE` / `ANALYSIS_INCOMPLETE` | `BLOCK` / `WARN` | Surviving or renamed/moved symbols whose bodies were gutted to no-op stubs (`pass`, `...`, `return None`, empty `{}`) |
+| `D03_COMPOUND_LOSS` | `DISTRIBUTED_SYMBOL_LOSS`, `THRESHOLD_GAMING_DELETION` | `VERIFIED_CONSEQUENCE` / `LIKELY_CONSEQUENCE` | `BLOCK` / `REVIEW` | Cross-file sub-threshold capability deletion (`A03`) and deletion-ratio dilution via trivial 1-line getters/comment padding (`A06`) |
+| `D04_PUBLIC_API_BREAK` | `UNRESOLVED_CALLER`, `PUBLIC_API_REMOVAL`, `PUBLIC_API_SIGNATURE_BREAK`, `PUBLIC_API_VISIBILITY_REDUCED` | `VERIFIED_CONSEQUENCE` / `LIKELY_CONSEQUENCE` | `BLOCK` / `REVIEW` / `WARN` | Removed symbols with surviving cross-file callers (including aliased imports), tightened required parameters breaking call sites, or reduced export visibility |
+| `D05_BUILD_DEPENDENCY_DELTA` | `BUILD_SCRIPT_MODIFICATION`, `DEPENDENCY_LOCKFILE_MISMATCH` | `VERIFIED_CONSEQUENCE` / `LIKELY_CONSEQUENCE` | `BLOCK` / `REVIEW` / `WARN` | Suspicious lifecycle script commands (`package.json`) and manifest dependency changes without accompanying lockfile updates |
+| `D06_GUARD_REGRESSION` | `SECURITY_GUARD_REMOVED`, `SECURITY_GUARD_WEAKENED` | `VERIFIED_CONSEQUENCE` | `BLOCK` | Removed security decorators/rollback calls, inverted guard condition polarity (`if not verify()` $\to$ `if verify()`), neutralized guard branches (`raise` $\to$ `pass`), unconditional early-return bypasses, and swallowed exception handlers |
 
 ---
 
@@ -462,7 +487,7 @@ PayloadGuard's scoring and consequence models are mathematically verified to ens
 | **Z3** — SMT theorem prover | Score bounds, verdict bijection, safety-critical floors, empty-input guarantee (P1–P10) |
 | **Dafny** — machine-checked proofs | Full input domain coverage, 12 postconditions verified, 0 errors (POST-1–11a + POST-12) |
 
-**Current test state:** 274 tests pass, 7 skipped.
+**Current test state:** 315 tests pass (`test_analyzer.py` + `test_consequence_engine.py`), 7 proof-wrapper tests skipped without external solver install.
 
 → [`VERIFICATION.md`](VERIFICATION.md) — contracts, methods, and run instructions  
 → [`VERIFICATION_SPEC.md`](VERIFICATION_SPEC.md) — formal specification for external auditors
@@ -472,10 +497,10 @@ PayloadGuard's scoring and consequence models are mathematically verified to ens
 ## Contributing
 
 ```bash
-python -m pytest test_analyzer.py tests/proofs/ -q
+python -m pytest test_analyzer.py test_consequence_engine.py tests/proofs/ -q
 ```
 
-274 pass, 7 skip. New detection signals require test coverage in the relevant layer's test class. Open findings are tracked in [`AUDIT_LOG.md`](AUDIT_LOG.md).
+315 pass, 7 skip. New detection signals require test coverage in the relevant layer's test class. Open findings are tracked in [`AUDIT_LOG.md`](AUDIT_LOG.md).
 
 ---
 

@@ -2,13 +2,13 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Active branch:** `feat/consequence-analysis-v1` (analyser) / `feat/harness-oracle-v2` (harness)
-- **Consequence Engine v1 (`consequence.v1`) — COMPLETE (2026-10-21):**
-  - `structural_parser.py`: Upgraded with `SymbolFact` v1, `CallSiteFact`, `ParseResult`, 7-dimension capability vectors (`universal`, `syntax`, `symbolic`, `typed`, `reachability`, `flow`, `runtime`), and explicit parser completeness (`AVAILABLE`, `PARSE_ERROR`, `GRAMMAR_UNAVAILABLE`, `UNSUPPORTED_EXTENSION`, `TIMEOUT`) across `.py`, `.js`/`.jsx`, `.ts`/`.tsx`, `.go`, `.rs`, and `.java`. Legacy `extract_named_nodes(source, path) -> set[str]` preserved 100% unchanged.
-  - `consequence_engine.py`: Semantic Change Graph (SCG) 5-stage symbol matching pipeline + 6 deterministic consequence detectors (`D01_PARSER_INCOMPLETE`, `D02_BODY_WEAKENING` / `D02_AMBIGUOUS_REFACTOR`, `D03_COMPOUND_LOSS`, `D04_PUBLIC_API_BREAK`, `D05_BUILD_DEPENDENCY_DELTA`, `D06_GUARD_REGRESSION`).
-  - `analyze.py`: Integrated `consequence_analysis` report section (`consequence.v1`) with configurable policy mode (`shadow` default, `advisory`, `enforce` via `payloadguard.yml` or `--consequence-mode`).
-  - **A03 & A06 Detection Breakthrough**: Both previously bypassing adversarial cases (`adversarial/slow-deletion` and `adversarial/threshold-gaming`) are deterministically detected as `DESTRUCTIVE` (`BLOCK`) in `enforce` mode with concrete symbol, guard (`Database.transaction` removing `self._rollback`), and cross-file caller (`test_auth.py` calling removed `Auth.deactivate` and `SessionManager.revoke_all`) evidence, while keeping all safe/refactor cases (`T01`, `T02`, `T12`, `WS07`, `AW04`, and 5-file pure move refactors) `SAFE`.
-  - **Test suite:** `309 passed in 2.55s` (`284` in `test_analyzer.py` + `25` in `test_consequence_engine.py`).
+- **Active branch:** `main` (merged PR #97 `cb74a6e` in analyser / PR #75 `dcc5522` in harness)
+- **Consequence Engine v1 (`consequence.v1`) + Detector Accuracy & Usability v2 — COMPLETE & MERGED (2026-10-23):**
+  - `structural_parser.py`: Upgraded with `SymbolFact` v1 (including `guard_conditions`), `CallSiteFact`, `ParseResult`, 7-dimension capability vectors (`universal`, `syntax`, `symbolic`, `typed`, `reachability`, `flow`, `runtime`), import-alias extraction (`as` bindings and CommonJS `require`), intra-function guard condition extraction (`_python_extract_guard_conditions`, `_ts_extract_guard_conditions`), and explicit parser completeness (`AVAILABLE`, `PARSE_ERROR`, `GRAMMAR_UNAVAILABLE`, `UNSUPPORTED_EXTENSION`, `TIMEOUT`) across `.py`, `.js`/`.jsx`, `.ts`/`.tsx`, `.go`, `.rs`, and `.java`. Legacy `extract_named_nodes(source, path) -> set[str]` preserved 100% unchanged.
+  - `consequence_engine.py`: Semantic Change Graph (SCG) 5-stage symbol matching pipeline + 6 deterministic consequence detectors (`D01_PARSER_INCOMPLETE`, `D02_BODY_WEAKENING` / `D02_AMBIGUOUS_REFACTOR`, `D03_COMPOUND_LOSS`, `D04_PUBLIC_API_BREAK` v2 with import-alias/module disambiguation and container/file consolidation, `D05_BUILD_DEPENDENCY_DELTA`, `D06_GUARD_REGRESSION` v2 with guard condition polarity inversion, enforcement neutralization, unconditional early-return bypass, and exception-swallowing detection).
+  - `analyze.py`: Integrated `consequence_analysis` report section (`consequence.v1`) with configurable policy mode (`shadow` default, `advisory`, `enforce` via `payloadguard.yml` or `--consequence-mode`), CLI `print_report()` consequence output, collapsible `<details><summary>Evidence & Remediation</summary>` drill-down in `format_markdown_report()`, and SARIF 2.1.0 output (`format_sarif_report()`, `save_sarif_report()`, `--save-sarif`).
+  - **A03, A06 & Multi-Language Payload Validation**: Both previously bypassing adversarial cases (`adversarial/slow-deletion` and `adversarial/threshold-gaming`) plus 8 synthesized harness payloads (guard polarity inversion, early-return bypass, transaction exception swallow, rename+stub gutting, 4-language distributed loss, signature contract break, massive JS/TS rename refactor, and cross-file module split) are deterministically verified across `shadow`, `advisory`, and `enforce` modes, alongside all 38 permanent harness branches (`validate_manifest.py --verify-consequence`).
+  - **Test suite:** `315 passed in 2.50s` (`284` in `test_analyzer.py` + `31` in `test_consequence_engine.py`).
 - **Previous Sprint 1 — COMPLETE (2026-06-11, SHA 257d1f3):**
   - L2d AI tooling config poisoning detection shipped: `_scan_ai_tooling_configs()` + 8 helper functions.
   - Confirmed Miasma surfaces covered: `.claude/settings.json`, `.gemini/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, `package.json` lifecycle scripts, `composer.json` post-install-cmd, `Gemfile` system(), `binding.gyp` shell chain, `mcp.json`.
@@ -103,7 +103,7 @@ agent/                      — eBPF runtime defence agent (Go + cilium/ebpf)
 agent/bpf/probe.c           — 4 tracepoint probes + pg_config/egress_allow_ipv4 BPF maps
 scripts/pc-smoke-test.sh    — one-command build+verify on real kernel
 test_analyzer.py            — legacy & layer pytest suite (284 tests)
-test_consequence_engine.py  — SCG & consequence engine pytest suite (25 tests)
+test_consequence_engine.py  — SCG & consequence engine pytest suite (31 tests)
 tests/proofs/               — Z3 formal property proofs (P1–P10) + CrossHair pytest wrapper
 verification/        — CrossHair verification targets: consequence_pure (C1-C12), temporal_pure (T1-T7), structural_pure (S1-S7), semantic_pure (M1-M9)
 allowlist.yml        — SCA package allowlist (user-created, not in repo by default)

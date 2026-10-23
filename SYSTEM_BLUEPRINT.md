@@ -1,6 +1,6 @@
 # PayloadGuard — System Blueprint
 
-**Version:** 1.4.0-dev (branch `claude/general-conversation-klxctt`) | **Updated:** 2026-06-11
+**Version:** 1.4.0 (branch `main`) | **Updated:** 2026-10-23
 
 This document is the authoritative reference for the repository structure, module roles, production
 dependencies, and the end-to-end analysis pipeline. Keep it in sync with the codebase; the code
@@ -66,8 +66,9 @@ payload-consequence-analyser/
 │       ├── structural_drift.dfy      # L4: Dafny S1–S7 dual-gate biconditional
 │       └── temporal_drift.dfy        # L5a: Dafny T1–T8 linear drift, zero-input guarantees
 │
-├── analyze.py                        # Core: all 9 layers, scoring, CLI entry point (2,150 lines)
-├── structural_parser.py              # L4 helper: tree-sitter AST extraction for 6 languages
+├── analyze.py                        # Core: all layers, SCG consequence integration, scoring, CLI entry point
+├── structural_parser.py              # L4 & SCG helper: SymbolFact v1, CallSiteFact, ParseResult across 7 languages
+├── consequence_engine.py             # SCG 5-stage symbol matcher & D01-D06 v2 differential consequence detectors
 ├── post_check_run.py                 # GitHub Check Run poster (App JWT / RS256)
 ├── remediate.py                      # L2c auto-remediation: pin action tags to SHAs, open PR
 ├── orchestrator.py                   # R&D only — AIntegrity integration, not in production path
@@ -75,7 +76,8 @@ payload-consequence-analyser/
 ├── action.yml                        # GitHub Action composite wrapper (inputs, outputs, steps)
 ├── pyproject.toml                    # package: payloadguard-plg v1.0.2; entry payloadguard=analyze:main
 ├── requirements.txt                  # Python runtime + test dependencies
-├── test_analyzer.py                  # pytest suite: 274 pass (274 unit; Z3/CrossHair proof tests skip without external install)
+├── test_analyzer.py                  # pytest suite: 284 pass (Z3/CrossHair proof tests skip without external install)
+├── test_consequence_engine.py        # pytest suite: 31 pass (SymbolFact v1, SCG matching, D01-D06 v2, SARIF)
 ├── part1.txt                         # stale scratch artifact — candidate for removal
 │
 ├── AUDIT_LOG.md                      # architectural findings + incident reports (source of truth)
@@ -98,8 +100,9 @@ payload-consequence-analyser/
 
 | Module | Role | Key symbols |
 |---|---|---|
-| `analyze.py` | Core analyser — all layers, scoring, report generation, CLI | `PayloadAnalyzer`, `PayloadGuardConfig`, `DEFAULT_CONFIG`, `load_config()`, `StructuralPayloadAnalyzer`, `TemporalDriftAnalyzer`, `SemanticTransparencyAnalyzer`, `_assess_consequence()`, `_scan_added_file_content()`, `_scan_github_actions_poisoning()`, `_scan_ai_tooling_configs()`, `_check_agent_settings_json()`, `_check_vscode_tasks()`, `_check_cursor_rule()`, `_check_package_json_scripts()`, `_check_composer_json()`, `_check_gemfile()`, `_check_binding_gyp()`, `_check_mcp_json()`, `_iter_workflow_file_diffs()`, `_scan_mutable_action_refs()`, `_load_runtime_events()`, `print_report()`, `format_markdown_report()`, `save_json_report()`, `save_markdown_report()`, `main()` |
-| `structural_parser.py` | L4 tree-sitter AST extraction for Python/JS/JSX/TS/TSX/Go/Rust/Java | `language_for_path()`, `_load_language()`, `extract_named_nodes()` |
+| `analyze.py` | Core analyser — all layers, scoring, report generation, CLI | `PayloadAnalyzer`, `PayloadGuardConfig`, `DEFAULT_CONFIG`, `load_config()`, `StructuralPayloadAnalyzer`, `TemporalDriftAnalyzer`, `SemanticTransparencyAnalyzer`, `_assess_consequence()`, `_scan_added_file_content()`, `_scan_github_actions_poisoning()`, `_scan_ai_tooling_configs()`, `_check_agent_settings_json()`, `_check_vscode_tasks()`, `_check_cursor_rule()`, `_check_package_json_scripts()`, `_check_composer_json()`, `_check_gemfile()`, `_check_binding_gyp()`, `_check_mcp_json()`, `_iter_workflow_file_diffs()`, `_scan_mutable_action_refs()`, `_load_runtime_events()`, `print_report()`, `format_markdown_report()`, `format_sarif_report()`, `save_json_report()`, `save_markdown_report()`, `save_sarif_report()`, `main()` |
+| `structural_parser.py` | AST & Tree-sitter `SymbolFact` v1 + legacy L4 node extraction for Python/JS/JSX/TS/TSX/Go/Rust/Java | `SymbolFact`, `CallSiteFact`, `ParseResult`, `CapabilityStatus`, `language_for_path()`, `_load_language()`, `get_parser_capabilities()`, `extract_symbols()`, `extract_named_nodes()` |
+| `consequence_engine.py` | Semantic Change Graph (SCG) 5-stage matcher & D01–D06 v2 consequence detectors (`consequence.v1`) | `ConsequenceEngine`, `ConsequenceReport`, `ConsequenceFinding`, `EvidenceItem`, `SymbolTransition`, `FileDeltaInput`, `match_symbols_5_stage()` |
 | `post_check_run.py` | Posts named Check Run to GitHub via App JWT (RS256) | `_safe_truncate()`, `main()` |
 | `remediate.py` | L2c auto-remediation: resolves `uses:` action tags to SHAs, opens PR | `RemediationTarget`, `WorkflowRemediator` |
 
@@ -423,6 +426,35 @@ PayloadAnalyzer.analyze()
 
 ---
 
+### Step 8b — SCG Differential Consequence Engine (`consequence.v1`)
+
+```
+  ConsequenceEngine.analyze_deltas(file_deltas, repo_head_files)
+  ├── Stage A: Parse changed files via structural_parser.extract_symbols()
+  │     └── emits SymbolFact v1 (qualified_name, signature, body_hash, calls, guard_conditions, imports)
+  ├── Stage B: Index repository head files (up to max_repo_files=200) for cross-file call sites & import aliases
+  ├── Stage C: 5-Stage Symbol Matching Pipeline (match_symbols_5_stage)
+  │     ├── Stage 1: Exact symbol_id match (UNCHANGED / MODIFIED / GUTTED)
+  │     ├── Stage 2: Same-container signature/body match
+  │     ├── Stage 3: Cross-file move match (MOVED / MOVED_AND_GUTTED)
+  │     ├── Stage 4: Container & member similarity rename match (RENAMED / RENAMED_AND_GUTTED / AMBIGUOUS)
+  │     └── Stage 5: Residual unmatched REMOVED and ADDED symbols
+  ├── Stage D: Deterministic Consequence Detectors (D01–D06 v2)
+  │     ├── D01_PARSER_INCOMPLETE       syntax errors, missing grammars, unsupported extensions
+  │     ├── D02_BODY_WEAKENING          surviving or renamed/moved symbols gutted to no-op stubs
+  │     ├── D03_COMPOUND_LOSS           cross-file distributed loss (A03) & threshold-gaming dilution (A06)
+  │     ├── D04_PUBLIC_API_BREAK        unresolved callers (incl. import aliases), signature tightening, export removal
+  │     ├── D05_BUILD_DEPENDENCY_DELTA  suspicious lifecycle scripts & manifest changes without lockfiles
+  │     └── D06_GUARD_REGRESSION        decorator/rollback removal, guard polarity inversion, early-return bypass, swallowed exceptions
+  └── Policy mode integration:
+        ├── shadow   (default): attaches consequence_analysis to report; zero impact on legacy verdict
+        ├── advisory: upgrades SAFE → REVIEW when BLOCK/REVIEW findings exist
+        └── enforce:  upgrades to DESTRUCTIVE on VERIFIED_CONSEQUENCE BLOCK findings; suppresses false-positive
+                      legacy L4 CRITICAL when SCG proves 0 unmatched symbol removals (pure rename/move refactor)
+```
+
+---
+
 ### Step 9 — Report assembly and output
 
 ```
@@ -442,16 +474,19 @@ PayloadAnalyzer.analyze()
   ├── semantic_transparency: {result, mci_score, signals[], label}
   ├── actions_poisoning: {signals[], has_critical, has_high, mutable_action_refs[]}
   ├── ai_config_poisoning: {flagged_configs[], total}
+  ├── consequence_analysis: {schema_version, mode, recommended_verdict, capabilities, parser_completeness, graph_summary, findings[]}
   ├── runtime_events[]
   ├── severity_score (int)
   ├── status (SAFE|REVIEW|CAUTION|DESTRUCTIVE)
   └── flags[] (human-readable signal strings)
 
   Output routing:
-  ├── print_report(report)          → ANSI terminal report (stdout)
-  ├── format_markdown_report(report) → Markdown string
+  ├── print_report(report)          → ANSI terminal report (stdout, incl. CONSEQUENCE ANALYSIS section)
+  ├── format_markdown_report(report) → Markdown string (incl. collapsible Evidence & Remediation drill-down)
+  ├── format_sarif_report(report)   → SARIF 2.1.0 dict for GitHub Code Scanning inline annotations
   ├── save_json_report(report)      → consequence_report.json
   ├── save_markdown_report(report)  → payloadguard-report.md (or custom path)
+  ├── save_sarif_report(report)     → payloadguard.sarif (or custom path via --save-sarif)
   └── post_check_run.py main()      → GitHub Check Run via App JWT (RS256)
                                        PAYLOADGUARD_APP_ID + PAYLOADGUARD_PRIVATE_KEY
                                        + PAYLOADGUARD_INSTALLATION_ID
@@ -485,7 +520,7 @@ PayloadAnalyzer.analyze()
        ↓
   Fix in: analyze.py (the relevant layer or signal)
        ↓
-  Verify: python -m pytest test_analyzer.py tests/proofs/ -q  (274 pass, 7 skip)
+  Verify: python -m pytest test_analyzer.py test_consequence_engine.py tests/proofs/ -q  (315 pass, 7 skip)
        ↓
   Update: AUDIT_LOG.md (RESOLVED), CLAUDE.md (remove from Open Findings), DEVLOG.md (session entry)
 ```
@@ -494,14 +529,14 @@ PayloadAnalyzer.analyze()
 
 ## Formal Verification Summary
 
-274 tests pass, 7 skipped. 12 Dafny postconditions verified across 3 files.
+315 tests pass (`284` in `test_analyzer.py` + `31` in `test_consequence_engine.py`), 7 skipped. 12 Dafny postconditions verified across 3 files.
 
 | Method | Coverage | Run command |
 |---|---|---|
 | CrossHair | C1–C12 (L3), S1–S7 (L4), T1–T7 (L5a), M1–M9 (L5b) | `cd verification && crosshair check <module> --analysis_kind PEP316 --per_condition_timeout 30` |
 | Z3 SMT | P1–P10 (L3) | `pytest tests/proofs/ -m proof -v --timeout=30` |
 | Dafny | POST-1–11a + POST-12 (L3), S1–S7 (L4), T1–T8 (L5a) | `dafny verify verification/dafny/assess_consequence.dfy` |
-| pytest (unit) | 274 test cases across all layers | `python -m pytest test_analyzer.py -v` |
+| pytest (unit & SCG) | 315 test cases across all layers and `consequence.v1` | `python -m pytest test_analyzer.py test_consequence_engine.py -v` |
 | pytest (proofs) | 15 proof-wrapper tests | `python -m pytest tests/proofs/ -v` |
 
 Skipped tests (7): 4× `TestPostCheckRun` (requires App secrets), 3× `TestStructuralParserJSTS` (requires tree-sitter grammar packages).

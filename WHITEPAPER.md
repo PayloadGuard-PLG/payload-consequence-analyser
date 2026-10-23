@@ -176,14 +176,16 @@ git.Repo(workspace)
 
 | File | Role |
 |---|---|
-| `analyze.py` | All layers, CLI entry point, report generation |
-| `structural_parser.py` | Multi-language AST node extraction |
+| `analyze.py` | All layers, CLI entry point, report generation (JSON, Markdown, SARIF 2.1.0) |
+| `structural_parser.py` | Multi-language AST node & `SymbolFact` v1 extraction |
+| `consequence_engine/` | SCG Consequence Engine (`consequence.v1`): 5-stage symbol matching + `D01`–`D06` v2 detectors |
 | `post_check_run.py` | GitHub Check Run posting via App JWT |
 | `remediate.py` | Workflow action SHA-pinning auto-remediation |
 | `action.yml` | Composite GitHub Action definition |
 | `agent/` | eBPF runtime defence agent (Go + cilium/ebpf) |
 | `agent/bpf/probe.c` | 4 tracepoint probes + block mode BPF maps |
-| `test_analyzer.py` | 258-test unit suite (273 total with CrossHair + Z3 proof tests) |
+| `test_analyzer.py` | 284-test unit suite |
+| `test_consequence_engine.py` | 31-test SCG Consequence Engine v1 + v2 unit & integration suite (315 total) |
 | `tests/proofs/` | Z3 SMT proofs (P1–P10) + CrossHair pytest wrapper (5 tests) |
 | `verification/` | CrossHair pure extraction modules — consequence, structural, temporal, semantic |
 
@@ -473,6 +475,30 @@ Unlike L1–L4, L5b verdict escalation operates on the pre-existing verdict rath
 **Requirements:** Linux kernel ≥5.8, `CONFIG_KPROBES=y`. Standard on GitHub Actions ubuntu-22.04/24.04 runners. WSL2 on Windows 11 also supported (verified on kernel 6.6.114.1-microsoft-standard-WSL2).
 
 **Output:** `runtime_events` list in the JSON report — each event has `type`, `pid`, `comm`, `detail`, `mode`, `blocked`, `time`. Advisory only; no score impact in current version.
+
+---
+
+### 4.8 SCG Consequence Engine (`consequence.v1`)
+
+**Purpose:** Distinguish genuine behavioural and structural consequences from benign refactoring (renames, file moves, signature preservations) and detect adversarial distributed deletions (`A03`) and sub-threshold compound attacks (`A06`) using deterministic evidence.
+
+**Architecture:**
+1. **`SymbolFact` v1 Extraction (`structural_parser.py`):** Extracts language-normalized symbol facts across Python (`ast`) and JS/TS/Go/Rust/Java (`tree-sitter`), capturing `qualified_name`, `signature_shape`, `body_norm_hash`, `body_tokens`, `calls`, `imports` (including `alias:module.target`), `guard_conditions` (`if`/`assert`/guard predicates), `has_auth_signal`, `is_exported`, and `is_hollow_body`.
+2. **5-Stage Symbol Matching (`consequence_engine/matcher.py`):** Computes a differential `ConsequenceGraph` between base and head snapshots:
+   - Stage 1: Exact `(file_path, kind, qualified_name)` match (`MODIFIED` / `UNCHANGED`)
+   - Stage 2: Exact `body_norm_hash` match across files or names (`RENAMED` / `MOVED`, confidence `1.0`)
+   - Stage 3: Same-file signature + call-set / body-token Jaccard match (`RENAMED`, confidence `≥ 0.65`)
+   - Stage 4: Cross-file signature + body Jaccard match (`MOVED`, confidence `≥ 0.65`)
+   - Stage 5: Unmatched symbols classified as `DELETED` or `ADDED`
+3. **Detectors `D01`–`D06` v2 (`consequence_engine/detectors.py`):**
+   - `D01_RENAME_MOVE`: Reconciles `RENAMED`/`MOVED` symbols (`is_benign_refactor=True`).
+   - `D02_HOLLOW_BODY`: Detects implementations gutted to pass/stub/constant returns while preserving signatures (`CRITICAL` on security/auth symbols, `HIGH` otherwise).
+   - `D03_COMPOUND_LOSS`: Resolves `A03` (distributed deletion across ≥3 files) and `A06` (compound threshold gaming across ≥2 files + security-path or exported API loss) after filtering out reconciled renames/moves.
+   - `D04_PUBLIC_API_BREAK`: Detects deleted/incompatible exported symbols with static caller breakage (including import-alias resolution `from m import fn as alias`).
+   - `D05_SECURITY_TOUCH`: Detects deleted or hollowed authentication/authorization/validation symbols (`CRITICAL`).
+   - `D06_GUARD_REGRESSION`: Detects removed `if`/`assert` guard predicates inside surviving functions even when the function body is not hollow (`CRITICAL` on security symbols, `HIGH` otherwise).
+
+**Rollout modes (`consequence.mode` / `--consequence-mode`):** `shadow` (default — attaches `consequence` report block, CLI/Markdown/SARIF findings without altering legacy L3 verdict), `enforce` (escalates verdict on `D02`–`D06` and downgrades pure rename/move false positives when `D01` reconciles all deleted symbols), or `off`.
 
 ---
 
@@ -847,6 +873,11 @@ thresholds:
 semantic:
   micro_scope_churn_limit: 50          # V_s: churn threshold for scope_understated signal
   insertion_ratio_fix_threshold: 0.9   # V_r: insertion ratio threshold for phantom_additions
+
+consequence:
+  mode: shadow                         # shadow | enforce | off
+  compound_min_files: 3                # D03: distributed deletion file threshold
+  compound_min_deleted_symbols: 3      # D03: distributed deletion symbol threshold
 ```
 
 Out-of-order threshold lists are auto-sorted after load. Deep-merge semantics — only keys present in your file override the defaults.
@@ -855,11 +886,11 @@ Out-of-order threshold lists are auto-sorted after load. Deep-merge semantics �
 
 ## 9. Known Limitations
 
-### 8.1 Compound Threshold Gaming (A06)
+### 8.1 Compound Threshold Gaming (A06) & Distributed Deletion (A03)
 
-An adversary who tunes every metric to sit just below its individual threshold scores 0 points. The scoring model has no compound detection — there is no rule of the form "three signals at 60% of their threshold = flag". This is a deliberate design choice to avoid false positives on legitimate PRs that happen to touch many areas of the codebase, but it is a real gap.
+In the legacy additive L3 scoring model, an adversary who tunes every metric to sit just below its individual threshold (`A06`) or distributes single-symbol deletions across many files (`A03` at <20% aggregate AST node ratio) scores 0 points (`SAFE`).
 
-Possible mitigations: a compound bonus when N dimensions are all non-zero but below threshold; a learned baseline model that flags statistical outliers relative to repo history.
+**Mitigation in v1.4.0 (`consequence.v1`):** The SCG Consequence Engine (`consequence_engine/`) resolves both `A03` and `A06` via `D03_COMPOUND_LOSS`, `D04_PUBLIC_API_BREAK`, and `D06_GUARD_REGRESSION` after Stage 1–4 symbol matching filters out benign renames and cross-file moves (`D01_RENAME_MOVE`). In `shadow` mode (default), these findings are emitted in the JSON `consequence` block, CLI output, Markdown PR comment, and SARIF 2.1.0 report while keeping legacy L3 verdicts unchanged; in `enforce` mode (`--consequence-mode enforce`), both `A03` and `A06` escalate to `DESTRUCTIVE` (exit code `2`) with zero false positives on multi-file refactors.
 
 ### 8.2 Generated Code Volume
 
