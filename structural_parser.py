@@ -651,26 +651,34 @@ def _python_extract_guard_conditions(node: ast.AST) -> Tuple[str, ...]:
                 conditions.append("early_return_bypass:unconditional")
             break
 
-    def _test_polarity_and_callees(test_node: ast.AST) -> Tuple[str, List[str]]:
+    def _atomic_clauses(test_node: ast.AST) -> List[ast.AST]:
+        if isinstance(test_node, ast.BoolOp):
+            clauses: List[ast.AST] = []
+            for v in test_node.values:
+                clauses.extend(_atomic_clauses(v))
+            return clauses
+        return [test_node]
+
+    def _clause_polarity_and_callees(clause_node: ast.AST) -> Tuple[str, List[str]]:
         polarity = "positive"
-        target = test_node
-        if isinstance(test_node, ast.UnaryOp) and isinstance(test_node.op, ast.Not):
+        target = clause_node
+        if isinstance(clause_node, ast.UnaryOp) and isinstance(clause_node.op, ast.Not):
             polarity = "negated"
-            target = test_node.operand
-        elif isinstance(test_node, ast.Compare) and len(test_node.ops) == 1 and len(test_node.comparators) == 1:
-            op = test_node.ops[0]
-            comp = test_node.comparators[0]
+            target = clause_node.operand
+        elif isinstance(clause_node, ast.Compare) and len(clause_node.ops) == 1 and len(clause_node.comparators) == 1:
+            op = clause_node.ops[0]
+            comp = clause_node.comparators[0]
             if isinstance(comp, ast.Constant):
                 if (isinstance(op, (ast.Eq, ast.Is)) and comp.value in (False, None)) or (
                     isinstance(op, (ast.NotEq, ast.IsNot)) and comp.value is True
                 ):
                     polarity = "negated"
-                    target = test_node.left
+                    target = clause_node.left
                 elif (isinstance(op, (ast.Eq, ast.Is)) and comp.value is True) or (
                     isinstance(op, (ast.NotEq, ast.IsNot)) and comp.value in (False, None)
                 ):
                     polarity = "positive"
-                    target = test_node.left
+                    target = clause_node.left
 
         callees: List[str] = []
         for sub in ast.walk(target):
@@ -694,10 +702,11 @@ def _python_extract_guard_conditions(node: ast.AST) -> Tuple[str, ...]:
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
             if isinstance(stmt, ast.If):
-                polarity, callees = _test_polarity_and_callees(stmt.test)
                 action = _python_stmt_action(stmt.body)
-                for callee in callees:
-                    conditions.append(f"if_guard:{callee}:{polarity}:{action}")
+                for clause in _atomic_clauses(stmt.test):
+                    polarity, callees = _clause_polarity_and_callees(clause)
+                    for callee in callees:
+                        conditions.append(f"if_guard:{callee}:{polarity}:{action}")
                 _walk_stmts(stmt.body)
                 _walk_stmts(stmt.orelse)
             elif isinstance(stmt, ast.Try):
@@ -1097,6 +1106,8 @@ def _ts_stmt_action(block_node) -> str:
         or "os . Exit" in joined
         or "t . Fatal" in joined
         or "http . Error" in joined
+        or "fmt . Errorf" in joined
+        or "errors . New" in joined
         or "res . status ( 401 )" in joined
         or "res . status ( 403 )" in joined
     ):
@@ -1177,8 +1188,16 @@ def _ts_extract_guard_conditions(body_node, lang_key: str) -> Tuple[str, ...]:
                     polarity = "negated"
                 calls_in_cond, _ = _ts_extract_calls(cond, "<cond>", "", lang_key)
                 action = _ts_stmt_action(conseq)
-                for callee in calls_in_cond:
-                    conditions.append(f"if_guard:{callee}:{polarity}:{action}")
+                if calls_in_cond:
+                    for callee in calls_in_cond:
+                        conditions.append(f"if_guard:{callee}:{polarity}:{action}")
+                elif action in ("raise", "rollback"):
+                    subj = cond_txt.lstrip("!").strip()
+                    if subj.startswith("not "):
+                        subj = subj[4:].strip()
+                    subj = re.sub(r"\s+", "", subj).replace(":", "_")
+                    if subj:
+                        conditions.append(f"if_state_guard:{subj}:{polarity}:{action}")
         elif curr.type == "catch_clause":
             c_body = curr.child_by_field_name("body")
             c_action = _ts_stmt_action(c_body)
