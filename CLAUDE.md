@@ -148,19 +148,20 @@ sca:
 
 ## Current Version
 
-`__version__ = "1.3.0"` (analyze.py — to be bumped to 1.4.0 at branch merge)
+`__version__ = "1.4.0"` (`analyze.py` / `pyproject.toml`)
 
-### v1.4.0 changes (branch `claude/general-conversation-klxctt` — Sprint 1, 2026-06-11)
+### v1.4.0 changes (2026-10-23)
+- Feature: SCG Consequence Engine (`consequence.v1`) in `consequence_engine/` (`models.py`, `matcher.py`, `detectors.py`, `engine.py`, `sarif.py`) + `SymbolFact` v1 extraction in `structural_parser.py` across Python (`ast`) and JS/TS/Go/Rust/Java (`tree-sitter`).
+- Detectors (`D01`–`D06` v2): `D01_RENAME_MOVE` (5-stage rename/move reconciliation), `D02_HOLLOW_BODY`, `D03_COMPOUND_LOSS` (resolves `A03` distributed deletion and `A06` compound threshold gaming), `D04_PUBLIC_API_BREAK` v2 (cross-file and aliased caller resolution), `D05_SECURITY_TOUCH`, and `D06_GUARD_REGRESSION` v2 (guard condition extraction and non-hollow guard removal detection).
+- Usability & Reporting: CLI (`print_report`), Markdown (`<details><summary>Evidence & Remediation</summary>`), and SARIF 2.1.0 (`--save-sarif`) output surfaces; `--consequence-mode {shadow,enforce,off}`.
 - Feature: L2d AI tooling config poisoning detection — `_scan_ai_tooling_configs()` + 8 surface-specific helper functions (`_check_agent_settings_json`, `_check_vscode_tasks`, `_check_cursor_rule`, `_check_package_json_scripts`, `_check_composer_json`, `_check_gemfile`, `_check_binding_gyp`, `_check_mcp_json`).
 - Signals: `command_in_session_hook` (CRITICAL), `command_in_folder_open_task` (CRITICAL), `lifecycle_script_hijack` (CRITICAL), `binding_gyp_command_substitution` (CRITICAL), `gemfile_system_call` (CRITICAL), `composer_post_install` (CRITICAL), `cursor_nl_exec_imperative` (HIGH), `hidden_unicode` (HIGH), `mcp_local_server_command` (HIGH).
 - `_assess_consequence`: new `ai_config_poisoning_flags` / `ai_config_poisoning_critical` params. Step 9 scoring block mirrors L2c (CRITICAL +5, HIGH +3).
 - `_scan_added_file_content`: AI config paths excluded to prevent double-scoring (mirrors L2c exclusion pattern).
 - MAX_SCORE: 31 → 36.
 - Verification: `consequence_pure.py` `_MAX_SCORE` 31→36, POST-12 contract. `assess_consequence.dfy` `MAX_SCORE` 31→36, POST-12 postcondition. `test_z3_properties.py` `_MAX_OTHER_SCORE` 19→24.
-- Tests: 16 new tests in `TestAIToolingConfigPoisoning`. Suite: 274 pass, 0 fail.
-- Docs: `research-for-updates.md` (Miasma attack research), `MIASMA_DETECTION_SPRINT.md` (4-sprint plan), DEVLOG 2026-06-11 entry.
-
-### v1.3.0 changes
+- Tests: 315 passed (`284` in `test_analyzer.py` + `31` in `test_consequence_engine.py`).
+- Docs: `README.md`, `CLAUDE.md`, `SYSTEM_BLUEPRINT.md`, `WHITEPAPER.md`, `DEVLOG.md`.
 
 ### v1.3.0 changes
 - PLI L4b evaluated and reverted. PLI integration (PR #73) was implemented and regression-tested (34 stable cases, 2026-05-29). Result: 2 true positives (A03 adversarial/slow-deletion, A06 adversarial/threshold-gaming — both previously bypassing), 3 false positives (WS07 safe-clean-workflow, RT02 postinstall-curl, RTA03 prt-untrusted-checkout). Root cause: PLI's L2 LLM analysis interprets code diff summaries as blank AI responses, generating critical findings on legitimate safe PRs. Reverted from scoring path. MAX_SCORE reverted 36→31.
