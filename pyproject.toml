@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "payloadguard-plg"
-version = "1.3.0"
+version = "1.4.0"
 description = "Scans a branch before merge and tells you exactly how badly it's going to hurt."
 readme = "README.md"
 license = "MIT"
@@ -48,6 +48,7 @@ Repository = "https://github.com/PayloadGuard-PLG/payload-consequence-analyser"
 
 [tool.setuptools]
 py-modules = ["analyze", "structural_parser", "post_check_run", "remediate"]
+packages = ["consequence_engine"]
 
 [tool.pytest.ini_options]
 markers = [
