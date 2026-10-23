@@ -2168,6 +2168,24 @@ def print_report(report):
         for cf in commit_flags[:5]:
             print(f"   [{cf['sha']}] {cf['message']}")
 
+    ca_rep = report.get('consequence_analysis', {})
+    ca_findings = ca_rep.get('findings', [])
+    if ca_findings or ca_rep.get('mode', 'shadow') != 'shadow':
+        gs = ca_rep.get('graph_summary', {})
+        t_counts = gs.get('transition_counts', {})
+        t_summary = ", ".join(f"{k}={v}" for k, v in sorted(t_counts.items())) if t_counts else "none"
+        print(f"\n🧠 CONSEQUENCE ANALYSIS ({ca_rep.get('schema_version', 'consequence.v1')})")
+        print(f"   Mode: {ca_rep.get('mode', 'shadow')} | Recommended: {ca_rep.get('recommended_verdict', 'SAFE')} (score: {ca_rep.get('recommended_score', 0)})")
+        print(f"   Transitions: {t_summary}")
+        for cf in ca_findings[:10]:
+            print(f"   [{cf['severity']}/{cf['policy_recommendation']}] {cf['detector_id']} ({cf['consequence_class']}) [{cf['tier']}]")
+            print(f"      Summary: {cf['summary']}")
+            for ev in cf.get('evidence', [])[:3]:
+                loc = f"{ev['file']}:{ev['line']}" if ev.get('file') else "repo"
+                print(f"      Evidence ({loc}): {ev['detail']}")
+            if cf.get('remediation'):
+                print(f"      Fix: {cf['remediation']}")
+
     print(f"\n🔍 VERDICT: {verdict['status']} [{verdict['severity']}]")
     for flag in verdict['flags']:
         print(f"   ⚠️  {flag}")
@@ -2494,6 +2512,18 @@ def format_markdown_report(report: dict) -> str:
                 f"`{cf['confidence']}` | `{cf['policy_recommendation']}` | {_md_escape(cf['summary'])} |"
             )
         out.append("")
+        out.append("<details><summary>Evidence & Remediation</summary>")
+        out.append("")
+        for cf in ca_findings[:10]:
+            out.append(f"#### `{cf['detector_id']}` — `{cf['consequence_class']}` (`{cf['policy_recommendation']}`)")
+            for ev in cf.get('evidence', [])[:5]:
+                loc = f"{ev['file']}:{ev['line']}" if ev.get('file') else "repo"
+                out.append(f"- **`{_md_escape(loc)}`** (`{ev['kind']}`): {_md_escape(ev['detail'])}")
+            if cf.get('remediation'):
+                out.append(f"- **Remediation:** {_md_escape(cf['remediation'])}")
+            out.append("")
+        out.append("</details>")
+        out.append("")
 
     # ── Deleted Files ─────────────────────────────────────────────────────────
     if deleted['total'] > 0:
@@ -2522,6 +2552,116 @@ def format_markdown_report(report: dict) -> str:
     out.append(f"_PayloadGuard scan — {ts}_")
 
     return "\n".join(out)
+
+
+def format_sarif_report(report: dict) -> dict:
+    """
+    Generate a SARIF 2.1.0 dictionary from a PayloadGuard report for native
+    GitHub Code Scanning and IDE inline annotations.
+    """
+    ca_rep = report.get("consequence_analysis", {})
+    ca_findings = ca_rep.get("findings", [])
+
+    level_map = {
+        "CRITICAL": "error",
+        "HIGH": "error",
+        "MEDIUM": "warning",
+        "LOW": "note",
+        "INFO": "note",
+    }
+
+    rules_by_id = {}
+    results = []
+
+    for cf in ca_findings:
+        rule_id = cf.get("detector_id", "PG-CONSEQUENCE")
+        c_class = cf.get("consequence_class", "CONSEQUENCE")
+        sev = cf.get("severity", "MEDIUM")
+        level = level_map.get(sev, "warning")
+
+        if rule_id not in rules_by_id:
+            rules_by_id[rule_id] = {
+                "id": rule_id,
+                "name": c_class,
+                "shortDescription": {"text": f"PayloadGuard {rule_id}: {c_class}"},
+                "help": {
+                    "text": cf.get("remediation") or "Review consequence evidence before merging."
+                },
+                "defaultConfiguration": {"level": level},
+            }
+
+        locations = []
+        for ev in cf.get("evidence", []):
+            fpath = ev.get("file")
+            line = max(int(ev.get("line") or 1), 1)
+            if fpath:
+                locations.append(
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": fpath},
+                            "region": {"startLine": line},
+                        }
+                    }
+                )
+        if not locations:
+            for fpath in cf.get("affected_files", []):
+                locations.append(
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": fpath},
+                            "region": {"startLine": 1},
+                        }
+                    }
+                )
+
+        msg_text = f"[{c_class} | {cf.get('tier', '')} | {cf.get('policy_recommendation', '')}] {cf.get('summary', '')}"
+        if cf.get("remediation"):
+            msg_text += f" Remediation: {cf['remediation']}"
+
+        results.append(
+            {
+                "ruleId": rule_id,
+                "level": level,
+                "message": {"text": msg_text},
+                "locations": locations,
+                "properties": {
+                    "finding_id": cf.get("finding_id"),
+                    "consequence_class": c_class,
+                    "tier": cf.get("tier"),
+                    "confidence": cf.get("confidence"),
+                    "severity": sev,
+                    "policy_recommendation": cf.get("policy_recommendation"),
+                    "affected_symbols": cf.get("affected_symbols", []),
+                },
+            }
+        )
+
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "PayloadGuard",
+                        "informationUri": "https://github.com/PayloadGuard-PLG/payload-consequence-analyser",
+                        "version": ca_rep.get("schema_version", "consequence.v1"),
+                        "rules": list(rules_by_id.values()),
+                    }
+                },
+                "results": results,
+            }
+        ],
+    }
+
+
+def save_sarif_report(report, filename="payloadguard.sarif"):
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(format_sarif_report(report), f, indent=2)
+        print(f"✓ SARIF report saved to {filename}")
+    except Exception as e:
+        print(f"⚠️  Could not save SARIF report: {e}", file=sys.stderr)
 
 
 def save_json_report(report, filename="consequence_report.json"):
@@ -2572,6 +2712,9 @@ def main():
     parser.add_argument("--save-markdown", nargs="?", const="payloadguard-report.md",
                         metavar="FILE",
                         help="Save GitHub-flavoured markdown report (default: payloadguard-report.md)")
+    parser.add_argument("--save-sarif", nargs="?", const="payloadguard.sarif",
+                        metavar="FILE",
+                        help="Save SARIF 2.1.0 report for GitHub Code Scanning (default: payloadguard.sarif)")
     parser.add_argument("--consequence-mode", choices=["shadow", "advisory", "enforce"],
                         default=None,
                         help="Consequence engine policy mode (default: shadow or payloadguard.yml setting)")
@@ -2589,6 +2732,9 @@ def main():
 
     if args.save_markdown:
         save_markdown_report(report, args.save_markdown)
+
+    if args.save_sarif:
+        save_sarif_report(report, args.save_sarif)
 
     if "error" in report:
         sys.exit(1)

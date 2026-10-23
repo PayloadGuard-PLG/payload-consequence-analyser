@@ -761,6 +761,7 @@ class ConsequenceEngine:
         t1 = time.perf_counter()
         repo_call_sites: List[CallSiteFact] = []
         repo_head_symbols: List[SymbolFact] = []
+        repo_head_imports: Dict[str, List[str]] = {}
 
         # Include already-parsed head files
         parsed_head_paths: Set[str] = set()
@@ -768,6 +769,7 @@ class ConsequenceEngine:
             parsed_head_paths.add(fpath)
             repo_call_sites.extend(pr.call_sites)
             repo_head_symbols.extend(pr.symbols)
+            repo_head_imports[fpath] = list(pr.imports)
 
         # Parse remaining unmodified head files up to max_repo_files
         count_extra = 0
@@ -783,6 +785,7 @@ class ConsequenceEngine:
                 pr = extract_symbols(src, fpath)
                 repo_call_sites.extend(pr.call_sites)
                 repo_head_symbols.extend(pr.symbols)
+                repo_head_imports[fpath] = list(pr.imports)
                 count_extra += 1
 
         stage_timing["index_repo_call_sites"] = (time.perf_counter() - t1) * 1000.0
@@ -806,7 +809,7 @@ class ConsequenceEngine:
         findings.extend(self._detect_d02_structural_and_weakening(transitions, file_deltas))
         findings.extend(self._detect_d06_guard_regressions(transitions))
         d04_findings, unresolved_by_symbol = self._detect_d04_public_api_and_callers(
-            transitions, repo_head_symbols, repo_call_sites
+            transitions, repo_head_symbols, repo_call_sites, repo_head_imports
         )
         findings.extend(d04_findings)
         findings.extend(
@@ -1086,13 +1089,23 @@ class ConsequenceEngine:
         return findings
 
     # ------------------------------------------------------------------
-    # D06: Security / Validation / Rollback Guard Regression Detector
+    # D06: Security / Validation / Rollback Guard Regression Detector (v2)
     # ------------------------------------------------------------------
     def _detect_d06_guard_regressions(
         self,
         transitions: List[SymbolTransition],
     ) -> List[ConsequenceFinding]:
         findings: List[ConsequenceFinding] = []
+
+        def _parse_if_guards(conds: Tuple[str, ...]) -> Dict[str, List[Tuple[str, str]]]:
+            parsed: Dict[str, List[Tuple[str, str]]] = {}
+            for item in conds:
+                if item.startswith("if_guard:"):
+                    parts = item.split(":", 3)
+                    if len(parts) == 4:
+                        _, callee, pol, act = parts
+                        parsed.setdefault(callee, []).append((pol, act))
+            return parsed
 
         for tr in transitions:
             bs = tr.base_symbol
@@ -1112,10 +1125,16 @@ class ConsequenceEngine:
             head_guard_calls = {c for c in hs.calls if _is_guard_call(c)}
             removed_calls = sorted(base_guard_calls - head_guard_calls)
 
-            if not removed_decos and not removed_calls:
-                continue
+            # 3. Check guard condition polarity inversion, enforcement neutralization,
+            #    early-return bypass, and exception-swallowing (D06 v2)
+            b_conds = getattr(bs, "guard_conditions", ()) or ()
+            h_conds = getattr(hs, "guard_conditions", ()) or ()
+            b_if = _parse_if_guards(b_conds)
+            h_if = _parse_if_guards(h_conds)
 
+            weakened_notes: List[str] = []
             ev_items: List[EvidenceItem] = []
+
             for d in removed_decos:
                 ev_items.append(
                     EvidenceItem(
@@ -1137,24 +1156,112 @@ class ConsequenceEngine:
                     )
                 )
 
+            for callee, b_pairs in sorted(b_if.items()):
+                if not (_is_guard_call(callee) or _is_security_relevant_name(bs.qualified_name)):
+                    continue
+                h_pairs = h_if.get(callee, [])
+                if not h_pairs:
+                    continue
+                for b_pol, b_act in b_pairs:
+                    if b_act not in ("raise", "return_deny", "rollback"):
+                        continue
+                    # Check if polarity inverted while keeping enforcement action
+                    for h_pol, h_act in h_pairs:
+                        if h_pol != b_pol and h_act == b_act and (b_pol, b_act) not in h_pairs:
+                            weakened_notes.append(f"{callee} polarity inverted ({b_pol}->{h_pol})")
+                            ev_items.append(
+                                EvidenceItem(
+                                    kind="GUARD_POLARITY_INVERTED",
+                                    file=hs.file_path,
+                                    line=hs.start_line,
+                                    symbol=hs.qualified_name,
+                                    detail=(
+                                        f"Guard condition on '{callee}()' in '{hs.qualified_name}' inverted "
+                                        f"polarity from '{b_pol}' to '{h_pol}' ({b_act})"
+                                    ),
+                                )
+                            )
+                        elif h_act in ("noop", "return_allow") and (b_pol, b_act) not in h_pairs:
+                            weakened_notes.append(f"{callee} enforcement neutralized ({b_act}->{h_act})")
+                            ev_items.append(
+                                EvidenceItem(
+                                    kind="GUARD_ENFORCEMENT_NEUTRALIZED",
+                                    file=hs.file_path,
+                                    line=hs.start_line,
+                                    symbol=hs.qualified_name,
+                                    detail=(
+                                        f"Guard failure branch for '{callee}()' in '{hs.qualified_name}' "
+                                        f"weakened from '{b_act}' to '{h_act}'"
+                                    ),
+                                )
+                            )
+
+            # Early-return bypass before remaining statements/guards
+            b_early = {c for c in b_conds if c.startswith("early_return_bypass:")}
+            h_early = {c for c in h_conds if c.startswith("early_return_bypass:")}
+            new_early = sorted(h_early - b_early)
+            if new_early and (base_guard_calls or base_guard_decos or _is_security_relevant_name(bs.qualified_name)):
+                weakened_notes.append("unconditional early return bypass")
+                ev_items.append(
+                    EvidenceItem(
+                        kind="GUARD_BYPASSED_BY_EARLY_RETURN",
+                        file=hs.file_path,
+                        line=hs.start_line,
+                        symbol=hs.qualified_name,
+                        detail=(
+                            f"Inserted unconditional early return ({new_early[0].split(':', 1)[1]}) "
+                            f"before guard statements in '{hs.qualified_name}'"
+                        ),
+                    )
+                )
+
+            # Exception handler swallowed (raise/rollback/return_deny -> swallowed_noop/swallowed_allow)
+            b_exc = {c.split(":", 1)[1] for c in b_conds if c.startswith("except_handler:")}
+            h_exc = {c.split(":", 1)[1] for c in h_conds if c.startswith("except_handler:")}
+            enforcing_exc = b_exc & {"raise", "rollback", "return_deny"}
+            swallowed_exc = h_exc & {"swallowed_noop", "swallowed_allow"}
+            if enforcing_exc and swallowed_exc and not (h_exc & {"raise", "rollback", "return_deny"}):
+                weakened_notes.append(
+                    f"exception handler weakened ({sorted(enforcing_exc)[0]}->{sorted(swallowed_exc)[0]})"
+                )
+                ev_items.append(
+                    EvidenceItem(
+                        kind="EXCEPTION_HANDLER_SWALLOWED",
+                        file=hs.file_path,
+                        line=hs.start_line,
+                        symbol=hs.qualified_name,
+                        detail=(
+                            f"Exception handler in '{hs.qualified_name}' weakened from "
+                            f"'{sorted(enforcing_exc)[0]}' to '{sorted(swallowed_exc)[0]}'"
+                        ),
+                    )
+                )
+
+            if not ev_items:
+                continue
+
+            all_labels = removed_decos + removed_calls + weakened_notes
+            c_class = "SECURITY_GUARD_REMOVED" if (removed_decos or removed_calls) else "SECURITY_GUARD_WEAKENED"
+            action_verb = "removed" if (removed_decos or removed_calls) else "weakened"
+
             findings.append(
                 ConsequenceFinding(
                     finding_id=f"PG-D06-{hs.file_path}-{hs.qualified_name}",
                     detector_id=DETECTOR_D06_GUARD,
-                    consequence_class="SECURITY_GUARD_REMOVED",
+                    consequence_class=c_class,
                     tier=TIER_VERIFIED,
                     confidence=CONFIDENCE_HIGH,
                     severity=SEVERITY_HIGH,
                     policy_recommendation=POLICY_BLOCK,
                     summary=(
-                        f"Surviving {hs.kind} '{hs.qualified_name}' in '{hs.file_path}' removed "
-                        f"security/integrity guard(s): {', '.join(removed_decos + removed_calls)}"
+                        f"Surviving {hs.kind} '{hs.qualified_name}' in '{hs.file_path}' {action_verb} "
+                        f"security/integrity guard(s): {', '.join(all_labels)}"
                     ),
                     affected_files=(hs.file_path,),
                     affected_symbols=(hs.qualified_name,),
                     evidence=tuple(ev_items),
                     remediation=(
-                        f"Restore the removed guard ({', '.join(removed_decos + removed_calls)}) in "
+                        f"Restore the guard enforcement ({', '.join(all_labels)}) in "
                         f"'{hs.qualified_name}' or verify an equivalent upstream protection."
                     ),
                 )
@@ -1163,26 +1270,130 @@ class ConsequenceEngine:
         return findings
 
     # ------------------------------------------------------------------
-    # D04: Public API Contract Break & Cross-File Unresolved Caller Detector
+    # D04: Public API Contract Break & Cross-File Unresolved Caller Detector (v2)
     # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_file_import_bindings(imports: List[str]) -> Tuple[Dict[str, Tuple[str, str]], Dict[str, str], Set[str]]:
+        """
+        Parse import entries into:
+        - symbol_aliases: {local_name: (module_stem, original_symbol_name)}
+        - module_aliases: {local_qualifier: module_stem}
+        - imported_modules: {module_stem}
+        """
+        symbol_aliases: Dict[str, Tuple[str, str]] = {}
+        module_aliases: Dict[str, str] = {}
+        imported_modules: Set[str] = set()
+
+        for imp in imports:
+            s = imp.strip()
+            # 1. JS/TS ES import: import { a as b, c } from './mod' or import * as ns from './mod'
+            m_from = re.search(r"from\s+['\"]([^'\"]+)['\"]", s)
+            if m_from:
+                mod_stem = Path(m_from.group(1)).stem
+                imported_modules.add(mod_stem)
+                m_ns = re.search(r"\*\s+as\s+([A-Za-z0-9_$]+)", s)
+                if m_ns:
+                    module_aliases[m_ns.group(1)] = mod_stem
+                m_braces = re.search(r"\{([^}]+)\}", s)
+                if m_braces:
+                    for part in m_braces.group(1).split(","):
+                        part = part.strip()
+                        if not part:
+                            continue
+                        if " as " in part:
+                            orig, loc = [p.strip() for p in part.split(" as ", 1)]
+                            symbol_aliases[loc] = (mod_stem, orig)
+                        else:
+                            symbol_aliases[part] = (mod_stem, part)
+                continue
+
+            # 2. CommonJS require: const { a: b } = require('./mod') or const m = require('./mod')
+            m_req = re.search(r"require\s*\(\s*['\"]([^'\"]+)['\"]\s*\)", s)
+            if m_req and "=" in s:
+                mod_stem = Path(m_req.group(1)).stem
+                imported_modules.add(mod_stem)
+                lhs = s.split("=", 1)[0].strip()
+                m_braces = re.search(r"\{([^}]+)\}", lhs)
+                if m_braces:
+                    for part in m_braces.group(1).split(","):
+                        part = part.strip()
+                        if not part:
+                            continue
+                        if ":" in part:
+                            orig, loc = [p.strip() for p in part.split(":", 1)]
+                            symbol_aliases[loc] = (mod_stem, orig)
+                        else:
+                            symbol_aliases[part] = (mod_stem, part)
+                else:
+                    ident = lhs.split()[-1].strip()
+                    if ident.isidentifier():
+                        module_aliases[ident] = mod_stem
+                continue
+
+            # 3. Rust use declaration: use crate::auth::verify as check_auth;
+            if s.startswith("use "):
+                clean = s[4:].rstrip(";").strip()
+                if " as " in clean:
+                    target, loc = [p.strip() for p in clean.split(" as ", 1)]
+                else:
+                    target = clean
+                    loc = clean.split("::")[-1].strip()
+                parts = [p for p in target.split("::") if p not in ("crate", "self", "super")]
+                if len(parts) >= 2:
+                    mod_stem, orig = parts[-2], parts[-1]
+                    imported_modules.add(mod_stem)
+                    symbol_aliases[loc] = (mod_stem, orig)
+                continue
+
+            # 4. Python import entries from _extract_python_parse_result:
+            #    "pkg.mod.sym as alias", "pkg.mod as alias", "pkg.mod.sym", "pkg.mod"
+            if " as " in s:
+                target, loc = [p.strip() for p in s.split(" as ", 1)]
+                parts = [p for p in target.split(".") if p]
+                if len(parts) >= 2:
+                    symbol_aliases[loc] = (parts[-2], parts[-1])
+                    module_aliases[loc] = parts[-1]
+                    imported_modules.add(parts[-2])
+                    imported_modules.add(parts[-1])
+                elif len(parts) == 1:
+                    module_aliases[loc] = parts[0]
+                    imported_modules.add(parts[0])
+            else:
+                parts = [p for p in s.split(".") if p]
+                if len(parts) >= 2:
+                    symbol_aliases[parts[-1]] = (parts[-2], parts[-1])
+                    imported_modules.add(parts[-2])
+                    imported_modules.add(parts[-1])
+                elif len(parts) == 1:
+                    imported_modules.add(parts[0])
+                    module_aliases[parts[0]] = parts[0]
+
+        return symbol_aliases, module_aliases, imported_modules
+
     def _detect_d04_public_api_and_callers(
         self,
         transitions: List[SymbolTransition],
         repo_head_symbols: List[SymbolFact],
         repo_call_sites: List[CallSiteFact],
+        repo_head_imports: Optional[Dict[str, List[str]]] = None,
     ) -> Tuple[List[ConsequenceFinding], Dict[str, List[CallSiteFact]]]:
         findings: List[ConsequenceFinding] = []
         unresolved_by_symbol: Dict[str, List[CallSiteFact]] = {}
+        repo_head_imports = repo_head_imports or {}
 
-        # Build set of all surviving symbol names and qualified names in head
+        # Precompute import bindings per head file
+        bindings_by_file: Dict[str, Tuple[Dict[str, Tuple[str, str]], Dict[str, str], Set[str]]] = {
+            fpath: self._parse_file_import_bindings(imps)
+            for fpath, imps in repo_head_imports.items()
+        }
+
+        # Build set of all surviving symbol names and per-file surviving names in head
         surviving_names: Set[str] = {s.name for s in repo_head_symbols}
-        surviving_quals: Set[str] = {s.qualified_name for s in repo_head_symbols}
-
-        # Map (container_name, method_name) in head
-        surviving_class_methods: Set[Tuple[str, str]] = set()
+        surviving_names_by_file: Dict[str, Set[str]] = {}
+        surviving_names_by_mod: Dict[str, Set[str]] = {}
         for s in repo_head_symbols:
-            if s.parent_symbol:
-                surviving_class_methods.add((s.parent_symbol, s.name))
+            surviving_names_by_file.setdefault(s.file_path, set()).add(s.name)
+            surviving_names_by_mod.setdefault(Path(s.file_path).stem, set()).add(s.name)
 
         # 1. Check unmatched REMOVED symbols for unresolved call sites in head & public API removal
         removed_transitions = [
@@ -1190,18 +1401,31 @@ class ConsequenceEngine:
             if tr.transition_kind == "REMOVED" and tr.base_symbol is not None
         ]
 
+        # Group unresolved callers by (file_path, container_or_symbol_name) and API removals by file_path
+        caller_groups: Dict[Tuple[str, str], List[Tuple[SymbolFact, List[CallSiteFact]]]] = {}
+        api_removal_groups: Dict[str, List[SymbolFact]] = {}
+
         for tr in removed_transitions:
             bs = tr.base_symbol
             assert bs is not None
+            bs_mod = Path(bs.file_path).stem
 
-            # Find call sites in head that still invoke this removed symbol
             matching_callers: List[CallSiteFact] = []
             for cs in repo_call_sites:
-                if cs.callee_name != bs.name:
+                sym_aliases, mod_aliases, imp_mods = bindings_by_file.get(cs.file_path, ({}, {}, set()))
+
+                # Resolve aliased callee or module qualifier
+                effective_callee = cs.callee_name
+                effective_mod: Optional[str] = None
+                if not cs.qualifier and cs.callee_name in sym_aliases:
+                    effective_mod, effective_callee = sym_aliases[cs.callee_name]
+                elif cs.qualifier:
+                    effective_mod = mod_aliases.get(cs.qualifier, cs.qualifier)
+
+                if effective_callee != bs.name:
                     continue
+
                 if bs.parent_symbol:
-                    # Method on a class/container: check if another class in head still defines it
-                    # and whether the call site qualifier matches the class or an instance variable name
                     class_lower = bs.parent_symbol.lower()
                     qual_lower = cs.qualifier.lower()
                     initials = "".join(
@@ -1216,12 +1440,35 @@ class ConsequenceEngine:
                     if qualifier_matches_class:
                         matching_callers.append(cs)
                 else:
-                    # Top-level function/class: if no symbol with this name exists in head
-                    if bs.name not in surviving_names:
+                    # Top-level function/class:
+                    # Match if:
+                    # (a) caller explicitly qualifies or aliases from bs_mod (e.g. billing.cancel() or aliased import), OR
+                    # (b) no symbol with bs.name survives anywhere in head (unless caller explicitly qualified a different module), OR
+                    # (c) another module still defines bs.name, but caller's file explicitly imported bs.name from bs_mod
+                    #     and does not define bs.name locally.
+                    if effective_mod == bs_mod:
                         matching_callers.append(cs)
+                    elif bs.name not in surviving_names:
+                        if not effective_mod or effective_mod == bs_mod or cs.file_path == bs.file_path:
+                            matching_callers.append(cs)
+                    else:
+                        # Another module in head still defines a symbol named bs.name:
+                        # check if cs.file_path specifically imported bs.name from bs_mod
+                        local_defs = surviving_names_by_file.get(cs.file_path, set())
+                        if bs.name not in local_defs and sym_aliases.get(cs.callee_name) == (bs_mod, bs.name):
+                            matching_callers.append(cs)
 
             if matching_callers:
                 unresolved_by_symbol[bs.symbol_id] = matching_callers
+                group_key = (bs.file_path, bs.parent_symbol or bs.qualified_name)
+                caller_groups.setdefault(group_key, []).append((bs, matching_callers))
+            elif bs.is_exported and bs.visibility == "public" and bs.kind in ("function", "method", "class", "interface", "struct", "trait"):
+                api_removal_groups.setdefault(bs.file_path, []).append(bs)
+
+        # Emit consolidated UNRESOLVED_CALLER findings per container/top-level symbol
+        for (file_path, group_name), items in sorted(caller_groups.items()):
+            if len(items) == 1:
+                bs, matching_callers = items[0]
                 caller_files = sorted({bs.file_path} | {cs.file_path for cs in matching_callers})
                 ev = [
                     EvidenceItem(
@@ -1269,8 +1516,63 @@ class ConsequenceEngine:
                         ),
                     )
                 )
-            elif bs.is_exported and bs.visibility == "public" and bs.kind in ("function", "method", "class", "interface", "struct", "trait"):
-                # Public exported API removed without internal caller match
+            else:
+                all_syms = tuple(bs.qualified_name for bs, _ in items)
+                all_callers = [cs for _, m_cs in items for cs in m_cs]
+                caller_files = sorted({file_path} | {cs.file_path for cs in all_callers})
+                ev = [
+                    EvidenceItem(
+                        kind="REMOVED_SYMBOL",
+                        file=bs.file_path,
+                        line=bs.start_line,
+                        symbol=bs.qualified_name,
+                        detail=f"Removed {bs.visibility} {bs.kind} '{bs.qualified_name}{bs.normalized_signature}'",
+                    )
+                    for bs, _ in items[:5]
+                ]
+                for cs in all_callers[:5]:
+                    ev.append(
+                        EvidenceItem(
+                            kind="UNRESOLVED_CALL_SITE",
+                            file=cs.file_path,
+                            line=cs.line,
+                            symbol=cs.caller_qualified_name,
+                            detail=(
+                                f"Caller '{cs.caller_qualified_name}' at {cs.file_path}:{cs.line} still invokes "
+                                f"removed symbol '{cs.qualifier + '.' if cs.qualifier else ''}{cs.callee_name}()'"
+                            ),
+                        )
+                    )
+                findings.append(
+                    ConsequenceFinding(
+                        finding_id=f"PG-D04-CALLER-{file_path}-{group_name}",
+                        detector_id=DETECTOR_D04_API,
+                        consequence_class="UNRESOLVED_CALLER",
+                        tier=TIER_VERIFIED,
+                        confidence=CONFIDENCE_HIGH,
+                        severity=SEVERITY_CRITICAL,
+                        policy_recommendation=POLICY_BLOCK,
+                        summary=(
+                            f"Removed {len(items)} symbols in '{group_name}' ({file_path}: "
+                            f"{', '.join(all_syms[:4])}{'...' if len(all_syms) > 4 else ''}) leaving "
+                            f"{len(all_callers)} unresolved call site(s) in head "
+                            f"(e.g. {all_callers[0].file_path}:{all_callers[0].line})."
+                        ),
+                        affected_files=tuple(caller_files),
+                        affected_symbols=all_syms,
+                        evidence=tuple(ev),
+                        remediation=(
+                            f"Update or remove all callers of '{group_name}' members "
+                            f"(including {all_callers[0].file_path}:{all_callers[0].line}) "
+                            "or restore the removed symbols."
+                        ),
+                    )
+                )
+
+        # Emit consolidated PUBLIC_API_REMOVAL findings per file
+        for file_path, syms_removed in sorted(api_removal_groups.items()):
+            if len(syms_removed) == 1:
+                bs = syms_removed[0]
                 sec_rel = _is_security_relevant_name(bs.qualified_name)
                 sev = SEVERITY_HIGH if sec_rel else SEVERITY_MEDIUM
                 pol = POLICY_REVIEW if sec_rel else POLICY_WARN
@@ -1301,6 +1603,44 @@ class ConsequenceEngine:
                         remediation=(
                             f"Verify whether external consumers depend on '{bs.qualified_name}' "
                             "or provide a deprecation alias."
+                        ),
+                    )
+                )
+            else:
+                sec_rel = any(_is_security_relevant_name(s.qualified_name) for s in syms_removed)
+                sev = SEVERITY_HIGH if sec_rel else SEVERITY_MEDIUM
+                pol = POLICY_REVIEW if sec_rel else POLICY_WARN
+                sym_names = tuple(s.qualified_name for s in syms_removed)
+                ev = tuple(
+                    EvidenceItem(
+                        kind="PUBLIC_EXPORT_REMOVED",
+                        file=s.file_path,
+                        line=s.start_line,
+                        symbol=s.qualified_name,
+                        detail=f"Exported {s.kind} '{s.qualified_name}{s.normalized_signature}' deleted",
+                    )
+                    for s in syms_removed[:8]
+                )
+                findings.append(
+                    ConsequenceFinding(
+                        finding_id=f"PG-D04-API-{file_path}",
+                        detector_id=DETECTOR_D04_API,
+                        consequence_class="PUBLIC_API_REMOVAL",
+                        tier=TIER_LIKELY,
+                        confidence=CONFIDENCE_MEDIUM,
+                        severity=sev,
+                        policy_recommendation=pol,
+                        summary=(
+                            f"{len(syms_removed)} exported public symbols were removed from '{file_path}' "
+                            f"({', '.join(sym_names[:4])}{'...' if len(sym_names) > 4 else ''}) "
+                            "with no rename or move counterpart."
+                        ),
+                        affected_files=(file_path,),
+                        affected_symbols=sym_names,
+                        evidence=ev,
+                        remediation=(
+                            f"Verify whether external consumers depend on the {len(syms_removed)} removed "
+                            f"exports in '{file_path}' or provide deprecation aliases."
                         ),
                     )
                 )

@@ -109,11 +109,13 @@ class SymbolFact:
     parent_symbol: Optional[str] = None
     frontend: str = ""
     frontend_version: str = ""
+    guard_conditions: Tuple[str, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         d["decorators"] = list(self.decorators)
         d["calls"] = list(self.calls)
+        d["guard_conditions"] = list(self.guard_conditions)
         return d
 
     @classmethod
@@ -121,6 +123,7 @@ class SymbolFact:
         payload = dict(data)
         payload["decorators"] = tuple(payload.get("decorators", ()))
         payload["calls"] = tuple(payload.get("calls", ()))
+        payload["guard_conditions"] = tuple(payload.get("guard_conditions", ()))
         return cls(**payload)
 
 
@@ -538,6 +541,186 @@ def _python_extract_calls(
     return tuple(dict.fromkeys(calls)), call_sites
 
 
+_LOGGING_QUALIFIERS = frozenset({"logger", "logging", "log", "console", "fmt"})
+_LOGGING_CALLEES = frozenset({"debug", "info", "warning", "warn", "error", "print", "println", "printf"})
+_ABORT_CALLEES = frozenset({"abort", "panic", "exit", "Exit", "Fatal", "Fatalf", "reject", "Error"})
+
+
+def _python_stmt_action(stmts: list) -> str:
+    """Classify the enforcement action of a Python statement block (if-branch or except-handler)."""
+    if not stmts:
+        return "noop"
+    has_raise = False
+    has_rollback = False
+    return_kinds: List[str] = []
+    non_trivial_stmts = 0
+
+    for stmt in stmts:
+        if isinstance(stmt, ast.Pass):
+            continue
+        if (
+            isinstance(stmt, ast.Expr)
+            and isinstance(getattr(stmt, "value", None), ast.Constant)
+            and (stmt.value.value is Ellipsis or isinstance(stmt.value.value, str))
+        ):
+            continue
+        for sub in ast.walk(stmt):
+            if isinstance(sub, ast.Raise):
+                has_raise = True
+            elif isinstance(sub, ast.Call):
+                callee = ""
+                qual = ""
+                if isinstance(sub.func, ast.Name):
+                    callee = sub.func.id
+                elif isinstance(sub.func, ast.Attribute):
+                    callee = sub.func.attr
+                    if isinstance(sub.func.value, ast.Name):
+                        qual = sub.func.value.id
+                if callee in _ABORT_CALLEES:
+                    has_raise = True
+                if "rollback" in callee.lower() or "abort" in callee.lower():
+                    has_rollback = True
+            elif isinstance(sub, ast.Return):
+                val = sub.value
+                if val is None or (isinstance(val, ast.Constant) and val.value in (False, None)):
+                    return_kinds.append("return_deny")
+                elif isinstance(val, ast.Constant) and val.value is True:
+                    return_kinds.append("return_allow")
+                else:
+                    return_kinds.append("return_val")
+
+        # Check if statement is purely a logging/print expression
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            c_name = ""
+            q_name = ""
+            if isinstance(stmt.value.func, ast.Name):
+                c_name = stmt.value.func.id
+            elif isinstance(stmt.value.func, ast.Attribute):
+                c_name = stmt.value.func.attr
+                if isinstance(stmt.value.func.value, ast.Name):
+                    q_name = stmt.value.func.value.id
+            if c_name in _LOGGING_CALLEES or q_name in _LOGGING_QUALIFIERS:
+                continue
+        non_trivial_stmts += 1
+
+    if has_raise:
+        return "raise"
+    if has_rollback:
+        return "rollback"
+    if return_kinds:
+        if "return_deny" in return_kinds:
+            return "return_deny"
+        if "return_allow" in return_kinds:
+            return "return_allow"
+        return return_kinds[0]
+    if non_trivial_stmts == 0:
+        return "noop"
+    return "branch"
+
+
+def _python_extract_guard_conditions(node: ast.AST) -> Tuple[str, ...]:
+    """
+    Extract intra-function guard condition descriptors for D06 v2:
+    - if_guard:<callee>:<polarity>:<action>
+    - early_return_bypass:<action>
+    - except_handler:<action>
+    """
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return ()
+
+    conditions: List[str] = []
+    # Strip leading docstring
+    body = list(node.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(getattr(body[0], "value", None), ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+
+    # 1. Check for early unconditional return followed by unreachable statements
+    for idx, stmt in enumerate(body):
+        if isinstance(stmt, ast.Return) and idx < len(body) - 1:
+            val = stmt.value
+            if isinstance(val, ast.Constant) and val.value is True:
+                conditions.append("early_return_bypass:return_allow")
+            elif isinstance(val, ast.Constant) and val.value in (False, None):
+                conditions.append("early_return_bypass:return_deny")
+            else:
+                conditions.append("early_return_bypass:unconditional")
+            break
+
+    def _test_polarity_and_callees(test_node: ast.AST) -> Tuple[str, List[str]]:
+        polarity = "positive"
+        target = test_node
+        if isinstance(test_node, ast.UnaryOp) and isinstance(test_node.op, ast.Not):
+            polarity = "negated"
+            target = test_node.operand
+        elif isinstance(test_node, ast.Compare) and len(test_node.ops) == 1 and len(test_node.comparators) == 1:
+            op = test_node.ops[0]
+            comp = test_node.comparators[0]
+            if isinstance(comp, ast.Constant):
+                if (isinstance(op, (ast.Eq, ast.Is)) and comp.value in (False, None)) or (
+                    isinstance(op, (ast.NotEq, ast.IsNot)) and comp.value is True
+                ):
+                    polarity = "negated"
+                    target = test_node.left
+                elif (isinstance(op, (ast.Eq, ast.Is)) and comp.value is True) or (
+                    isinstance(op, (ast.NotEq, ast.IsNot)) and comp.value in (False, None)
+                ):
+                    polarity = "positive"
+                    target = test_node.left
+
+        callees: List[str] = []
+        for sub in ast.walk(target):
+            if isinstance(sub, ast.Call):
+                c_name = ""
+                q_name = ""
+                if isinstance(sub.func, ast.Name):
+                    c_name = sub.func.id
+                elif isinstance(sub.func, ast.Attribute):
+                    c_name = sub.func.attr
+                    try:
+                        q_name = ast.unparse(sub.func.value)
+                    except Exception:
+                        q_name = ""
+                if c_name:
+                    callees.append(f"{q_name}.{c_name}" if q_name else c_name)
+        return polarity, callees
+
+    def _walk_stmts(stmts: list):
+        for stmt in stmts:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if isinstance(stmt, ast.If):
+                polarity, callees = _test_polarity_and_callees(stmt.test)
+                action = _python_stmt_action(stmt.body)
+                for callee in callees:
+                    conditions.append(f"if_guard:{callee}:{polarity}:{action}")
+                _walk_stmts(stmt.body)
+                _walk_stmts(stmt.orelse)
+            elif isinstance(stmt, ast.Try):
+                for handler in stmt.handlers:
+                    h_action = _python_stmt_action(handler.body)
+                    if h_action == "noop":
+                        conditions.append("except_handler:swallowed_noop")
+                    elif h_action == "return_allow":
+                        conditions.append("except_handler:swallowed_allow")
+                    else:
+                        conditions.append(f"except_handler:{h_action}")
+                _walk_stmts(stmt.body)
+                _walk_stmts(stmt.orelse)
+                _walk_stmts(stmt.finalbody)
+            elif isinstance(stmt, (ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.While)):
+                _walk_stmts(getattr(stmt, "body", []))
+                _walk_stmts(getattr(stmt, "orelse", []))
+
+    _walk_stmts(body)
+    return tuple(dict.fromkeys(conditions))
+
+
+
 def _extract_python_parse_result(source: str, file_path: str) -> ParseResult:
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     try:
@@ -570,10 +753,15 @@ def _extract_python_parse_result(source: str, file_path: str) -> ParseResult:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 imports.append(alias.name)
+                if alias.asname:
+                    imports.append(f"{alias.name} as {alias.asname}")
         elif isinstance(node, ast.ImportFrom):
             mod = node.module or ""
             for alias in node.names:
-                imports.append(f"{mod}.{alias.name}" if mod else alias.name)
+                target = f"{mod}.{alias.name}" if mod else alias.name
+                imports.append(target)
+                if alias.asname:
+                    imports.append(f"{target} as {alias.asname}")
         elif isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id == "__all__":
@@ -647,6 +835,7 @@ def _extract_python_parse_result(source: str, file_path: str) -> ParseResult:
                 sig, p_cnt, req_cnt = _python_signature(node, is_method=is_method)
                 body_hash, stmt_count, is_stub = _python_body_metrics(node.body)
                 calls, cs = _python_extract_calls(node, qual, file_path, stop_at_nested_defs=True)
+                g_conds = _python_extract_guard_conditions(node)
                 call_sites.extend(cs)
                 symbols.append(
                     SymbolFact(
@@ -669,6 +858,7 @@ def _extract_python_parse_result(source: str, file_path: str) -> ParseResult:
                         statement_count=stmt_count,
                         is_stub=is_stub,
                         calls=calls,
+                        guard_conditions=g_conds,
                         parent_symbol=parent_qual,
                         frontend="python-ast",
                         frontend_version=py_ver,
@@ -883,6 +1073,127 @@ def _ts_extract_calls(node, caller_qual: str, file_path: str, lang_key: str) -> 
     if node is not None:
         _walk(node, True)
     return tuple(dict.fromkeys(calls)), call_sites
+
+
+def _ts_stmt_action(block_node) -> str:
+    """Classify the enforcement action of a Tree-sitter block/consequence/catch body."""
+    if block_node is None:
+        return "noop"
+    tokens = _ts_non_comment_tokens(block_node)
+    if len(tokens) >= 2 and tokens[0] == "{" and tokens[-1] == "}":
+        inner = tokens[1:-1]
+    else:
+        inner = tokens
+    inner_clean = [t for t in inner if t not in (";", ",")]
+    if not inner_clean:
+        return "noop"
+
+    joined = " ".join(inner_clean)
+    if (
+        "throw " in joined
+        or tokens[0] == "throw"
+        or "panic !" in joined
+        or "panic (" in joined
+        or "os . Exit" in joined
+        or "t . Fatal" in joined
+        or "http . Error" in joined
+        or "res . status ( 401 )" in joined
+        or "res . status ( 403 )" in joined
+    ):
+        return "raise"
+    if "rollback" in joined.lower() or "abort" in joined.lower():
+        return "rollback"
+    if "return false" in joined or "return null" in joined or "return nil" in joined or "return Err" in joined:
+        return "return_deny"
+    if "return true" in joined or "return Ok" in joined:
+        return "return_allow"
+    if "return" in inner_clean:
+        return "return_val"
+
+    # Check if only console.log / logger / fmt.Println
+    stmt_children = [
+        c for c in block_node.children
+        if c.type not in ("{", "}", ";") and c.type not in _COMMENT_NODE_TYPES
+    ]
+    if stmt_children and all(
+        any(q in _ts_node_text(c) for q in ("console.", "logger.", "log.", "fmt.Print", "println!"))
+        for c in stmt_children
+    ):
+        return "noop"
+    return "branch"
+
+
+def _ts_extract_guard_conditions(body_node, lang_key: str) -> Tuple[str, ...]:
+    """
+    Extract intra-function guard condition descriptors from a Tree-sitter body:
+    - if_guard:<callee>:<polarity>:<action>
+    - early_return_bypass:<action>
+    - except_handler:<action>
+    """
+    if body_node is None:
+        return ()
+
+    conditions: List[str] = []
+    nested_stop = {
+        "function_declaration", "method_definition", "arrow_function",
+        "function_item", "method_declaration", "class_declaration",
+    }
+
+    # 1. Early unconditional return followed by unreachable statements in top-level block
+    stmt_children = [
+        c for c in body_node.children
+        if c.type not in ("{", "}", ";") and c.type not in _COMMENT_NODE_TYPES
+    ]
+    for idx, ch in enumerate(stmt_children):
+        if ch.type in ("return_statement", "return_expression") and idx < len(stmt_children) - 1:
+            txt = " ".join(_ts_non_comment_tokens(ch))
+            if "true" in txt:
+                conditions.append("early_return_bypass:return_allow")
+            elif any(k in txt for k in ("false", "null", "nil")):
+                conditions.append("early_return_bypass:return_deny")
+            else:
+                conditions.append("early_return_bypass:unconditional")
+            break
+
+    def _walk(curr, is_root: bool = False):
+        if not is_root and curr.type in nested_stop:
+            return
+        if curr.type in ("if_statement", "if_expression"):
+            cond = curr.child_by_field_name("condition")
+            conseq = curr.child_by_field_name("consequence")
+            if cond is not None:
+                cond_txt = " ".join(_ts_non_comment_tokens(cond)).strip()
+                if cond_txt.startswith("(") and cond_txt.endswith(")"):
+                    cond_txt = cond_txt[1:-1].strip()
+                polarity = "positive"
+                if (
+                    cond_txt.startswith("!")
+                    or cond_txt.startswith("not ")
+                    or "== false" in cond_txt
+                    or "=== false" in cond_txt
+                    or "!= true" in cond_txt
+                    or "!== true" in cond_txt
+                ):
+                    polarity = "negated"
+                calls_in_cond, _ = _ts_extract_calls(cond, "<cond>", "", lang_key)
+                action = _ts_stmt_action(conseq)
+                for callee in calls_in_cond:
+                    conditions.append(f"if_guard:{callee}:{polarity}:{action}")
+        elif curr.type == "catch_clause":
+            c_body = curr.child_by_field_name("body")
+            c_action = _ts_stmt_action(c_body)
+            if c_action == "noop":
+                conditions.append("except_handler:swallowed_noop")
+            elif c_action == "return_allow":
+                conditions.append("except_handler:swallowed_allow")
+            else:
+                conditions.append(f"except_handler:{c_action}")
+
+        for ch in curr.children:
+            _walk(ch, False)
+
+    _walk(body_node, True)
+    return tuple(dict.fromkeys(conditions))
 
 
 def _extract_commonjs_exports(root_node) -> set[str]:
@@ -1101,6 +1412,7 @@ def _extract_treesitter_parse_result(source: str, file_path: str, lang_key: str)
                 )
                 b_hash, stmt_cnt, is_stub = _ts_body_metrics(body_node)
                 calls, cs = _ts_extract_calls(body_node or node, qual, file_path, lang_key)
+                g_conds = _ts_extract_guard_conditions(body_node, lang_key) if kind in ("function", "method") else ()
                 call_sites.extend(cs)
 
                 symbols.append(
@@ -1124,6 +1436,7 @@ def _extract_treesitter_parse_result(source: str, file_path: str, lang_key: str)
                         statement_count=stmt_cnt,
                         is_stub=is_stub,
                         calls=calls,
+                        guard_conditions=g_conds,
                         parent_symbol=container,
                         frontend="tree-sitter",
                         frontend_version=ts_ver,
@@ -1141,7 +1454,9 @@ def _extract_treesitter_parse_result(source: str, file_path: str, lang_key: str)
             name_node = node.child_by_field_name("name")
             val_node = node.child_by_field_name("value")
             name = _ts_node_text(name_node).strip() if name_node else ""
-            if name:
+            if val_node is not None and "require(" in _ts_node_text(val_node):
+                imports.append(_ts_node_text(node).strip())
+            if name and not name.startswith("{") and not name.startswith("["):
                 is_arrow = val_node is not None and val_node.type in ("arrow_function", "function_expression", "function")
                 kind = "function" if is_arrow else ("constant" if name.isupper() else "variable")
                 is_exp = _has_export_ancestor(node) or (name in commonjs_exports)
@@ -1152,11 +1467,13 @@ def _extract_treesitter_parse_result(source: str, file_path: str, lang_key: str)
                     body_node = val_node.child_by_field_name("body")
                     b_hash, stmt_cnt, is_stub = _ts_body_metrics(body_node)
                     calls, cs = _ts_extract_calls(val_node, name, file_path, lang_key)
+                    g_conds = _ts_extract_guard_conditions(body_node, lang_key)
                     call_sites.extend(cs)
                 else:
                     sig, p_cnt, req_cnt = "=", 0, 0
                     b_hash, stmt_cnt, is_stub = _ts_body_metrics(val_node)
                     calls, cs = _ts_extract_calls(val_node, name, file_path, lang_key)
+                    g_conds = ()
                     call_sites.extend(cs)
                 symbols.append(
                     SymbolFact(
@@ -1179,6 +1496,7 @@ def _extract_treesitter_parse_result(source: str, file_path: str, lang_key: str)
                         statement_count=stmt_cnt,
                         is_stub=is_stub,
                         calls=calls,
+                        guard_conditions=g_conds,
                         parent_symbol=None,
                         frontend="tree-sitter",
                         frontend_version=ts_ver,

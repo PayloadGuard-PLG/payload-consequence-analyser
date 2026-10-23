@@ -831,4 +831,268 @@ class TestPayloadAnalyzerIntegration:
         assert "Consequence Analysis (`consequence.v1`)" in md
         assert "D03_COMPOUND_LOSS" in md
         assert "D04_PUBLIC_API_BREAK" in md
+        assert "<details><summary>Evidence & Remediation</summary>" in md
+
+
+# ==============================================================================
+# 6. D06 v2 (GUARD POLARITY / BYPASS / EXCEPTION) & D04 v2 (IMPORT ALIAS / CONSOLIDATION) & USABILITY
+# ==============================================================================
+
+class TestDetectorAccuracyV2AndUsability:
+    def test_d06_v2_guard_polarity_inversion_python_and_typescript(self):
+        """D06 v2: Inverting `if not verify_token(t): raise` -> `if verify_token(t): raise` triggers BLOCK even though call set is unchanged."""
+        base_py = (
+            "def authorize_request(token: str) -> bool:\n"
+            "    if not verify_token(token):\n"
+            "        raise PermissionError('invalid token')\n"
+            "    return True\n"
+        )
+        head_py_inverted = (
+            "def authorize_request(token: str) -> bool:\n"
+            "    if verify_token(token):\n"
+            "        raise PermissionError('invalid token')\n"
+            "    return True\n"
+        )
+        head_py_benign = (
+            "def authorize_request(token: str) -> bool:\n"
+            "    if not verify_token(token):\n"
+            "        logger.warning('bad token')\n"
+            "        raise PermissionError('invalid token')\n"
+            "    return True\n"
+        )
+        engine = ConsequenceEngine(mode="enforce")
+        rep = engine.analyze_deltas([
+            FileDeltaInput("auth.py", change_type="M", base_source=base_py, head_source=head_py_inverted)
+        ])
+        assert rep.recommended_verdict == "DESTRUCTIVE"
+        d06 = [f for f in rep.findings if f.detector_id == DETECTOR_D06_GUARD]
+        assert len(d06) == 1
+        assert d06[0].consequence_class == "SECURITY_GUARD_WEAKENED"
+        assert d06[0].policy_recommendation == POLICY_BLOCK
+        assert any(e.kind == "GUARD_POLARITY_INVERTED" for e in d06[0].evidence)
+
+        # Benign logging addition alongside raise must stay SAFE
+        rep_safe = engine.analyze_deltas([
+            FileDeltaInput("auth.py", change_type="M", base_source=base_py, head_source=head_py_benign)
+        ])
+        assert rep_safe.recommended_verdict == "SAFE"
+        assert [f for f in rep_safe.findings if f.detector_id == DETECTOR_D06_GUARD] == []
+
+        # TypeScript guard polarity inversion
+        base_ts = (
+            "export function checkAccess(token: string): boolean {\n"
+            "    if (!verifyToken(token)) {\n"
+            "        throw new Error('Unauthorized');\n"
+            "    }\n"
+            "    return true;\n"
+            "}\n"
+        )
+        head_ts = (
+            "export function checkAccess(token: string): boolean {\n"
+            "    if (verifyToken(token)) {\n"
+            "        throw new Error('Unauthorized');\n"
+            "    }\n"
+            "    return true;\n"
+            "}\n"
+        )
+        rep_ts = engine.analyze_deltas([
+            FileDeltaInput("auth.ts", change_type="M", base_source=base_ts, head_source=head_ts)
+        ])
+        assert rep_ts.recommended_verdict == "DESTRUCTIVE"
+        d06_ts = [f for f in rep_ts.findings if f.detector_id == DETECTOR_D06_GUARD]
+        assert len(d06_ts) == 1
+        assert any(e.kind == "GUARD_POLARITY_INVERTED" for e in d06_ts[0].evidence)
+
+    def test_d06_v2_guard_enforcement_neutralized_and_early_return_bypass(self):
+        """D06 v2: Neutralizing failure branch (`raise` -> `pass`) or inserting `return True` before guard triggers BLOCK."""
+        base_py = (
+            "def check_permission(user: str) -> bool:\n"
+            "    if not validate_hmac(user):\n"
+            "        raise ValueError('bad hmac')\n"
+            "    return True\n"
+        )
+        head_neutralized = (
+            "def check_permission(user: str) -> bool:\n"
+            "    if not validate_hmac(user):\n"
+            "        logger.info('ignoring hmac mismatch')\n"
+            "    return True\n"
+        )
+        head_early_return = (
+            "def check_permission(user: str) -> bool:\n"
+            "    return True\n"
+            "    if not validate_hmac(user):\n"
+            "        raise ValueError('bad hmac')\n"
+            "    return True\n"
+        )
+        engine = ConsequenceEngine(mode="enforce")
+
+        rep1 = engine.analyze_deltas([
+            FileDeltaInput("perm.py", change_type="M", base_source=base_py, head_source=head_neutralized)
+        ])
+        assert rep1.recommended_verdict == "DESTRUCTIVE"
+        d06_1 = [f for f in rep1.findings if f.detector_id == DETECTOR_D06_GUARD]
+        assert len(d06_1) == 1
+        assert any(e.kind == "GUARD_ENFORCEMENT_NEUTRALIZED" for e in d06_1[0].evidence)
+
+        rep2 = engine.analyze_deltas([
+            FileDeltaInput("perm.py", change_type="M", base_source=base_py, head_source=head_early_return)
+        ])
+        assert rep2.recommended_verdict == "DESTRUCTIVE"
+        d06_2 = [f for f in rep2.findings if f.detector_id == DETECTOR_D06_GUARD]
+        assert len(d06_2) == 1
+        assert any(e.kind == "GUARD_BYPASSED_BY_EARLY_RETURN" for e in d06_2[0].evidence)
+
+    def test_d06_v2_exception_handler_swallowed(self):
+        """D06 v2: Weakening `except Exception: raise` to `except Exception: pass` or `return True` triggers BLOCK."""
+        base_py = (
+            "def verify_jwt_signature(token: str) -> bool:\n"
+            "    try:\n"
+            "        decode_token(token)\n"
+            "        return True\n"
+            "    except Exception:\n"
+            "        raise\n"
+        )
+        head_swallowed = (
+            "def verify_jwt_signature(token: str) -> bool:\n"
+            "    try:\n"
+            "        decode_token(token)\n"
+            "        return True\n"
+            "    except Exception:\n"
+            "        return True\n"
+        )
+        engine = ConsequenceEngine(mode="enforce")
+        rep = engine.analyze_deltas([
+            FileDeltaInput("jwt_auth.py", change_type="M", base_source=base_py, head_source=head_swallowed)
+        ])
+        assert rep.recommended_verdict == "DESTRUCTIVE"
+        d06 = [f for f in rep.findings if f.detector_id == DETECTOR_D06_GUARD]
+        assert len(d06) == 1
+        assert any(e.kind == "EXCEPTION_HANDLER_SWALLOWED" for e in d06[0].evidence)
+
+    def test_d04_v2_import_alias_and_cross_module_disambiguation(self):
+        """D04 v2: Aliased imports (`from auth import deactivate as disable_user`) and module-qualified calls resolve to removed symbol."""
+        base_auth = (
+            "def login(u: str) -> bool:\n"
+            "    return bool(u)\n\n"
+            "def deactivate(u: str) -> bool:\n"
+            "    return True\n"
+        )
+        head_auth = (
+            "def login(u: str) -> bool:\n"
+            "    return bool(u)\n"
+        )
+        # Another module in head STILL defines a function named `deactivate`, AND caller uses an import alias!
+        repo_head = {
+            "other_service.py": "def deactivate(x: str) -> bool:\n    return False\n",
+            "admin_routes.py": (
+                "from auth import deactivate as disable_user\n\n"
+                "def kick_user(u: str):\n"
+                "    return disable_user(u)\n"
+            ),
+        }
+        engine = ConsequenceEngine(mode="enforce")
+        rep = engine.analyze_deltas(
+            [FileDeltaInput("auth.py", change_type="M", base_source=base_auth, head_source=head_auth)],
+            repo_head_files=repo_head,
+        )
+        assert rep.recommended_verdict == "DESTRUCTIVE"
+        d04 = [f for f in rep.findings if f.detector_id == DETECTOR_D04_API and f.consequence_class == "UNRESOLVED_CALLER"]
+        assert len(d04) == 1
+        assert "deactivate" in d04[0].affected_symbols
+        assert any(e.file == "admin_routes.py" and e.kind == "UNRESOLVED_CALL_SITE" for e in d04[0].evidence)
+
+    def test_d04_v2_container_consolidation_reduces_finding_noise(self):
+        """D04 v2: Deleting a multi-method class consolidates UNRESOLVED_CALLER by class and PUBLIC_API_REMOVAL by file."""
+        base_cls = (
+            "class BillingClient:\n"
+            "    def charge(self, amt: int) -> bool:\n        return amt > 0\n"
+            "    def refund(self, tx: str) -> bool:\n        return bool(tx)\n"
+            "    def invoice(self, tx: str) -> str:\n        return tx\n"
+            "    def cancel(self, sub: str) -> bool:\n        return bool(sub)\n"
+        )
+        repo_head = {
+            "checkout.py": (
+                "def run_checkout(client):\n"
+                "    billingclient = BillingClient()\n"
+                "    billingclient.charge(100)\n"
+                "    billingclient.refund('tx_1')\n"
+            )
+        }
+        engine = ConsequenceEngine(mode="enforce")
+        rep = engine.analyze_deltas(
+            [FileDeltaInput("billing.py", change_type="D", base_source=base_cls, head_source=None)],
+            repo_head_files=repo_head,
+        )
+        caller_findings = [f for f in rep.findings if f.consequence_class == "UNRESOLVED_CALLER"]
+        api_findings = [f for f in rep.findings if f.consequence_class == "PUBLIC_API_REMOVAL"]
+        # Consolidated to 1 container caller finding and 1 file API removal finding
+        assert len(caller_findings) == 1
+        assert len(api_findings) == 1
+        assert set(caller_findings[0].affected_symbols) == {
+            "BillingClient",
+            "BillingClient.charge",
+            "BillingClient.refund",
+        }
+
+    def test_usability_cli_print_and_sarif_report(self, capsys):
+        """Verify print_report renders CONSEQUENCE ANALYSIS and format_sarif_report emits valid SARIF 2.1.0."""
+        from analyze import print_report, format_sarif_report
+
+        engine = ConsequenceEngine(mode="enforce")
+        c_rep = engine.analyze_deltas(
+            [
+                FileDeltaInput(
+                    "auth.py",
+                    change_type="M",
+                    base_source="def verify(t: str) -> bool:\n    return bool(t)\n",
+                    head_source="",
+                )
+            ],
+            repo_head_files={"app.py": "def main():\n    verify('tok')\n"},
+        )
+        fake_full_report = {
+            "timestamp": "2026-10-23T18:00:00Z",
+            "analysis": {"branch": "feat/test", "target": "main", "repo_path": "."},
+            "temporal": {
+                "branch_age_days": 1,
+                "branch_last_commit": "2026-10-23T18:00:00Z",
+                "target_last_commit": "2026-10-22T18:00:00Z",
+                "branch_commit_hash": "aaaa1111",
+                "target_commit_hash": "bbbb2222",
+            },
+            "files": {"added": 0, "deleted": 0, "modified": 1, "total_changed": 1},
+            "lines": {"added": 0, "deleted": 2, "net_change": -2, "deletion_ratio_percent": 100.0},
+            "deleted_files": {"total": 0, "critical": [], "all": []},
+            "verdict": {
+                "status": "DESTRUCTIVE",
+                "severity": "CRITICAL",
+                "score": 8,
+                "flags": ["CONSEQUENCE BLOCK [D04_PUBLIC_API_BREAK]: Removed function 'verify'"],
+                "recommendation": "DO NOT MERGE",
+            },
+            "consequence_analysis": c_rep.to_dict(),
+        }
+        print_report(fake_full_report)
+        captured = capsys.readouterr().out
+        assert "CONSEQUENCE ANALYSIS (consequence.v1)" in captured
+        assert "D04_PUBLIC_API_BREAK (UNRESOLVED_CALLER)" in captured
+        assert "Evidence (app.py:2):" in captured
+        assert "Fix:" in captured
+
+        sarif = format_sarif_report(fake_full_report)
+        assert sarif["version"] == "2.1.0"
+        assert len(sarif["runs"]) == 1
+        run = sarif["runs"][0]
+        assert run["tool"]["driver"]["name"] == "PayloadGuard"
+        assert len(run["results"]) >= 1
+        res0 = run["results"][0]
+        assert res0["ruleId"] == "D04_PUBLIC_API_BREAK"
+        assert res0["level"] == "error"
+        locs = res0["locations"]
+        assert any(
+            loc["physicalLocation"]["artifactLocation"]["uri"] == "app.py"
+            and loc["physicalLocation"]["region"]["startLine"] == 2
+            for loc in locs
+        )
+
 
