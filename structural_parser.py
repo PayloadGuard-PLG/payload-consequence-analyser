@@ -618,12 +618,153 @@ def _python_stmt_action(stmts: list) -> str:
     return "branch"
 
 
-def _python_extract_guard_conditions(node: ast.AST) -> Tuple[str, ...]:
+_STATE_GUARD_IDENT_RE = re.compile(
+    r"\b(?:auth|authenticated|authorized|admin|is_admin|isadmin|perm|permission|"
+    r"role|valid|verified|active|is_active|isactive|token|session|expired|csrf|"
+    r"signature|policy|allowed|enabled|ok|started)\b",
+    re.IGNORECASE,
+)
+
+
+_CUSTOM_ASSERT_HELPER_RE = re.compile(
+    r"^(?:verify|check|ensure|require|expect|should)(?:_[a-z0-9_]+|[A-Z][A-Za-z0-9_]*)$"
+)
+
+
+def _eval_python_const_bool(
+    test_node: ast.AST,
+    const_bools: Optional[Dict[str, bool]] = None,
+) -> Optional[bool]:
+    """Evaluate a Python AST expression to a static boolean if it is a constant tautology/contradiction."""
+    const_bools = const_bools or {}
+    if isinstance(test_node, ast.Constant) and isinstance(test_node.value, (bool, int)):
+        return bool(test_node.value)
+    if isinstance(test_node, ast.Name) and test_node.id in const_bools:
+        return const_bools[test_node.id]
+    if isinstance(test_node, ast.UnaryOp) and isinstance(test_node.op, ast.Not):
+        inner = _eval_python_const_bool(test_node.operand, const_bools)
+        if inner is not None:
+            return not inner
+    if (
+        isinstance(test_node, ast.Compare)
+        and len(test_node.ops) == 1
+        and len(test_node.comparators) == 1
+        and isinstance(test_node.left, ast.Constant)
+        and isinstance(test_node.comparators[0], ast.Constant)
+    ):
+        lv = test_node.left.value
+        rv = test_node.comparators[0].value
+        op = test_node.ops[0]
+        try:
+            if isinstance(op, (ast.Eq, ast.Is)):
+                return bool(lv == rv)
+            if isinstance(op, (ast.NotEq, ast.IsNot)):
+                return bool(lv != rv)
+            if isinstance(op, ast.Lt):
+                return bool(lv < rv)
+            if isinstance(op, ast.LtE):
+                return bool(lv <= rv)
+            if isinstance(op, ast.Gt):
+                return bool(lv > rv)
+            if isinstance(op, ast.GtE):
+                return bool(lv >= rv)
+        except TypeError:
+            return None
+    return None
+
+
+def _collect_python_const_bools(stmts: list) -> Dict[str, bool]:
     """
-    Extract intra-function guard condition descriptors for D06 v2:
+    Collect single-assignment boolean/int constants within a statement list.
+    Any variable assigned more than once or mutated via AugAssign/Global/Nonlocal is excluded.
+    """
+    assign_counts: Dict[str, int] = {}
+    bool_vals: Dict[str, bool] = {}
+    disqualified: set[str] = set()
+
+    class _AssignVisitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            return
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            return
+
+        def visit_Global(self, node: ast.Global) -> None:
+            for n in node.names:
+                disqualified.add(n)
+
+        def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+            for n in node.names:
+                disqualified.add(n)
+
+        def visit_AugAssign(self, node: ast.AugAssign) -> None:
+            if isinstance(node.target, ast.Name):
+                disqualified.add(node.target.id)
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    assign_counts[t.id] = assign_counts.get(t.id, 0) + 1
+                    if (
+                        isinstance(node.value, ast.Constant)
+                        and isinstance(node.value.value, bool)
+                    ):
+                        bool_vals[t.id] = bool(node.value.value)
+                    else:
+                        disqualified.add(t.id)
+                else:
+                    for sub in ast.walk(t):
+                        if isinstance(sub, ast.Name):
+                            disqualified.add(sub.id)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            if isinstance(node.target, ast.Name):
+                tid = node.target.id
+                assign_counts[tid] = assign_counts.get(tid, 0) + 1
+                if (
+                    node.value is not None
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, bool)
+                ):
+                    bool_vals[tid] = bool(node.value.value)
+                else:
+                    disqualified.add(tid)
+
+    visitor = _AssignVisitor()
+    for s in stmts:
+        visitor.visit(s)
+
+    return {
+        k: v
+        for k, v in bool_vals.items()
+        if assign_counts.get(k, 0) == 1 and k not in disqualified
+    }
+
+
+def _is_python_trivial_assert(
+    test_node: ast.AST,
+    const_bools: Optional[Dict[str, bool]] = None,
+) -> bool:
+    """Return True if a Python assert expression is a constant tautology (e.g. `assert True`, `assert 1 == 1`)."""
+    return _eval_python_const_bool(test_node, const_bools) is True
+
+
+def _python_extract_guard_conditions(
+    node: ast.AST,
+    module_const_bools: Optional[Dict[str, bool]] = None,
+) -> Tuple[str, ...]:
+    """
+    Extract intra-function guard condition and test contract descriptors for D06 & D09:
     - if_guard:<callee>:<polarity>:<action>
+    - if_state_guard:<subject>:<polarity>:<action>
+    - if_short_circuit:<target>:<and_false|or_true>:<action>
     - early_return_bypass:<action>
     - except_handler:<action>
+    - test_assertions:<effective_count>:<trivial_count>
+    - test_skip_call:true
     """
     if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return ()
@@ -638,6 +779,9 @@ def _python_extract_guard_conditions(node: ast.AST) -> Tuple[str, ...]:
         and isinstance(body[0].value.value, str)
     ):
         body = body[1:]
+
+    const_bools: Dict[str, bool] = dict(module_const_bools or {})
+    const_bools.update(_collect_python_const_bools(body))
 
     # 1. Check for early unconditional return followed by unreachable statements
     for idx, stmt in enumerate(body):
@@ -659,7 +803,7 @@ def _python_extract_guard_conditions(node: ast.AST) -> Tuple[str, ...]:
             return clauses
         return [test_node]
 
-    def _clause_polarity_and_callees(clause_node: ast.AST) -> Tuple[str, List[str]]:
+    def _clause_polarity_and_callees(clause_node: ast.AST) -> Tuple[str, List[str], ast.AST]:
         polarity = "positive"
         target = clause_node
         if isinstance(clause_node, ast.UnaryOp) and isinstance(clause_node.op, ast.Not):
@@ -695,18 +839,125 @@ def _python_extract_guard_conditions(node: ast.AST) -> Tuple[str, ...]:
                         q_name = ""
                 if c_name:
                     callees.append(f"{q_name}.{c_name}" if q_name else c_name)
-        return polarity, callees
+        return polarity, callees, target
+
+    def _short_circuit_kind(test_node: ast.AST) -> Optional[str]:
+        direct_val = _eval_python_const_bool(test_node, const_bools)
+        if direct_val is False:
+            return "and_false"
+        if isinstance(test_node, ast.BoolOp):
+            if isinstance(test_node.op, ast.And):
+                if any(_eval_python_const_bool(v, const_bools) is False for v in test_node.values):
+                    return "and_false"
+            elif isinstance(test_node.op, ast.Or):
+                if any(_eval_python_const_bool(v, const_bools) is True for v in test_node.values):
+                    return "or_true"
+        return None
+
+    effective_asserts = 0
+    trivial_asserts = 0
+    has_skip_call = False
+
+    def _walk_stmt_exprs(curr: ast.AST, is_root: bool = False):
+        nonlocal effective_asserts, trivial_asserts, has_skip_call
+        if not is_root and isinstance(curr, ast.stmt):
+            return
+        is_standalone_call = is_root and isinstance(curr, ast.Expr) and isinstance(curr.value, ast.Call)
+        if isinstance(curr, ast.Call):
+            c_name = ""
+            q_name = ""
+            if isinstance(curr.func, ast.Name):
+                c_name = curr.func.id
+            elif isinstance(curr.func, ast.Attribute):
+                c_name = curr.func.attr
+                if isinstance(curr.func.value, ast.Name):
+                    q_name = curr.func.value.id
+            if (q_name in ("pytest", "unittest") and c_name in ("skip", "xfail", "SkipTest")) or (
+                q_name == "self" and c_name == "skipTest"
+            ):
+                has_skip_call = True
+            elif (
+                c_name.lower().startswith("assert")
+                or (q_name == "pytest" and c_name in ("raises", "warns", "fail"))
+            ):
+                if (
+                    c_name in ("assertTrue", "assert_", "assert_true")
+                    and len(curr.args) >= 1
+                    and _eval_python_const_bool(curr.args[0], const_bools) is True
+                ):
+                    trivial_asserts += 1
+                elif (
+                    c_name in ("assertFalse", "assert_false")
+                    and len(curr.args) >= 1
+                    and _eval_python_const_bool(curr.args[0], const_bools) is False
+                ):
+                    trivial_asserts += 1
+                elif (
+                    c_name in ("assertEqual", "assert_equal", "assertEquals")
+                    and len(curr.args) >= 2
+                    and isinstance(curr.args[0], ast.Constant)
+                    and isinstance(curr.args[1], ast.Constant)
+                    and curr.args[0].value == curr.args[1].value
+                ):
+                    trivial_asserts += 1
+                else:
+                    effective_asserts += 1
+        if is_standalone_call:
+            call_node = curr.value
+            c_name = ""
+            if isinstance(call_node.func, ast.Name):
+                c_name = call_node.func.id
+            elif isinstance(call_node.func, ast.Attribute):
+                c_name = call_node.func.attr
+            if c_name and not c_name.lower().startswith("assert") and _CUSTOM_ASSERT_HELPER_RE.match(c_name):
+                effective_asserts += 1
+        for ch in ast.iter_child_nodes(curr):
+            _walk_stmt_exprs(ch, False)
 
     def _walk_stmts(stmts: list):
+        nonlocal effective_asserts, trivial_asserts, has_skip_call
         for stmt in stmts:
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
+            if isinstance(stmt, ast.Assert):
+                if _is_python_trivial_assert(stmt.test, const_bools):
+                    trivial_asserts += 1
+                else:
+                    effective_asserts += 1
+            _walk_stmt_exprs(stmt, True)
+
             if isinstance(stmt, ast.If):
                 action = _python_stmt_action(stmt.body)
-                for clause in _atomic_clauses(stmt.test):
-                    polarity, callees = _clause_polarity_and_callees(clause)
-                    for callee in callees:
-                        conditions.append(f"if_guard:{callee}:{polarity}:{action}")
+                sc_kind = _short_circuit_kind(stmt.test)
+                if sc_kind is not None:
+                    all_callees: List[str] = []
+                    for clause in _atomic_clauses(stmt.test):
+                        if _eval_python_const_bool(clause, const_bools) is not None:
+                            continue
+                        _, c_list, _ = _clause_polarity_and_callees(clause)
+                        all_callees.extend(c_list)
+                    if all_callees:
+                        for callee in all_callees:
+                            conditions.append(f"if_short_circuit:{callee}:{sc_kind}:{action}")
+                    elif action in ("raise", "rollback", "return_deny", "return_allow", "return_val", "branch"):
+                        conditions.append(f"if_short_circuit:state_guard:{sc_kind}:{action}")
+                else:
+                    for clause in _atomic_clauses(stmt.test):
+                        polarity, callees, target_node = _clause_polarity_and_callees(clause)
+                        if callees:
+                            for callee in callees:
+                                conditions.append(f"if_guard:{callee}:{polarity}:{action}")
+                        elif action in ("raise", "rollback") or (
+                            action == "return_deny"
+                            and _STATE_GUARD_IDENT_RE.search(ast.unparse(target_node) if hasattr(ast, "unparse") else "")
+                        ):
+                            try:
+                                raw_subj = ast.unparse(target_node)
+                            except Exception:
+                                raw_subj = ""
+                            subj = re.sub(r"\s+", "", raw_subj).replace(":", "_")
+                            if subj and not isinstance(target_node, ast.Constant):
+                                conditions.append(f"if_state_guard:{subj}:{polarity}:{action}")
                 _walk_stmts(stmt.body)
                 _walk_stmts(stmt.orelse)
             elif isinstance(stmt, ast.Try):
@@ -726,6 +977,10 @@ def _python_extract_guard_conditions(node: ast.AST) -> Tuple[str, ...]:
                 _walk_stmts(getattr(stmt, "orelse", []))
 
     _walk_stmts(body)
+    if effective_asserts > 0 or trivial_asserts > 0:
+        conditions.append(f"test_assertions:{effective_asserts}:{trivial_asserts}")
+    if has_skip_call:
+        conditions.append("test_skip_call:true")
     return tuple(dict.fromkeys(conditions))
 
 
@@ -1114,7 +1369,13 @@ def _ts_stmt_action(block_node) -> str:
         return "raise"
     if "rollback" in joined.lower() or "abort" in joined.lower():
         return "rollback"
-    if "return false" in joined or "return null" in joined or "return nil" in joined or "return Err" in joined:
+    if (
+        "return false" in joined
+        or "return null" in joined
+        or "return nil" in joined
+        or "return Err" in joined
+        or re.search(r"\breturn\b[^;{}]*\berr\b", joined)
+    ):
         return "return_deny"
     if "return true" in joined or "return Ok" in joined:
         return "return_allow"
@@ -1136,10 +1397,14 @@ def _ts_stmt_action(block_node) -> str:
 
 def _ts_extract_guard_conditions(body_node, lang_key: str) -> Tuple[str, ...]:
     """
-    Extract intra-function guard condition descriptors from a Tree-sitter body:
+    Extract intra-function guard condition and test contract descriptors from a Tree-sitter body:
     - if_guard:<callee>:<polarity>:<action>
+    - if_state_guard:<subject>:<polarity>:<action>
+    - if_short_circuit:<target>:<and_false|or_true>:<action>
     - early_return_bypass:<action>
     - except_handler:<action>
+    - test_assertions:<effective_count>:<trivial_count>
+    - test_skip_call:true
     """
     if body_node is None:
         return ()
@@ -1166,9 +1431,54 @@ def _ts_extract_guard_conditions(body_node, lang_key: str) -> Tuple[str, ...]:
                 conditions.append("early_return_bypass:unconditional")
             break
 
+    effective_asserts = 0
+    trivial_asserts = 0
+    has_skip_call = False
+
     def _walk(curr, is_root: bool = False):
+        nonlocal effective_asserts, trivial_asserts, has_skip_call
         if not is_root and curr.type in nested_stop:
             return
+
+        # Track test assertions & skip calls across JS/TS/Go/Rust/Java
+        if curr.type in ("call_expression", "method_invocation"):
+            txt = " ".join(_ts_non_comment_tokens(curr))
+            fn_node = curr.child_by_field_name("function") if curr.type == "call_expression" else curr.child_by_field_name("name")
+            obj_node = curr.child_by_field_name("object") if curr.type == "method_invocation" else None
+            fn_txt = _ts_node_text(fn_node).strip() if fn_node else ""
+            obj_txt = _ts_node_text(obj_node).strip() if obj_node else ""
+            full_fn = f"{obj_txt}.{fn_txt}" if obj_txt else fn_txt
+
+            if full_fn in ("t.Skip", "t.SkipNow", "t.Skipf", "it.skip", "test.skip", "describe.skip"):
+                has_skip_call = True
+            elif fn_txt == "expect":
+                # Inspect parent chain for trivial `expect(true).toBe(true)` or `expect(1).toBe(1)`
+                outer_txt = txt
+                if curr.parent is not None and curr.parent.parent is not None and curr.parent.parent.type == "call_expression":
+                    outer_txt = " ".join(_ts_non_comment_tokens(curr.parent.parent))
+                if re.match(r"^expect\s*\(\s*(?:true|1)\s*\)\s*\.\s*(?:toBe|toEqual|toBeTruthy)\s*\(\s*(?:true|1)?\s*\)$", outer_txt):
+                    trivial_asserts += 1
+                else:
+                    effective_asserts += 1
+            elif (
+                fn_txt in ("assert", "assertEquals", "assertTrue", "assertFalse", "assertNotNull", "assertNull", "assertThrows", "assertThat")
+                or full_fn.startswith(("assert.", "require."))
+                or full_fn in ("t.Error", "t.Errorf", "t.Fatal", "t.Fatalf")
+            ):
+                if re.match(r"^(?:assert|assert\.ok|assertTrue)\s*\(\s*(?:true|1)\s*\)$", txt):
+                    trivial_asserts += 1
+                else:
+                    effective_asserts += 1
+        elif curr.type == "macro_invocation":
+            m_txt = " ".join(_ts_non_comment_tokens(curr))
+            if m_txt.startswith(("assert !", "assert_eq !", "assert_ne !")):
+                if re.match(r"^assert\s*!\s*\(\s*true\s*\)$", m_txt) or re.match(
+                    r"^assert_eq\s*!\s*\(\s*(?:true\s*,\s*true|1\s*,\s*1)\s*\)$", m_txt
+                ):
+                    trivial_asserts += 1
+                else:
+                    effective_asserts += 1
+
         if curr.type in ("if_statement", "if_expression"):
             cond = curr.child_by_field_name("condition")
             conseq = curr.child_by_field_name("consequence")
@@ -1188,10 +1498,30 @@ def _ts_extract_guard_conditions(body_node, lang_key: str) -> Tuple[str, ...]:
                     polarity = "negated"
                 calls_in_cond, _ = _ts_extract_calls(cond, "<cond>", "", lang_key)
                 action = _ts_stmt_action(conseq)
-                if calls_in_cond:
+
+                is_and_false = bool(
+                    re.search(r"(?:&&\s*false\b|\bfalse\s*&&)", cond_txt, re.IGNORECASE)
+                    or cond_txt.lower() == "false"
+                )
+                is_or_true = bool(
+                    re.search(r"(?:\|\|\s*true\b|\btrue\s*\|\|)", cond_txt, re.IGNORECASE)
+                    or cond_txt.lower() == "true"
+                )
+                if is_and_false or is_or_true:
+                    sc_kind = "and_false" if is_and_false else "or_true"
+                    if calls_in_cond:
+                        for callee in calls_in_cond:
+                            conditions.append(f"if_short_circuit:{callee}:{sc_kind}:{action}")
+                    elif action in ("raise", "rollback", "return_deny", "return_allow"):
+                        conditions.append(f"if_short_circuit:state_guard:{sc_kind}:{action}")
+                elif calls_in_cond:
                     for callee in calls_in_cond:
                         conditions.append(f"if_guard:{callee}:{polarity}:{action}")
-                elif action in ("raise", "rollback"):
+                elif (
+                    action in ("raise", "rollback")
+                    or (lang_key == "go" and re.search(r"\berr\s*!=\s*nil\b", cond_txt) and action in ("return_deny", "return_val"))
+                    or (action == "return_deny" and _STATE_GUARD_IDENT_RE.search(cond_txt))
+                ):
                     subj = cond_txt.lstrip("!").strip()
                     if subj.startswith("not "):
                         subj = subj[4:].strip()
@@ -1212,6 +1542,10 @@ def _ts_extract_guard_conditions(body_node, lang_key: str) -> Tuple[str, ...]:
             _walk(ch, False)
 
     _walk(body_node, True)
+    if effective_asserts > 0 or trivial_asserts > 0:
+        conditions.append(f"test_assertions:{effective_asserts}:{trivial_asserts}")
+    if has_skip_call:
+        conditions.append("test_skip_call:true")
     return tuple(dict.fromkeys(conditions))
 
 

@@ -87,6 +87,8 @@ DETECTOR_D03_COMPOUND = "D03_COMPOUND_LOSS"
 DETECTOR_D04_API = "D04_PUBLIC_API_BREAK"
 DETECTOR_D05_BUILD = "D05_BUILD_DEPENDENCY_DELTA"
 DETECTOR_D06_GUARD = "D06_GUARD_REGRESSION"
+DETECTOR_D08_WORKFLOW = "D08_WORKFLOW_INTEGRITY"
+DETECTOR_D09_TEST = "D09_TEST_EROSION"
 
 # Security & Integrity Guard / Critical Symbol Vocabulary
 _SECURITY_SYMBOL_TOKENS = frozenset({
@@ -134,6 +136,63 @@ _SUSPICIOUS_SCRIPT_PATTERNS = re.compile(
     r"node\s+-e\s+['\"].*child_process|base64\s+-d\s*\|)",
     re.IGNORECASE,
 )
+
+# Workflow / Action Integrity Patterns for D08
+_WORKFLOW_OR_ACTION_PATH_RE = re.compile(
+    r"(?:^|/)(?:\.github/workflows/[^/]+\.ya?ml|(?:\.github/actions/[^/]+/)?action\.ya?ml)$",
+    re.IGNORECASE,
+)
+
+_UNTRUSTED_GH_EXPR_RE = re.compile(
+    r"\$\{\{\s*("
+    r"github\.head_ref\b"
+    r"|github\.event\.(?:pull_request|issue|discussion)\.(?:title|body)\b"
+    r"|github\.event\.pull_request\.head\.(?:ref|label|repo\.default_branch)\b"
+    r"|github\.event\.(?:comment|review|review_comment)\.body\b"
+    r"|github\.event\.pages\[[^\]]*\]\.page_name\b"
+    r"|github\.event\.commits\[[^\]]*\]\.(?:message|author\.(?:name|email))\b"
+    r"|github\.event\.head_commit\.(?:message|author\.(?:name|email))\b"
+    r"|github\.event\.workflow_run\.(?:head_branch|head_commit\.message)\b"
+    r")[^}]*\}\}",
+    re.IGNORECASE,
+)
+
+_SHA40_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+
+_PRT_TRIGGER_RE = re.compile(r"\bpull_request_target\b")
+_PRT_UNTRUSTED_REF_RE = re.compile(
+    r"ref\s*:\s*['\"]?\$\{\{\s*github\.event\.pull_request\.head\.(?:sha|ref)\b"
+    r"|ref\s*:\s*['\"]?refs/pull/",
+    re.IGNORECASE,
+)
+_WORKFLOW_WRITE_OR_SECRETS_RE = re.compile(
+    r"(?:permissions\s*:\s*write-all\b"
+    r"|(?:contents|pull-requests|packages|deployments|id-token|actions|security-events|statuses|checks)\s*:\s*write\b"
+    r"|\$\{\{\s*secrets\.)",
+    re.IGNORECASE,
+)
+
+# Test Skip Decorators for D09
+_TEST_SKIP_DECORATOR_TOKENS = frozenset({
+    "skip", "skipif", "xfail", "expectedfailure", "disabled", "ignore",
+})
+
+
+def _is_test_path(file_path: str) -> bool:
+    """Return True if file_path looks like a unit/integration test file."""
+    norm = file_path.replace("\\", "/").lower()
+    parts = [p for p in norm.split("/") if p]
+    if any(p in ("test", "tests", "__tests__", "spec", "specs") for p in parts[:-1]):
+        return True
+    bname = parts[-1] if parts else norm
+    return (
+        bname.startswith("test_")
+        or "_test." in bname
+        or ".test." in bname
+        or ".spec." in bname
+        or bname.endswith("test.java")
+        or bname.endswith("tests.java")
+    )
 
 
 def _is_security_relevant_name(name: str) -> bool:
@@ -800,7 +859,7 @@ class ConsequenceEngine:
         stage_timing["symbol_matching"] = (time.perf_counter() - t2) * 1000.0
 
         # ------------------------------------------------------------------
-        # Stage D: Run Detectors D01 - D06
+        # Stage D: Run Detectors D01 - D09
         # ------------------------------------------------------------------
         t3 = time.perf_counter()
         findings: List[ConsequenceFinding] = []
@@ -818,6 +877,8 @@ class ConsequenceEngine:
             )
         )
         findings.extend(self._detect_d05_build_dependency_delta(file_deltas))
+        findings.extend(self._detect_d08_workflow_integrity(file_deltas))
+        findings.extend(self._detect_d09_test_erosion(transitions))
 
         # Sort findings deterministically by severity rank then finding_id
         sev_rank = {
@@ -875,6 +936,7 @@ class ConsequenceEngine:
             "base_symbol_count": len(base_symbols),
             "head_symbol_count": len(head_symbols),
             "repo_indexed_call_sites": len(repo_call_sites),
+            "repo_call_sites": len(repo_call_sites),
             "transition_counts": counts_by_kind,
             "container_renames": container_rename_map,
             "renamed_files": renamed_file_map,
@@ -1126,7 +1188,7 @@ class ConsequenceEngine:
             removed_calls = sorted(base_guard_calls - head_guard_calls)
 
             # 3. Check guard condition polarity inversion, enforcement neutralization,
-            #    early-return bypass, and exception-swallowing (D06 v2)
+            #    boolean short-circuiting, early-return bypass, and exception-swallowing (D06 v2)
             b_conds = getattr(bs, "guard_conditions", ()) or ()
             h_conds = getattr(hs, "guard_conditions", ()) or ()
             b_if = _parse_if_guards(b_conds)
@@ -1196,6 +1258,36 @@ class ConsequenceEngine:
                                 )
                             )
 
+            # Boolean short-circuiting of guard conditions (`and False`, `|| true`, `if False:`)
+            b_sc = {c for c in b_conds if c.startswith("if_short_circuit:")}
+            h_sc = {c for c in h_conds if c.startswith("if_short_circuit:")}
+            new_sc = sorted(h_sc - b_sc)
+            for sc in new_sc:
+                parts = sc.split(":", 3)
+                if len(parts) == 4:
+                    _, target, sc_kind, act = parts
+                    # Only flag if the short-circuited branch was an enforcing guard or inside a security function
+                    is_enforcing = (
+                        (sc_kind == "and_false" and act in ("raise", "return_deny", "rollback"))
+                        or (sc_kind == "or_true" and act in ("return_allow", "other", "noop"))
+                        or _is_guard_call(target)
+                        or _is_security_relevant_name(bs.qualified_name)
+                    )
+                    if is_enforcing and (b_if or b_conds or base_guard_calls or _is_security_relevant_name(bs.qualified_name)):
+                        weakened_notes.append(f"{target} short-circuited ({sc_kind})")
+                        ev_items.append(
+                            EvidenceItem(
+                                kind="GUARD_SHORT_CIRCUITED",
+                                file=hs.file_path,
+                                line=hs.start_line,
+                                symbol=hs.qualified_name,
+                                detail=(
+                                    f"Guard condition on '{target}' in '{hs.qualified_name}' was "
+                                    f"short-circuited with '{sc_kind}' ({act})"
+                                ),
+                            )
+                        )
+
             # Early-return bypass before remaining statements/guards
             b_early = {c for c in b_conds if c.startswith("early_return_bypass:")}
             h_early = {c for c in h_conds if c.startswith("early_return_bypass:")}
@@ -1221,7 +1313,7 @@ class ConsequenceEngine:
             removed_state_guards = sorted(b_state_guards - h_state_guards)
             # Only flag if the function did not replace the state guard with a new call-based guard
             added_if_callees = set(h_if.keys()) - set(b_if.keys())
-            if removed_state_guards and not added_if_callees and not hs.is_stub:
+            if removed_state_guards and not added_if_callees and not new_sc and not hs.is_stub:
                 for sg in removed_state_guards:
                     parts = sg.split(":", 3)
                     if len(parts) == 4:
@@ -2070,6 +2162,393 @@ class ConsequenceEngine:
                                 ),
                             ),
                             remediation=f"Regenerate and commit the lockfile corresponding to '{fd.file_path}' to ensure reproducible builds.",
+                        )
+                    )
+
+        return findings
+
+    # ------------------------------------------------------------------
+    # D08: Workflow / CI Integrity & Supply-Chain Detector
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _extract_workflow_run_lines(yaml_text: str) -> List[Tuple[int, str]]:
+        """Extract (line_number, line_text) pairs belonging to YAML `run:` step blocks."""
+        if not yaml_text:
+            return []
+        run_lines: List[Tuple[int, str]] = []
+        in_run_block = False
+        run_indent = 0
+        run_key_re = re.compile(r"^(\s*)(?:-\s*)?run\s*:\s*(.*)$")
+        yaml_key_re = re.compile(r"^(\s*)(?:-\s*)?[A-Za-z0-9_-]+\s*:")
+
+        for idx, raw_line in enumerate(yaml_text.splitlines(), start=1):
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            m_run = run_key_re.match(raw_line)
+            if m_run:
+                prefix, rest = m_run.group(1), m_run.group(2).strip()
+                # Effective indentation of the `run` property itself
+                dash_offset = raw_line.find("run")
+                run_indent = dash_offset if dash_offset >= 0 else len(prefix)
+                if rest in ("|", "|-", "|+", ">", ">-", ">+", ""):
+                    in_run_block = True
+                else:
+                    in_run_block = True
+                    run_lines.append((idx, rest))
+                continue
+
+            if in_run_block:
+                leading_spaces = len(raw_line) - len(raw_line.lstrip(" "))
+                m_key = yaml_key_re.match(raw_line)
+                if leading_spaces <= run_indent:
+                    in_run_block = False
+                elif m_key and (len(raw_line) - len(raw_line.lstrip(" -"))) <= run_indent:
+                    in_run_block = False
+                else:
+                    run_lines.append((idx, stripped))
+        return run_lines
+
+    def _detect_d08_workflow_integrity(
+        self,
+        file_deltas: List[FileDeltaInput],
+    ) -> List[ConsequenceFinding]:
+        findings: List[ConsequenceFinding] = []
+        uses_re = re.compile(r"uses\s*:\s*['\"]?([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)@([^\s'\"#]+)")
+        continue_on_error_re = re.compile(r"^\s*continue-on-error\s*:\s*true\b", re.IGNORECASE | re.MULTILINE)
+        write_all_re = re.compile(r"^\s*permissions\s*:\s*write-all\b", re.IGNORECASE | re.MULTILINE)
+
+        for fd in file_deltas:
+            norm_path = fd.file_path.replace("\\", "/")
+            if not _WORKFLOW_OR_ACTION_PATH_RE.search(norm_path):
+                continue
+            if not fd.head_source:
+                continue
+            base_src = fd.base_source or ""
+            head_src = fd.head_source
+
+            # 1. Untrusted GitHub expression interpolation inside `run:` shell blocks (W02)
+            base_run_exprs = {
+                m.group(1).strip()
+                for _, line_txt in self._extract_workflow_run_lines(base_src)
+                for m in _UNTRUSTED_GH_EXPR_RE.finditer(line_txt)
+            }
+            head_run_matches: List[Tuple[int, str]] = []
+            for line_no, line_txt in self._extract_workflow_run_lines(head_src):
+                for m in _UNTRUSTED_GH_EXPR_RE.finditer(line_txt):
+                    expr = m.group(1).strip()
+                    if expr not in base_run_exprs:
+                        head_run_matches.append((line_no, expr))
+
+            if head_run_matches:
+                unique_exprs = sorted({expr for _, expr in head_run_matches})
+                ev = tuple(
+                    EvidenceItem(
+                        kind="WORKFLOW_RUN_EXPRESSION_INJECTION",
+                        file=fd.file_path,
+                        line=line_no,
+                        symbol="run",
+                        detail=f"Untrusted GitHub context '${{{{ {expr} }}}}' interpolated directly into `run:` shell script",
+                    )
+                    for line_no, expr in head_run_matches
+                )
+                findings.append(
+                    ConsequenceFinding(
+                        finding_id=f"PG-D08-INJECTION-{fd.file_path}",
+                        detector_id=DETECTOR_D08_WORKFLOW,
+                        consequence_class="UNTRUSTED_WORKFLOW_EXPRESSION_INJECTION",
+                        tier=TIER_VERIFIED,
+                        confidence=CONFIDENCE_HIGH,
+                        severity=SEVERITY_CRITICAL,
+                        policy_recommendation=POLICY_BLOCK,
+                        summary=(
+                            f"Workflow '{fd.file_path}' interpolates untrusted GitHub event context "
+                            f"({', '.join(unique_exprs[:3])}) directly inside a `run:` shell block."
+                        ),
+                        affected_files=(fd.file_path,),
+                        affected_symbols=("run",),
+                        evidence=ev,
+                        remediation=(
+                            "Bind the untrusted GitHub expression to an intermediate step `env:` variable "
+                            "and reference it as a double-quoted shell variable (`\"$VAR\"`) inside `run:`."
+                        ),
+                    )
+                )
+
+            # 2. pull_request_target + untrusted PR head checkout ("Pwn Request" W01)
+            base_has_prt_checkout = bool(
+                _PRT_TRIGGER_RE.search(base_src) and _PRT_UNTRUSTED_REF_RE.search(base_src)
+            )
+            head_has_prt_checkout = bool(
+                _PRT_TRIGGER_RE.search(head_src) and _PRT_UNTRUSTED_REF_RE.search(head_src)
+            )
+            if head_has_prt_checkout and not base_has_prt_checkout:
+                m_ref = _PRT_UNTRUSTED_REF_RE.search(head_src)
+                ref_line = head_src[: m_ref.start()].count("\n") + 1 if m_ref else 1
+                has_priv = bool(_WORKFLOW_WRITE_OR_SECRETS_RE.search(head_src))
+                sev = SEVERITY_CRITICAL if has_priv else SEVERITY_HIGH
+                pol = POLICY_BLOCK if has_priv else POLICY_REVIEW
+                findings.append(
+                    ConsequenceFinding(
+                        finding_id=f"PG-D08-PRT-{fd.file_path}",
+                        detector_id=DETECTOR_D08_WORKFLOW,
+                        consequence_class="PULL_REQUEST_TARGET_UNTRUSTED_CHECKOUT",
+                        tier=TIER_VERIFIED,
+                        confidence=CONFIDENCE_HIGH,
+                        severity=sev,
+                        policy_recommendation=pol,
+                        summary=(
+                            f"Workflow '{fd.file_path}' combines `pull_request_target` with an explicit "
+                            "checkout of untrusted pull request head code."
+                        ),
+                        affected_files=(fd.file_path,),
+                        affected_symbols=("on.pull_request_target",),
+                        evidence=(
+                            EvidenceItem(
+                                kind="PRT_UNTRUSTED_CHECKOUT",
+                                file=fd.file_path,
+                                line=ref_line,
+                                symbol="on.pull_request_target",
+                                detail=(
+                                    "Workflow triggers on `pull_request_target` and checks out "
+                                    "untrusted PR head ref"
+                                    + (" with write permissions or secrets access" if has_priv else "")
+                                ),
+                            ),
+                        ),
+                        remediation=(
+                            "Do not check out untrusted PR head code inside a `pull_request_target` workflow; "
+                            "use an unprivileged `pull_request` workflow and pass artifacts to a separate workflow_run."
+                        ),
+                    )
+                )
+
+            # 3. Action SHA pin downgrade to mutable tag/branch (W03)
+            if base_src:
+                base_sha_pins: Dict[str, str] = {}
+                for m in uses_re.finditer(base_src):
+                    act_name, ref_val = m.group(1), m.group(2)
+                    if _SHA40_RE.match(ref_val):
+                        base_sha_pins[act_name] = ref_val
+
+                downgraded: List[Tuple[int, str, str, str]] = []
+                for m in uses_re.finditer(head_src):
+                    act_name, ref_val = m.group(1), m.group(2)
+                    if act_name in base_sha_pins and not _SHA40_RE.match(ref_val):
+                        line_no = head_src[: m.start()].count("\n") + 1
+                        downgraded.append((line_no, act_name, base_sha_pins[act_name], ref_val))
+
+                if downgraded:
+                    ev = tuple(
+                        EvidenceItem(
+                            kind="ACTION_SHA_PIN_DOWNGRADED",
+                            file=fd.file_path,
+                            line=line_no,
+                            symbol=act_name,
+                            detail=f"Action '{act_name}' downgraded from immutable SHA '{old_sha[:12]}...' to mutable ref '@{new_ref}'",
+                        )
+                        for line_no, act_name, old_sha, new_ref in downgraded
+                    )
+                    findings.append(
+                        ConsequenceFinding(
+                            finding_id=f"PG-D08-PINDOWN-{fd.file_path}",
+                            detector_id=DETECTOR_D08_WORKFLOW,
+                            consequence_class="ACTION_PIN_DOWNGRADE",
+                            tier=TIER_VERIFIED,
+                            confidence=CONFIDENCE_HIGH,
+                            severity=SEVERITY_HIGH,
+                            policy_recommendation=POLICY_REVIEW,
+                            summary=(
+                                f"Workflow '{fd.file_path}' downgraded {len(downgraded)} GitHub Action(s) "
+                                f"from immutable 40-char commit SHAs to mutable refs ({', '.join(a for _, a, _, _ in downgraded[:3])})."
+                            ),
+                            affected_files=(fd.file_path,),
+                            affected_symbols=tuple(sorted({a for _, a, _, _ in downgraded})),
+                            evidence=ev,
+                            remediation="Pin third-party GitHub Actions to full 40-character commit SHAs instead of mutable tags or branch names.",
+                        )
+                    )
+
+            # 4. CI gate weakened (`continue-on-error: true` or `permissions: write-all` added on modified workflow)
+            if fd.change_type == "M" and base_src:
+                base_coe = len(continue_on_error_re.findall(base_src))
+                head_coe = len(continue_on_error_re.findall(head_src))
+                base_wa = bool(write_all_re.search(base_src))
+                head_wa = bool(write_all_re.search(head_src))
+
+                gate_ev: List[EvidenceItem] = []
+                if head_coe > base_coe:
+                    m_coe = continue_on_error_re.search(head_src)
+                    line_no = head_src[: m_coe.start()].count("\n") + 1 if m_coe else 1
+                    gate_ev.append(
+                        EvidenceItem(
+                            kind="CONTINUE_ON_ERROR_ADDED",
+                            file=fd.file_path,
+                            line=line_no,
+                            symbol="continue-on-error",
+                            detail=f"Added `continue-on-error: true` ({base_coe} -> {head_coe}) allowing failing CI steps to pass silently",
+                        )
+                    )
+                if head_wa and not base_wa:
+                    m_wa = write_all_re.search(head_src)
+                    line_no = head_src[: m_wa.start()].count("\n") + 1 if m_wa else 1
+                    gate_ev.append(
+                        EvidenceItem(
+                            kind="PERMISSIONS_WRITE_ALL_ADDED",
+                            file=fd.file_path,
+                            line=line_no,
+                            symbol="permissions",
+                            detail="Added overly broad `permissions: write-all` to workflow",
+                        )
+                    )
+
+                if gate_ev:
+                    findings.append(
+                        ConsequenceFinding(
+                            finding_id=f"PG-D08-CIGATE-{fd.file_path}",
+                            detector_id=DETECTOR_D08_WORKFLOW,
+                            consequence_class="CI_GATE_WEAKENED",
+                            tier=TIER_VERIFIED,
+                            confidence=CONFIDENCE_HIGH,
+                            severity=SEVERITY_MEDIUM,
+                            policy_recommendation=POLICY_REVIEW,
+                            summary=(
+                                f"Workflow '{fd.file_path}' weakens CI enforcement gates or permissions "
+                                f"({', '.join(e.symbol or e.kind for e in gate_ev)})."
+                            ),
+                            affected_files=(fd.file_path,),
+                            affected_symbols=tuple(e.symbol for e in gate_ev if e.symbol),
+                            evidence=tuple(gate_ev),
+                            remediation="Remove `continue-on-error: true` from required verification steps and scope `permissions:` to least privilege.",
+                        )
+                    )
+
+        return findings
+
+    # ------------------------------------------------------------------
+    # D09: Test Erosion & Assertion Removal Detector
+    # ------------------------------------------------------------------
+    def _detect_d09_test_erosion(
+        self,
+        transitions: List[SymbolTransition],
+    ) -> List[ConsequenceFinding]:
+        findings: List[ConsequenceFinding] = []
+
+        def _parse_test_assertions(conds: Tuple[str, ...]) -> Optional[Tuple[int, int]]:
+            for c in conds:
+                if c.startswith("test_assertions:"):
+                    parts = c.split(":")
+                    if len(parts) == 3:
+                        try:
+                            return int(parts[1]), int(parts[2])
+                        except ValueError:
+                            return None
+            return None
+
+        def _is_skip_deco(deco: str) -> bool:
+            low = deco.lower().lstrip("@")
+            return any(tok in low for tok in _TEST_SKIP_DECORATOR_TOKENS)
+
+        for tr in transitions:
+            bs = tr.base_symbol
+            hs = tr.head_symbol
+            if bs is None or hs is None:
+                continue
+            if bs.kind not in ("function", "method"):
+                continue
+            if not (_is_test_path(bs.file_path) or _is_test_path(hs.file_path)):
+                continue
+
+            b_conds = getattr(bs, "guard_conditions", ()) or ()
+            h_conds = getattr(hs, "guard_conditions", ()) or ()
+            b_asserts = _parse_test_assertions(b_conds)
+            h_asserts = _parse_test_assertions(h_conds)
+
+            is_test_symbol = (
+                bs.name.startswith("test")
+                or bs.name.startswith("Test")
+                or any("test" in d.lower() for d in bs.decorators)
+                or b_asserts is not None
+            )
+            if not is_test_symbol:
+                continue
+
+            # 1. Check newly added skip decorators or skip calls
+            base_skip_decos = {d for d in bs.decorators if _is_skip_deco(d)}
+            head_skip_decos = {d for d in hs.decorators if _is_skip_deco(d)}
+            added_skip_decos = sorted(head_skip_decos - base_skip_decos)
+            added_skip_call = ("test_skip_call:true" in h_conds) and ("test_skip_call:true" not in b_conds)
+
+            if added_skip_decos or added_skip_call:
+                detail_parts: List[str] = []
+                if added_skip_decos:
+                    detail_parts.append(f"added skip decorator(s) {', '.join(added_skip_decos)}")
+                if added_skip_call:
+                    detail_parts.append("inserted runtime skip call")
+                findings.append(
+                    ConsequenceFinding(
+                        finding_id=f"PG-D09-SKIP-{hs.file_path}-{hs.qualified_name}",
+                        detector_id=DETECTOR_D09_TEST,
+                        consequence_class="TEST_SKIPPED_OR_DISABLED",
+                        tier=TIER_VERIFIED,
+                        confidence=CONFIDENCE_HIGH,
+                        severity=SEVERITY_MEDIUM,
+                        policy_recommendation=POLICY_REVIEW,
+                        summary=(
+                            f"Existing test '{hs.qualified_name}' in '{hs.file_path}' was skipped or disabled "
+                            f"({'; '.join(detail_parts)})."
+                        ),
+                        affected_files=(hs.file_path,),
+                        affected_symbols=(hs.qualified_name,),
+                        evidence=(
+                            EvidenceItem(
+                                kind="TEST_NEWLY_SKIPPED",
+                                file=hs.file_path,
+                                line=hs.start_line,
+                                symbol=hs.qualified_name,
+                                detail=f"Test '{hs.qualified_name}' disabled via {'; '.join(detail_parts)}",
+                            ),
+                        ),
+                        remediation=f"Fix the underlying failure in '{hs.qualified_name}' instead of skipping the test.",
+                    )
+                )
+                continue
+
+            # 2. Check test assertion erosion (effective assertions dropped from >=1 to 0)
+            if b_asserts is not None and not hs.is_stub:
+                b_eff, _ = b_asserts
+                h_eff, h_triv = h_asserts if h_asserts is not None else (0, 0)
+                if b_eff >= 1 and h_eff == 0:
+                    detail_msg = (
+                        f"Replaced {b_eff} effective assertion(s) with {h_triv} tautological assertion(s) (`assert True`)"
+                        if h_triv > 0
+                        else f"Removed all {b_eff} assertion(s) from test '{hs.qualified_name}' while leaving body statements"
+                    )
+                    findings.append(
+                        ConsequenceFinding(
+                            finding_id=f"PG-D09-EROSION-{hs.file_path}-{hs.qualified_name}",
+                            detector_id=DETECTOR_D09_TEST,
+                            consequence_class="TEST_ASSERTION_EROSION",
+                            tier=TIER_VERIFIED,
+                            confidence=CONFIDENCE_HIGH,
+                            severity=SEVERITY_HIGH,
+                            policy_recommendation=POLICY_BLOCK,
+                            summary=(
+                                f"Test '{hs.qualified_name}' in '{hs.file_path}' lost all effective assertions "
+                                f"({b_eff} -> 0)."
+                            ),
+                            affected_files=(hs.file_path,),
+                            affected_symbols=(hs.qualified_name,),
+                            evidence=(
+                                EvidenceItem(
+                                    kind="TEST_ASSERTIONS_GUTTED",
+                                    file=hs.file_path,
+                                    line=hs.start_line,
+                                    symbol=hs.qualified_name,
+                                    detail=detail_msg,
+                                ),
+                            ),
+                            remediation=f"Restore meaningful assertions in test '{hs.qualified_name}' to verify expected behavior.",
                         )
                     )
 

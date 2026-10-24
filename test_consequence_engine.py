@@ -44,6 +44,8 @@ from consequence_engine import (
     DETECTOR_D04_API,
     DETECTOR_D05_BUILD,
     DETECTOR_D06_GUARD,
+    DETECTOR_D08_WORKFLOW,
+    DETECTOR_D09_TEST,
     POLICY_BLOCK,
     POLICY_PASS,
     POLICY_REVIEW,
@@ -1177,6 +1179,410 @@ class TestDetectorAccuracyV2AndUsability:
         d06_go = [f for f in rep_go.findings if f.detector_id == DETECTOR_D06_GUARD]
         assert len(d06_go) == 1
         assert any(e.kind == "GUARD_CLAUSE_REMOVED" for e in d06_go[0].evidence)
+
+    def test_d06_boolean_short_circuit_and_python_go_state_guards(self):
+        """
+        Verify D06 catches:
+        1) Boolean short-circuit debugging leftovers (`if not verify_token(tok) and False:` / `&& false`).
+        2) Python call-free state guard removal (`if not user.is_admin: raise PermissionError(...)`).
+        3) Go idiomatic error-propagation guard removal (`if err != nil { return err }`).
+        4) Benign replacement of state guard with call-based guard -> SAFE.
+        """
+        engine = ConsequenceEngine(mode="enforce")
+
+        # 1a. Python boolean short-circuit bypass (`and False`) -> DESTRUCTIVE
+        base_sc_py = (
+            "def authorize_request(token: str) -> dict:\n"
+            "    if not verify_token(token):\n"
+            "        raise PermissionError('invalid token')\n"
+            "    return {'ok': True}\n"
+        )
+        head_sc_py = (
+            "def authorize_request(token: str) -> dict:\n"
+            "    if not verify_token(token) and False:\n"
+            "        raise PermissionError('invalid token')\n"
+            "    return {'ok': True}\n"
+        )
+        rep_sc_py = engine.analyze_deltas([
+            FileDeltaInput("auth.py", change_type="M", base_source=base_sc_py, head_source=head_sc_py)
+        ])
+        assert rep_sc_py.recommended_verdict == "DESTRUCTIVE"
+        d06_sc_py = [f for f in rep_sc_py.findings if f.detector_id == DETECTOR_D06_GUARD]
+        assert len(d06_sc_py) == 1
+        assert any(e.kind == "GUARD_SHORT_CIRCUITED" for e in d06_sc_py[0].evidence)
+
+        # 1b. TypeScript boolean short-circuit bypass (`&& false`) -> DESTRUCTIVE
+        base_sc_ts = (
+            "export function checkAccess(tok: string): boolean {\n"
+            "  if (!verifyToken(tok)) {\n"
+            "    throw new Error('denied');\n"
+            "  }\n"
+            "  return true;\n"
+            "}\n"
+        )
+        head_sc_ts = (
+            "export function checkAccess(tok: string): boolean {\n"
+            "  if (!verifyToken(tok) && false) {\n"
+            "    throw new Error('denied');\n"
+            "  }\n"
+            "  return true;\n"
+            "}\n"
+        )
+        rep_sc_ts = engine.analyze_deltas([
+            FileDeltaInput("auth.ts", change_type="M", base_source=base_sc_ts, head_source=head_sc_ts)
+        ])
+        assert rep_sc_ts.recommended_verdict == "DESTRUCTIVE"
+        d06_sc_ts = [f for f in rep_sc_ts.findings if f.detector_id == DETECTOR_D06_GUARD]
+        assert len(d06_sc_ts) == 1
+        assert any(e.kind == "GUARD_SHORT_CIRCUITED" for e in d06_sc_ts[0].evidence)
+
+        # 2. Python call-free state guard removal (`if not user.is_admin: raise PermissionError`) -> DESTRUCTIVE
+        base_state_py = (
+            "def delete_tenant(user, tenant_id: str) -> bool:\n"
+            "    if not user.is_admin:\n"
+            "        raise PermissionError('admin required')\n"
+            "    return True\n"
+        )
+        head_state_py = (
+            "def delete_tenant(user, tenant_id: str) -> bool:\n"
+            "    return True\n"
+        )
+        rep_state_py = engine.analyze_deltas([
+            FileDeltaInput("tenant.py", change_type="M", base_source=base_state_py, head_source=head_state_py)
+        ])
+        assert rep_state_py.recommended_verdict == "DESTRUCTIVE"
+        d06_state_py = [f for f in rep_state_py.findings if f.detector_id == DETECTOR_D06_GUARD]
+        assert len(d06_state_py) == 1
+        assert any(e.kind == "GUARD_CLAUSE_REMOVED" for e in d06_state_py[0].evidence)
+
+        # 3. Go error-check removal (`if err != nil { return err }`) -> DESTRUCTIVE
+        base_err_go = (
+            "package auth\n"
+            "func ValidateHeader(raw string) error {\n"
+            "\terr := parseHeader(raw)\n"
+            "\tif err != nil {\n"
+            "\t\treturn err\n"
+            "\t}\n"
+            "\treturn nil\n"
+            "}\n"
+        )
+        head_err_go = (
+            "package auth\n"
+            "func ValidateHeader(raw string) error {\n"
+            "\t_ = parseHeader(raw)\n"
+            "\treturn nil\n"
+            "}\n"
+        )
+        rep_err_go = engine.analyze_deltas([
+            FileDeltaInput("header.go", change_type="M", base_source=base_err_go, head_source=head_err_go)
+        ])
+        assert rep_err_go.recommended_verdict == "DESTRUCTIVE"
+        d06_err_go = [f for f in rep_err_go.findings if f.detector_id == DETECTOR_D06_GUARD]
+        assert len(d06_err_go) == 1
+        assert any(e.kind == "GUARD_CLAUSE_REMOVED" for e in d06_err_go[0].evidence)
+
+        # 4. Benign replacement of state guard with call-based guard -> SAFE
+        head_replaced_py = (
+            "def delete_tenant(user, tenant_id: str) -> bool:\n"
+            "    if not verify_admin(user):\n"
+            "        raise PermissionError('admin required')\n"
+            "    return True\n"
+        )
+        rep_replaced_py = engine.analyze_deltas([
+            FileDeltaInput("tenant.py", change_type="M", base_source=base_state_py, head_source=head_replaced_py)
+        ])
+        assert rep_replaced_py.recommended_verdict == "SAFE"
+
+    def test_d08_workflow_expression_injection_and_safe_env_binding(self):
+        """
+        Verify D08_WORKFLOW_INTEGRITY detects untrusted GitHub expression interpolation
+        inside `run:` blocks while allowing safe `env:` variable binding and not
+        re-alerting on unchanged legacy expressions.
+        """
+        engine = ConsequenceEngine(mode="enforce")
+
+        base_wf = (
+            "name: CI\n"
+            "on: [pull_request]\n"
+            "jobs:\n"
+            "  test:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11\n"
+            "      - name: Run pytest\n"
+            "        run: pytest -q\n"
+        )
+        # 1. Vulnerable direct interpolation inside `run:` -> BLOCK / DESTRUCTIVE
+        vuln_wf = (
+            "name: CI\n"
+            "on: [pull_request]\n"
+            "jobs:\n"
+            "  test:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11\n"
+            "      - name: Announce PR\n"
+            "        run: |\n"
+            "          echo \"Title: ${{ github.event.pull_request.title }}\"\n"
+            "          pytest -q\n"
+        )
+        rep_vuln = engine.analyze_deltas([
+            FileDeltaInput(".github/workflows/ci.yml", change_type="M", base_source=base_wf, head_source=vuln_wf)
+        ])
+        assert rep_vuln.recommended_verdict == "DESTRUCTIVE"
+        d08_vuln = [f for f in rep_vuln.findings if f.detector_id == DETECTOR_D08_WORKFLOW]
+        assert len(d08_vuln) == 1
+        assert d08_vuln[0].consequence_class == "UNTRUSTED_WORKFLOW_EXPRESSION_INJECTION"
+        assert d08_vuln[0].policy_recommendation == POLICY_BLOCK
+
+        # 2. Safe remediation via `env:` binding -> SAFE
+        safe_wf = (
+            "name: CI\n"
+            "on: [pull_request]\n"
+            "jobs:\n"
+            "  test:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11\n"
+            "      - name: Announce PR safely\n"
+            "        env:\n"
+            "          PR_TITLE: ${{ github.event.pull_request.title }}\n"
+            "        run: |\n"
+            "          echo \"Title: $PR_TITLE\"\n"
+            "          pytest -q\n"
+        )
+        rep_safe = engine.analyze_deltas([
+            FileDeltaInput(".github/workflows/ci.yml", change_type="M", base_source=base_wf, head_source=safe_wf)
+        ])
+        assert rep_safe.recommended_verdict == "SAFE"
+        assert [f for f in rep_safe.findings if f.detector_id == DETECTOR_D08_WORKFLOW] == []
+
+    def test_d08_prt_untrusted_checkout_and_action_pin_downgrade_and_ci_gate(self):
+        """
+        Verify D08 detects:
+        1) `pull_request_target` + untrusted PR checkout (BLOCK with secrets/write, REVIEW without).
+        2) Action 40-char SHA pin downgraded to mutable tag (`@v4`) -> REVIEW.
+        3) Action 40-char SHA updated to another 40-char SHA -> SAFE.
+        4) Adding `continue-on-error: true` to a step -> REVIEW (`CI_GATE_WEAKENED`).
+        """
+        engine = ConsequenceEngine(mode="enforce")
+
+        # 1a. pull_request_target + untrusted checkout + secrets -> DESTRUCTIVE (POLICY_BLOCK)
+        prt_priv_wf = (
+            "name: PR Target Privileged\n"
+            "on:\n"
+            "  pull_request_target:\n"
+            "    types: [opened, synchronize]\n"
+            "permissions:\n"
+            "  contents: write\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "        with:\n"
+            "          ref: ${{ github.event.pull_request.head.sha }}\n"
+            "      - run: npm test\n"
+            "        env:\n"
+            "          TOKEN: ${{ secrets.NPM_TOKEN }}\n"
+        )
+        rep_prt_priv = engine.analyze_deltas([
+            FileDeltaInput(".github/workflows/prt.yml", change_type="A", base_source="", head_source=prt_priv_wf)
+        ])
+        assert rep_prt_priv.recommended_verdict == "DESTRUCTIVE"
+        d08_prt_priv = [f for f in rep_prt_priv.findings if f.consequence_class == "PULL_REQUEST_TARGET_UNTRUSTED_CHECKOUT"]
+        assert len(d08_prt_priv) == 1
+        assert d08_prt_priv[0].policy_recommendation == POLICY_BLOCK
+
+        # 1b. pull_request_target + untrusted checkout without write/secrets -> REVIEW
+        prt_ro_wf = (
+            "name: PR Target ReadOnly\n"
+            "on: [pull_request_target]\n"
+            "jobs:\n"
+            "  label:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "        with:\n"
+            "          ref: ${{ github.event.pull_request.head.sha }}\n"
+        )
+        rep_prt_ro = engine.analyze_deltas([
+            FileDeltaInput(".github/workflows/prt_ro.yml", change_type="A", base_source="", head_source=prt_ro_wf)
+        ])
+        assert rep_prt_ro.recommended_verdict == "REVIEW"
+        d08_prt_ro = [f for f in rep_prt_ro.findings if f.consequence_class == "PULL_REQUEST_TARGET_UNTRUSTED_CHECKOUT"]
+        assert len(d08_prt_ro) == 1
+        assert d08_prt_ro[0].policy_recommendation == POLICY_REVIEW
+
+        # 2. Action SHA pin downgraded to @v4 -> REVIEW (`ACTION_PIN_DOWNGRADE`)
+        base_pinned = (
+            "name: CI\n"
+            "on: [push]\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11\n"
+            "      - run: pytest\n"
+        )
+        head_downgraded = (
+            "name: CI\n"
+            "on: [push]\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "      - run: pytest\n"
+        )
+        rep_pin = engine.analyze_deltas([
+            FileDeltaInput(".github/workflows/ci.yml", change_type="M", base_source=base_pinned, head_source=head_downgraded)
+        ])
+        assert rep_pin.recommended_verdict == "REVIEW"
+        d08_pin = [f for f in rep_pin.findings if f.consequence_class == "ACTION_PIN_DOWNGRADE"]
+        assert len(d08_pin) == 1
+
+        # 3. Action SHA pin bumped to a new 40-char SHA -> SAFE
+        head_new_sha = (
+            "name: CI\n"
+            "on: [push]\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683\n"
+            "      - run: pytest\n"
+        )
+        rep_new_sha = engine.analyze_deltas([
+            FileDeltaInput(".github/workflows/ci.yml", change_type="M", base_source=base_pinned, head_source=head_new_sha)
+        ])
+        assert rep_new_sha.recommended_verdict == "SAFE"
+
+        # 4. Adding `continue-on-error: true` -> REVIEW (`CI_GATE_WEAKENED`)
+        head_coe = (
+            "name: CI\n"
+            "on: [push]\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11\n"
+            "      - run: pytest\n"
+            "        continue-on-error: true\n"
+        )
+        rep_coe = engine.analyze_deltas([
+            FileDeltaInput(".github/workflows/ci.yml", change_type="M", base_source=base_pinned, head_source=head_coe)
+        ])
+        assert rep_coe.recommended_verdict == "REVIEW"
+        d08_coe = [f for f in rep_coe.findings if f.consequence_class == "CI_GATE_WEAKENED"]
+        assert len(d08_coe) == 1
+
+    def test_d09_test_assertion_erosion_and_skip_addition(self):
+        """
+        Verify D09_TEST_EROSION detects:
+        1) Python test assertions replaced with tautological `assert True` -> BLOCK.
+        2) TypeScript test assertions replaced with `expect(true).toBe(true)` -> BLOCK.
+        3) Rust test assertions replaced with `assert!(true)` -> BLOCK.
+        4) Test newly decorated with `@pytest.mark.skip` or calling `pytest.skip()` -> REVIEW.
+        5) Benign test refactor updating expected value -> SAFE.
+        """
+        engine = ConsequenceEngine(mode="enforce")
+
+        # 1. Python test assertion erosion -> DESTRUCTIVE (`TEST_ASSERTION_EROSION`)
+        base_test_py = (
+            "def test_verify_signature():\n"
+            "    sig = compute_hmac('payload')\n"
+            "    assert verify_hmac('payload', sig) is True\n"
+            "    assert verify_hmac('tampered', sig) is False\n"
+        )
+        head_test_py = (
+            "def test_verify_signature():\n"
+            "    sig = compute_hmac('payload')\n"
+            "    assert True\n"
+        )
+        rep_py = engine.analyze_deltas([
+            FileDeltaInput("tests/test_security.py", change_type="M", base_source=base_test_py, head_source=head_test_py)
+        ])
+        assert rep_py.recommended_verdict == "DESTRUCTIVE"
+        d09_py = [f for f in rep_py.findings if f.detector_id == DETECTOR_D09_TEST]
+        assert len(d09_py) == 1
+        assert d09_py[0].consequence_class == "TEST_ASSERTION_EROSION"
+        assert d09_py[0].policy_recommendation == POLICY_BLOCK
+
+        # 2. TypeScript test assertion erosion (`expect(res).toBe(200)` -> `expect(true).toBe(true)`) -> DESTRUCTIVE
+        base_test_ts = (
+            "export function testAuthEndpoint() {\n"
+            "  const res = callEndpoint('/admin');\n"
+            "  expect(res.status).toBe(403);\n"
+            "}\n"
+        )
+        head_test_ts = (
+            "export function testAuthEndpoint() {\n"
+            "  const res = callEndpoint('/admin');\n"
+            "  expect(true).toBe(true);\n"
+            "}\n"
+        )
+        rep_ts = engine.analyze_deltas([
+            FileDeltaInput("src/__tests__/auth.spec.ts", change_type="M", base_source=base_test_ts, head_source=head_test_ts)
+        ])
+        assert rep_ts.recommended_verdict == "DESTRUCTIVE"
+        d09_ts = [f for f in rep_ts.findings if f.detector_id == DETECTOR_D09_TEST]
+        assert len(d09_ts) == 1
+        assert d09_ts[0].consequence_class == "TEST_ASSERTION_EROSION"
+
+        # 3. Rust test assertion erosion (`assert_eq!` -> `assert!(true)`) -> DESTRUCTIVE
+        base_test_rs = (
+            "#[test]\n"
+            "fn test_token_validation() {\n"
+            "    let ok = validate_token(\"abc\");\n"
+            "    assert_eq!(ok, true);\n"
+            "}\n"
+        )
+        head_test_rs = (
+            "#[test]\n"
+            "fn test_token_validation() {\n"
+            "    let _ok = validate_token(\"abc\");\n"
+            "    assert!(true);\n"
+            "}\n"
+        )
+        rep_rs = engine.analyze_deltas([
+            FileDeltaInput("tests/token_test.rs", change_type="M", base_source=base_test_rs, head_source=head_test_rs)
+        ])
+        assert rep_rs.recommended_verdict == "DESTRUCTIVE"
+        d09_rs = [f for f in rep_rs.findings if f.detector_id == DETECTOR_D09_TEST]
+        assert len(d09_rs) == 1
+        assert d09_rs[0].consequence_class == "TEST_ASSERTION_EROSION"
+
+        # 4. Adding `@pytest.mark.skip` to existing test -> REVIEW (`TEST_SKIPPED_OR_DISABLED`)
+        head_skip_py = (
+            "import pytest\n"
+            "@pytest.mark.skip(reason='skipping failing security test')\n"
+            "def test_verify_signature():\n"
+            "    sig = compute_hmac('payload')\n"
+            "    assert verify_hmac('payload', sig) is True\n"
+            "    assert verify_hmac('tampered', sig) is False\n"
+        )
+        rep_skip = engine.analyze_deltas([
+            FileDeltaInput("tests/test_security.py", change_type="M", base_source=base_test_py, head_source=head_skip_py)
+        ])
+        assert rep_skip.recommended_verdict == "REVIEW"
+        d09_skip = [f for f in rep_skip.findings if f.detector_id == DETECTOR_D09_TEST]
+        assert len(d09_skip) == 1
+        assert d09_skip[0].consequence_class == "TEST_SKIPPED_OR_DISABLED"
+        assert d09_skip[0].policy_recommendation == POLICY_REVIEW
+
+        # 5. Benign test update preserving meaningful assertions -> SAFE
+        head_benign_py = (
+            "def test_verify_signature():\n"
+            "    sig = compute_hmac('payload_v2')\n"
+            "    assert verify_hmac('payload_v2', sig) is True\n"
+        )
+        rep_benign = engine.analyze_deltas([
+            FileDeltaInput("tests/test_security.py", change_type="M", base_source=base_test_py, head_source=head_benign_py)
+        ])
+        assert rep_benign.recommended_verdict == "SAFE"
+        assert [f for f in rep_benign.findings if f.detector_id == DETECTOR_D09_TEST] == []
+
 
 
 
