@@ -1965,3 +1965,26 @@ class TestDetectorD10AndExtendedIntegrity:
         ])
         d08_unpinned = [f for f in rep.findings if f.consequence_class == "ACTION_PIN_UNPINNED"]
         assert len(d08_unpinned) == 0
+
+    def test_d06_nonlocal_inner_function_mutation_not_flagged_as_short_circuit(self):
+        """Verify variables mutated in nested functions via nonlocal are not treated as constant bools."""
+        engine = ConsequenceEngine(mode="enforce")
+
+        func_code = (
+            "def check_security_context(items: list) -> bool:\n"
+            "    has_valid_auth = False\n"
+            "    def _inner_evaluator(item):\n"
+            "        nonlocal has_valid_auth\n"
+            "        if item.get('valid'):\n"
+            "            has_valid_auth = True\n"
+            "    for i in items:\n"
+            "        _inner_evaluator(i)\n"
+            "    if has_valid_auth:\n"
+            "        return True\n"
+            "    return False\n"
+        )
+        rep = engine.analyze_deltas([
+            FileDeltaInput("auth_eval.py", change_type="A", base_source="", head_source=func_code)
+        ])
+        d06_findings = [f for f in rep.findings if f.consequence_class == "SECURITY_GUARD_WEAKENED"]
+        assert len(d06_findings) == 0

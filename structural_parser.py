@@ -684,10 +684,24 @@ def _collect_python_const_bools(stmts: list) -> Dict[str, bool]:
 
     class _AssignVisitor(ast.NodeVisitor):
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-            return
+            for child in ast.walk(node):
+                if isinstance(child, ast.Nonlocal):
+                    for n in child.names:
+                        disqualified.add(n)
+                elif isinstance(child, ast.Assign):
+                    for t in child.targets:
+                        for sub in ast.walk(t):
+                            if isinstance(sub, ast.Name):
+                                disqualified.add(sub.id)
+                elif isinstance(child, (ast.AugAssign, ast.AnnAssign)):
+                    target = getattr(child, "target", None)
+                    if target:
+                        for sub in ast.walk(target):
+                            if isinstance(sub, ast.Name):
+                                disqualified.add(sub.id)
 
         def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-            return
+            self.visit_FunctionDef(node)
 
         def visit_ClassDef(self, node: ast.ClassDef) -> None:
             return
