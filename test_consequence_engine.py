@@ -1697,11 +1697,16 @@ class TestDetectorD10AndExtendedIntegrity:
         assert "OldAccount" in d10_dj[0].affected_symbols
         assert "UserProfile.ssn" in d10_dj[0].affected_symbols
 
-        # 2. Knex JS migration
+        # 2. Knex JS migration (with valid down rollback -> REVIEW)
         knex_mig = (
             "exports.up = function(knex) {\n"
             "  return knex.schema.table('users', function(t) {\n"
             "    t.dropColumn('secret_token');\n"
+            "  });\n"
+            "};\n"
+            "exports.down = function(knex) {\n"
+            "  return knex.schema.table('users', function(t) {\n"
+            "    t.string('secret_token');\n"
             "  });\n"
             "};\n"
         )
@@ -1712,6 +1717,22 @@ class TestDetectorD10AndExtendedIntegrity:
         d10_knex = [f for f in rep_knex.findings if f.detector_id == DETECTOR_D10_MIGRATION]
         assert len(d10_knex) == 1
         assert "secret_token" in d10_knex[0].affected_symbols
+
+        # 3. Knex JS migration without rollback -> IRREVERSIBLE_PERSISTENCE_DROP (BLOCK)
+        knex_irrev = (
+            "exports.up = function(knex) {\n"
+            "  return knex.schema.table('users', function(t) {\n"
+            "    t.dropColumn('secret_token');\n"
+            "  });\n"
+            "};\n"
+        )
+        rep_knex_irrev = engine.analyze_deltas([
+            FileDeltaInput("db/migrations/20261024_drop_token_irrev.js", change_type="A", base_source="", head_source=knex_irrev)
+        ])
+        assert rep_knex_irrev.recommended_verdict == "DESTRUCTIVE"
+        d10_irrev = [f for f in rep_knex_irrev.findings if f.consequence_class == "IRREVERSIBLE_PERSISTENCE_DROP"]
+        assert len(d10_irrev) == 1
+        assert d10_irrev[0].policy_recommendation == POLICY_BLOCK
 
     def test_d10_safe_additive_migration_and_temp_table_drops(self):
         """
@@ -1815,3 +1836,132 @@ class TestDetectorD10AndExtendedIntegrity:
         d08_wfr = [f for f in rep_wfr.findings if f.consequence_class == "WORKFLOW_RUN_UNTRUSTED_ARTIFACT"]
         assert len(d08_wfr) == 1
         assert d08_wfr[0].policy_recommendation == POLICY_REVIEW
+
+    def test_d10_multiline_sql_and_goose_rollback_exclusions(self):
+        """Verify multi-line SQL statement parsing and exclusion of rollback sections (goose Down)."""
+        engine = ConsequenceEngine(mode="enforce")
+
+        # 1. Multi-line SQL statement with comments and line breaks
+        multiline_sql = (
+            "-- Multi-line statement with comments and line breaks\n"
+            "ALTER TABLE\n"
+            "    /* internal comment */\n"
+            "    customers\n"
+            "DROP\n"
+            "    COLUMN\n"
+            "    IF EXISTS\n"
+            "    legacy_fax;\n"
+        )
+        rep_ml = engine.analyze_deltas([
+            FileDeltaInput("migrations/20261025_multiline.sql", change_type="A", base_source="", head_source=multiline_sql)
+        ])
+        d10_ml = [f for f in rep_ml.findings if f.detector_id == DETECTOR_D10_MIGRATION]
+        assert len(d10_ml) == 1
+        assert d10_ml[0].consequence_class == "DESTRUCTIVE_PERSISTENCE_MIGRATION"
+        assert "customers.legacy_fax" in d10_ml[0].affected_symbols
+        assert "legacy_fax" in d10_ml[0].affected_symbols
+
+        # 2. Goose migration where drop is inside `-- +goose Down` -> 0 findings (SAFE)
+        goose_sql = (
+            "-- +goose Up\n"
+            "CREATE TABLE new_audit_records (id INT);\n\n"
+            "-- +goose Down\n"
+            "DROP TABLE new_audit_records;\n"
+        )
+        rep_goose = engine.analyze_deltas([
+            FileDeltaInput("migrations/20261025_goose.sql", change_type="A", base_source="", head_source=goose_sql)
+        ])
+        assert [f for f in rep_goose.findings if f.detector_id == DETECTOR_D10_MIGRATION] == []
+        assert rep_goose.recommended_verdict == "SAFE"
+
+    def test_d10_rails_and_django_runsql_irreversibility(self):
+        """Verify Rails change irreversible drops and Django RunSQL reverse_sql requirement."""
+        engine = ConsequenceEngine(mode="enforce")
+
+        # 1. Rails change with irreversible drop_table (no block) -> BLOCK
+        rails_irrev = (
+            "class DropUsers < ActiveRecord::Migration[7.0]\n"
+            "  def change\n"
+            "    drop_table :legacy_users\n"
+            "  end\n"
+            "end\n"
+        )
+        rep_r_irrev = engine.analyze_deltas([
+            FileDeltaInput("db/migrate/20261025_drop_users.rb", change_type="A", base_source="", head_source=rails_irrev)
+        ])
+        assert rep_r_irrev.recommended_verdict == "DESTRUCTIVE"
+        f_r_irrev = [f for f in rep_r_irrev.findings if f.consequence_class == "IRREVERSIBLE_PERSISTENCE_DROP"]
+        assert len(f_r_irrev) == 1
+        assert f_r_irrev[0].policy_recommendation == POLICY_BLOCK
+
+        # 2. Rails change with reversible drop_table (block provided) -> REVIEW
+        rails_rev = (
+            "class DropUsers < ActiveRecord::Migration[7.0]\n"
+            "  def change\n"
+            "    drop_table :legacy_users do |t|\n"
+            "      t.string :name\n"
+            "    end\n"
+            "  end\n"
+            "end\n"
+        )
+        rep_r_rev = engine.analyze_deltas([
+            FileDeltaInput("db/migrate/20261025_drop_users.rb", change_type="A", base_source="", head_source=rails_rev)
+        ])
+        assert rep_r_rev.recommended_verdict == "REVIEW"
+        f_r_rev = [f for f in rep_r_rev.findings if f.consequence_class == "DESTRUCTIVE_PERSISTENCE_MIGRATION"]
+        assert len(f_r_rev) == 1
+
+        # 3. Django RunSQL without reverse_sql -> BLOCK
+        dj_irrev = (
+            "from django.db import migrations\n\n"
+            "class Migration(migrations.Migration):\n"
+            "    operations = [\n"
+            "        migrations.RunSQL('DROP TABLE old_analytics;')\n"
+            "    ]\n"
+        )
+        rep_dj_irrev = engine.analyze_deltas([
+            FileDeltaInput("myapp/migrations/0009_drop_sql.py", change_type="A", base_source="", head_source=dj_irrev)
+        ])
+        assert rep_dj_irrev.recommended_verdict == "DESTRUCTIVE"
+        f_dj_irrev = [f for f in rep_dj_irrev.findings if f.consequence_class == "IRREVERSIBLE_PERSISTENCE_DROP"]
+        assert len(f_dj_irrev) == 1
+
+        # 4. Django RunSQL with reverse_sql -> REVIEW
+        dj_rev = (
+            "from django.db import migrations\n\n"
+            "class Migration(migrations.Migration):\n"
+            "    operations = [\n"
+            "        migrations.RunSQL(\n"
+            "            'DROP TABLE old_analytics;',\n"
+            "            reverse_sql='CREATE TABLE old_analytics (id INT);'\n"
+            "        )\n"
+            "    ]\n"
+        )
+        rep_dj_rev = engine.analyze_deltas([
+            FileDeltaInput("myapp/migrations/0009_drop_sql.py", change_type="A", base_source="", head_source=dj_rev)
+        ])
+        assert rep_dj_rev.recommended_verdict == "REVIEW"
+        f_dj_rev = [f for f in rep_dj_rev.findings if f.consequence_class == "DESTRUCTIVE_PERSISTENCE_MIGRATION"]
+        assert len(f_dj_rev) == 1
+
+    def test_d08_first_party_actions_not_flagged_as_unpinned(self):
+        """Verify first-party actions (actions/*, github/*) are excluded from ACTION_PIN_UNPINNED."""
+        engine = ConsequenceEngine(mode="enforce")
+
+        actions_wf = (
+            "name: CI\n"
+            "on: [push]\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "      - uses: actions/setup-python@v5\n"
+            "      - uses: github/codeql-action/analyze@v3\n"
+            "      - run: echo 'Done'\n"
+        )
+        rep = engine.analyze_deltas([
+            FileDeltaInput(".github/workflows/ci.yml", change_type="A", base_source="", head_source=actions_wf)
+        ])
+        d08_unpinned = [f for f in rep.findings if f.consequence_class == "ACTION_PIN_UNPINNED"]
+        assert len(d08_unpinned) == 0

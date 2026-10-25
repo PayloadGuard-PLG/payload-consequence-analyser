@@ -25,6 +25,8 @@ Core Capabilities & Detectors:
 
 from __future__ import annotations
 
+import ast
+import bisect
 import json
 import os
 import re
@@ -143,51 +145,6 @@ _BUILD_WRAPPER_BASENAMES = frozenset({
     "mvnw", "mvnw.cmd", "gradlew", "gradlew.bat", "makefile", "gnumakefile", "build.sh", "make.bat",
 })
 
-# Migration & Persistence Patterns for D10
-_MIGRATION_PATH_DIRS = frozenset({
-    "migration", "migrations", "migrate", "alembic", "versions",
-    "prisma", "schema", "db", "flyway", "liquibase", "sql",
-})
-
-_SQL_DROP_TABLE_RE = re.compile(
-    r"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_.\"'`]+)",
-    re.IGNORECASE,
-)
-_SQL_DROP_COLUMN_RE = re.compile(
-    r"(?:ALTER\s+TABLE\s+[A-Za-z0-9_.\"'`]+\s+)?\bDROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_.\"'`]+)",
-    re.IGNORECASE,
-)
-_SQL_TRUNCATE_RE = re.compile(
-    r"\bTRUNCATE\s+(?:TABLE\s+)?([A-Za-z0-9_.\"'`]+)",
-    re.IGNORECASE,
-)
-_SQL_DROP_DATABASE_RE = re.compile(
-    r"\bDROP\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+EXISTS\s+)?([A-Za-z0-9_.\"'`]+)",
-    re.IGNORECASE,
-)
-_ALEMBIC_DROP_TABLE_RE = re.compile(
-    r"\bop\.drop_table\(\s*['\"]([A-Za-z0-9_]+)['\"]",
-    re.IGNORECASE,
-)
-_ALEMBIC_DROP_COLUMN_RE = re.compile(
-    r"\bop\.drop_column\(\s*['\"]([A-Za-z0-9_]+)['\"]\s*,\s*['\"]([A-Za-z0-9_]+)['\"]",
-    re.IGNORECASE,
-)
-_DJANGO_DELETE_MODEL_RE = re.compile(
-    r"\bmigrations\.DeleteModel\(\s*name=['\"]([A-Za-z0-9_]+)['\"]",
-    re.IGNORECASE,
-)
-_DJANGO_REMOVE_FIELD_RE = re.compile(
-    r"\bmigrations\.RemoveField\(\s*model_name=['\"]([A-Za-z0-9_]+)['\"]\s*,\s*name=['\"]([A-Za-z0-9_]+)['\"]",
-    re.IGNORECASE,
-)
-_JS_TS_DROP_RE = re.compile(
-    r"(?:\.dropTable|\.dropColumn|dropTable|dropColumn)\(\s*['\"]([A-Za-z0-9_]+)['\"]",
-    re.IGNORECASE,
-)
-
-_TEMP_TABLE_PREFIXES = ("temp_", "tmp_", "staging_", "_scratch", "temporary")
-
 # Workflow / Action Integrity Patterns for D08
 _WORKFLOW_OR_ACTION_PATH_RE = re.compile(
     r"(?:^|/)(?:\.github/workflows/[^/]+\.ya?ml|(?:\.github/actions/[^/]+/)?action\.ya?ml)$",
@@ -229,24 +186,728 @@ _TEST_SKIP_DECORATOR_TOKENS = frozenset({
 })
 
 
+# Migration & Persistence Patterns for D10
+# ---------------------------------------------------------------------------
+# D10 analyses FORWARD migration code only. Rollback code (Alembic downgrade(),
+# Knex/TypeORM/Sequelize down(), Rails `def down`, goose/sql-migrate/dbmate Down
+# sections, *.down.sql / Flyway undo files) legitimately drops what the forward
+# migration created and must never be reported as data loss.
+_MIGRATION_DIR_TOKENS = frozenset({"migrations", "migration", "migrate", "flyway", "liquibase"})
+_MIGRATION_EXCLUDED_DIRS = frozenset({
+    "test", "tests", "__tests__", "spec", "specs", "testdata", "test_data",
+    "seed", "seeds", "seeders", "seeding", "fixture", "fixtures",
+    "example", "examples", "sample", "samples", "doc", "docs",
+    "node_modules", "vendor", "third_party", "site-packages",
+})
+_MIGRATION_EXTS = (".sql", ".py", ".rb", ".js", ".mjs", ".cjs", ".ts")
+_FLYWAY_VERSIONED_RE = re.compile(r"^v\d+(?:[._]\d+)*__.+\.sql$", re.IGNORECASE)
+_ROLLBACK_SQL_FILE_RE = re.compile(
+    r"(?:^|[._-])(?:down|rollback|undo)\.sql$|^u\d+(?:[._]\d+)*__.+\.sql$",
+    re.IGNORECASE,
+)
+_UP_SQL_FILE_RE = re.compile(r"(?:^|[._-])up\.sql$", re.IGNORECASE)
+_TEMP_TABLE_PREFIXES = ("temp_", "tmp_", "staging_", "_scratch", "temporary")
+
+# Comment / string tokenisers per migration language. Comments are blanked
+# (replaced by spaces, newlines kept) so offsets and line numbers stay aligned;
+# string literals are kept because migrations embed SQL in strings.
+_COMMENT_STRING_RES: Dict[str, "re.Pattern[str]"] = {
+    "sql": re.compile(
+        r"(?P<c>--[^\n]*|/\*.*?(?:\*/|\Z))|(?P<s>'(?:[^']|'')*'|\"[^\"]*\"|`[^`]*`)",
+        re.S,
+    ),
+    "js": re.compile(
+        r"(?P<c>//[^\n]*|/\*.*?(?:\*/|\Z))"
+        r"|(?P<s>'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\"|`(?:\\.|[^`\\])*`)",
+        re.S,
+    ),
+    "py": re.compile(
+        r"(?P<c>#[^\n]*)"
+        r"|(?P<s>'''(?:\\.|[^\\])*?'''|\"\"\"(?:\\.|[^\\])*?\"\"\"|'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\")",
+        re.S,
+    ),
+    "rb": re.compile(
+        r"(?P<c>^=begin\b.*?^=end\b[^\n]*|#[^\n]*)|(?P<s>'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\")",
+        re.S | re.M,
+    ),
+}
+
+# SQL statement grammar (statement-level, whitespace/newline tolerant)
+_SQL_IDENT_PART = r'(?:\\?"[^"\n\\]+\\?"|`[^`\n]+`|\[[^\]\n]+\]|[A-Za-z_][\w$]*)'
+_SQL_IDENT = _SQL_IDENT_PART + r"(?:[ \t]*\.[ \t]*" + _SQL_IDENT_PART + r")*"
+_SQL_IDENT_RE = re.compile(_SQL_IDENT)
+# Non-literal table names: f-strings, ${}, #{}, %s, ?, or string concatenation
+_SQL_DYNAMIC_RE = re.compile(
+    r"(?:\{[^}\n]*\}|\$\{[^}\n]*\}|#\{[^}\n]*\}|%\(\w+\)s|%s|\?"
+    r"|\\?[\"'`][ \t]*(?:\+|\|\||\.\.|%|\.format\b)|\+[ \t]*\w)"
+)
+_SQL_LIST_SEP_RE = re.compile(r"[ \t]*,[ \t]*")
+# A literal target must be followed by a statement/string boundary. This rejects
+# English prose such as "truncate long names" inside log strings.
+_SQL_TERMINATOR_RE = re.compile(
+    r"[ \t]*(?:;|\)|\\?[\"'`]|\r?\n|$|,|(?:CASCADE|RESTRICT|PURGE|RESTART|CONTINUE)\b)",
+    re.IGNORECASE,
+)
+_SQL_DROP_TABLE_HEAD_RE = re.compile(r"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?", re.IGNORECASE)
+_SQL_DROP_COLUMN_HEAD_RE = re.compile(r"\bDROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?", re.IGNORECASE)
+_SQL_TRUNCATE_HEAD_RE = re.compile(r"\bTRUNCATE\s+(?:TABLE\s+)?(?:ONLY\s+)?", re.IGNORECASE)
+_SQL_DROP_DB_HEAD_RE = re.compile(r"\bDROP\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+EXISTS\s+)?", re.IGNORECASE)
+_SQL_ALTER_TABLE_RE = re.compile(
+    r"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(" + _SQL_IDENT + r")", re.IGNORECASE
+)
+# `ALTER TABLE t DROP col` (COLUMN keyword omitted; valid in PostgreSQL/MySQL)
+_SQL_ALTER_DROP_IMPLICIT_RE = re.compile(
+    r"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(" + _SQL_IDENT + r")\s+DROP\s+"
+    r"(?!(?:COLUMN|CONSTRAINT|INDEX|KEY|PRIMARY|FOREIGN|CHECK|DEFAULT|NOT|IDENTITY|EXPRESSION"
+    r"|PARTITION|UNIQUE|PERIOD|SYSTEM|FULLTEXT|SPATIAL|IF|TRIGGER|ROW|OIDS)\b)",
+    re.IGNORECASE,
+)
+_SQL_SECTION_MARKER_RE = re.compile(
+    r"^[ \t]*--[ \t]*(?:\+goose[ \t]+(up|down)|\+migrate[ \t]+(up|down)|migrate:(up|down))\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# ORM / DSL drop operations
+_ALEMBIC_DROP_TABLE_RE = re.compile(r"\bop\.drop_table\(\s*(?:table_name\s*=\s*)?[\"']([\w.]+)[\"']")
+_ALEMBIC_DROP_COLUMN_RE = re.compile(
+    r"\bop\.drop_column\(\s*(?:table_name\s*=\s*)?[\"']([\w.]+)[\"']\s*,\s*(?:column_name\s*=\s*)?[\"'](\w+)[\"']"
+)
+_ALEMBIC_BATCH_TABLE_RE = re.compile(r"\bop\.batch_alter_table\(\s*(?:table_name\s*=\s*)?[\"']([\w.]+)[\"']")
+_ALEMBIC_BATCH_DROP_COLUMN_RE = re.compile(
+    r"\b(?!op\.)[A-Za-z_]\w*\.drop_column\(\s*(?:column_name\s*=\s*)?[\"'](\w+)[\"']\s*[,)]"
+)
+_DJANGO_DELETE_MODEL_RE = re.compile(r"\b(?:migrations\.)?DeleteModel\(\s*(?:name\s*=\s*)?[\"'](\w+)[\"']")
+_DJANGO_REMOVE_FIELD_RE = re.compile(r"\b(?:migrations\.)?RemoveField\(")
+_JS_DROP_TABLE_CALL_RE = re.compile(r"\.dropTable(?:IfExists)?\(\s*[\"'`]([\w.]+)[\"'`]")
+_JS_DROP_COLUMN_CALL_RE = re.compile(r"\b([\w$]+)\.(dropColumns?|removeColumn)\(")
+_JS_TABLE_CONTEXT_RE = re.compile(r"\.(?:alterTable|table)\(\s*[\"'`]([\w.]+)[\"'`]")
+_JS_STR_ARG_RE = re.compile(r"[\"'`]([\w.]+)[\"'`]")
+_JS_FN_HEADER_TEMPLATES = (
+    r"\b(?:module\.)?exports\.{n}\s*=\s*",
+    r"(?<![.\w$]){n}\s*:\s*",
+    r"\bexport\s+(?:const|let|var)\s+{n}\b\s*(?::[^=\n]+)?=\s*",
+    r"\bexport\s+(?:default\s+)?(?:async\s+)?function\s+{n}\b\s*",
+    r"(?<![.\w$])(?:(?:public|private|protected|static|override)\s+)*(?:async\s+)?{n}\s*(?=\()",
+)
+_RB_DEF_RE = re.compile(r"^([ \t]*)def[ \t]+(?:self\.)?(up|down|change)\b([^\n]*)$", re.MULTILINE)
+_RB_DROP_TABLE_RE = re.compile(r"(?<![.\w])drop_table\s*\(?\s*[:\"']?(\w+)[\"']?")
+_RB_REMOVE_COLUMN_RE = re.compile(
+    r"(?<![.\w])remove_column\s*\(?\s*[:\"']?(\w+)[\"']?\s*,\s*[:\"']?(\w+)[\"']?"
+)
+_RB_REMOVE_COLUMNS_RE = re.compile(r"(?<![.\w])remove_columns\s*\(?\s*[:\"']?(\w+)[\"']?\s*,([^\n]*)")
+
+# D08: workflow_run as an actual trigger (not merely a `github.event.workflow_run.*` expression)
+_WORKFLOW_RUN_TRIGGER_RE = re.compile(
+    r"^\s*(?:on\s*:\s*(?:\[[^\]\n]*\bworkflow_run\b|workflow_run\b)|workflow_run\s*:|-\s*workflow_run\s*$)",
+    re.MULTILINE,
+)
+# D08: GitHub-owned action namespaces excluded from ACTION_PIN_UNPINNED (third-party only).
+_GITHUB_OWNED_ACTION_OWNERS = frozenset({"actions", "github"})
+
+
 def _is_migration_file(file_path: str) -> bool:
-    """Return True if file_path appears to be a database migration or schema migration file."""
-    if _is_test_path(file_path):
-        return False
+    """Return True if file_path is a forward database migration.
+
+    Requires a recognised migration directory (migrations/, migration/, migrate/,
+    flyway/, liquibase/, alembic/.../versions/) or a Flyway versioned filename
+    (V<n>__*.sql). Seed, fixture, sample, docs, vendored and test directories are
+    excluded, as are rollback-only SQL files (*.down.sql, *.rollback.sql, Flyway
+    U<n>__ undo scripts).
+    """
     norm = file_path.replace("\\", "/").lower()
     parts = [p for p in norm.split("/") if p]
     if not parts:
         return False
-    bname = parts[-1]
-    # Check parent directories
-    if any(p in _MIGRATION_PATH_DIRS for p in parts[:-1]):
+    bname, dirs = parts[-1], parts[:-1]
+    if not bname.endswith(_MIGRATION_EXTS) or bname.endswith(".d.ts"):
+        return False
+    if any(d in _MIGRATION_EXCLUDED_DIRS for d in dirs) or bname.startswith("seed"):
+        return False
+    if bname.endswith(".sql") and _ROLLBACK_SQL_FILE_RE.search(bname):
+        return False
+    if any(d in _MIGRATION_DIR_TOKENS for d in dirs):
         return True
-    # Check filename patterns like 0001_initial.py or 20261021_migration.sql
-    if re.match(r"^\d{3,}_", bname) and (bname.endswith(".py") or bname.endswith(".sql") or bname.endswith(".rb") or bname.endswith(".js") or bname.endswith(".ts")):
+    if "alembic" in dirs and "versions" in dirs:
         return True
-    if "migration" in bname and (bname.endswith(".py") or bname.endswith(".sql") or bname.endswith(".rb") or bname.endswith(".js") or bname.endswith(".ts")):
+    return bool(_FLYWAY_VERSIONED_RE.match(bname))
+
+
+def _migration_language(file_path: str) -> Optional[str]:
+    low = file_path.lower()
+    if low.endswith(".sql"):
+        return "sql"
+    if low.endswith(".py"):
+        return "py"
+    if low.endswith(".rb"):
+        return "rb"
+    if low.endswith((".js", ".mjs", ".cjs", ".ts")):
+        return "js"
+    return None
+
+
+def _is_temp_table_entity(entity: str, kind: str) -> bool:
+    """True when the dropped/truncated TABLE is a temporary/staging table.
+
+    Column names are never treated as temporary (`sensors.temp_celsius` is real data).
+    """
+    if entity == "<dynamic>":
+        return False
+    parts = entity.lower().split(".")
+    if kind == "column":
+        if len(parts) < 2:
+            return False
+        table = parts[-2]
+    else:
+        table = parts[-1]
+    return table.startswith(_TEMP_TABLE_PREFIXES)
+
+
+def _blank_spans(text: str, spans: List[Tuple[int, int]]) -> str:
+    if not spans:
+        return text
+    out: List[str] = []
+    last = 0
+    for s, e in sorted(spans):
+        s = max(s, last)
+        if s >= e:
+            continue
+        out.append(text[last:s])
+        out.append(re.sub(r"[^\n]", " ", text[s:e]))
+        last = e
+    out.append(text[last:])
+    return "".join(out)
+
+
+def _blank_comments(text: str, lang: Optional[str]) -> str:
+    """Replace comments with spaces (quote-aware, offsets preserved)."""
+    rx = _COMMENT_STRING_RES.get(lang or "")
+    if rx is None or not text:
+        return text
+    spans = [m.span() for m in rx.finditer(text) if m.group("c") is not None]
+    return _blank_spans(text, spans)
+
+
+def _line_starts(text: str) -> List[int]:
+    return [0] + [m.end() for m in re.finditer("\n", text)]
+
+
+def _line_of(starts: List[int], offset: int) -> int:
+    return bisect.bisect_right(starts, offset)
+
+
+def _balanced_end(text: str, open_idx: int, limit: int = 200_000) -> int:
+    """Index just past the bracket matching text[open_idx] (quote-aware); bounded scan."""
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    stack = [pairs[text[open_idx]]]
+    i, n, quote = open_idx + 1, min(len(text), open_idx + limit), None
+    while i < n:
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in pairs:
+            stack.append(pairs[ch])
+        elif ch in ")]}":
+            if ch != stack[-1]:
+                return i + 1
+            stack.pop()
+            if not stack:
+                return i + 1
+        i += 1
+    return n
+
+
+def _mk_mig_event(kind: str, entity: str, offset: int, dynamic: bool = False,
+                  irrev: Optional[str] = None, src: str = "orm") -> Dict[str, Any]:
+    return {"kind": kind, "entity": entity, "offset": offset, "dynamic": dynamic, "irrev": irrev, "src": src}
+
+
+def _sql_norm_ident(raw: str) -> str:
+    return re.sub(r'[\\"`\[\]\s]', "", raw)
+
+
+def _sql_parse_targets(text: str, pos: int, allow_list: bool) -> Optional[Tuple[List[str], bool]]:
+    """Parse the target identifier(s) of a destructive SQL statement at `pos`.
+
+    Returns (names, is_dynamic) or None when the text is not a well-formed target.
+    """
+    if _SQL_DYNAMIC_RE.match(text, pos):
+        return ["<dynamic>"], True
+    names: List[str] = []
+    p = pos
+    while True:
+        m = _SQL_IDENT_RE.match(text, p)
+        if not m:
+            break
+        names.append(_sql_norm_ident(m.group(0)))
+        p = m.end()
+        if not allow_list:
+            break
+        sep = _SQL_LIST_SEP_RE.match(text, p)
+        if sep and _SQL_IDENT_RE.match(text, sep.end()) and not _SQL_DYNAMIC_RE.match(text, sep.end()):
+            p = sep.end()
+            continue
+        break
+    if not names:
+        return None
+    if _SQL_DYNAMIC_RE.match(text, p):  # e.g. "DROP TABLE prefix_" + name
+        return ["<dynamic>"], True
+    if not _SQL_TERMINATOR_RE.match(text, p):
+        return None
+    return names, False
+
+
+def _sql_alter_table_before(text: str, pos: int) -> Optional[str]:
+    seg = text[max(0, pos - 2000):pos]
+    semi = seg.rfind(";")
+    if semi != -1:
+        seg = seg[semi + 1:]
+    last = None
+    for m in _SQL_ALTER_TABLE_RE.finditer(seg):
+        last = m
+    return _sql_norm_ident(last.group(1)) if last else None
+
+
+def _extract_sql_events(text: str) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    heads = (
+        (_SQL_DROP_TABLE_HEAD_RE, "table", True),
+        (_SQL_TRUNCATE_HEAD_RE, "truncate", True),
+        (_SQL_DROP_DB_HEAD_RE, "dropdb", False),
+        (_SQL_DROP_COLUMN_HEAD_RE, "column", False),
+    )
+    for head_re, kind, allow_list in heads:
+        for m in head_re.finditer(text):
+            parsed = _sql_parse_targets(text, m.end(), allow_list)
+            if not parsed:
+                continue
+            names, dyn = parsed
+            for nm in names:
+                ent = nm
+                if kind == "column" and not dyn:
+                    tbl = _sql_alter_table_before(text, m.start())
+                    if tbl:
+                        ent = f"{tbl}.{nm}"
+                events.append(_mk_mig_event(kind, ent, m.start(), dyn, src="sql"))
+    for m in _SQL_ALTER_DROP_IMPLICIT_RE.finditer(text):
+        parsed = _sql_parse_targets(text, m.end(), False)
+        if not parsed:
+            continue
+        names, dyn = parsed
+        tbl = _sql_norm_ident(m.group(1))
+        for nm in names:
+            events.append(_mk_mig_event("column", nm if dyn else f"{tbl}.{nm}", m.start(), dyn, src="sql"))
+    return events
+
+
+def _py_body_trivial(body: List[Any]) -> bool:
+    """True if a Python function body cannot restore anything (pass/.../docstring/return None/raise)."""
+    stmts = list(body)
+    if stmts and isinstance(stmts[0], ast.Expr) and isinstance(getattr(stmts[0], "value", None), ast.Constant) \
+            and isinstance(stmts[0].value.value, str):
+        stmts = stmts[1:]
+    if any(isinstance(s, ast.Raise) for s in stmts):
         return True
-    return False
+    for s in stmts:
+        if isinstance(s, ast.Pass):
+            continue
+        if isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant):
+            continue
+        if isinstance(s, ast.Return) and (s.value is None or (isinstance(s.value, ast.Constant) and s.value.value is None)):
+            continue
+        return False
+    return True
+
+
+def _py_call_name(func: Any) -> str:
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return ""
+
+
+def _py_is_noop_reverse(node: Any) -> bool:
+    if isinstance(node, ast.Attribute) and node.attr == "noop":
+        return True
+    return isinstance(node, ast.Constant) and node.value in (None, "", [])
+
+
+def _py_migration_structure(
+    src: str, blanked: str
+) -> Tuple[str, List[Tuple[int, int]], Optional[str], List[Tuple[int, int, str]]]:
+    """Return (blanked_text, rollback_spans, irreversible_reason, irreversible_spans) for Python migrations."""
+    starts = _line_starts(src)
+
+    def line_span(first: int, last: int) -> Tuple[int, int]:
+        return starts[first - 1], (starts[last] if last < len(starts) else len(src))
+
+    rollback: List[Tuple[int, int]] = []
+    irrev_spans: List[Tuple[int, int, str]] = []
+    reason: Optional[str] = None
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        tree = None
+
+    if tree is None:
+        for m in re.finditer(r"^(?:async[ \t]+)?def[ \t]+(?:downgrade|down)[ \t]*\(", blanked, re.MULTILINE):
+            nxt = re.compile(r"^\S", re.MULTILINE).search(blanked, m.end())
+            rollback.append((m.start(), nxt.start() if nxt else len(blanked)))
+        return blanked, rollback, None, irrev_spans
+
+    # Blank bare string statements (docstrings) so prose like "drop table users" is not parsed as SQL.
+    doc_spans: List[Tuple[int, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            first_line = src[starts[node.lineno - 1]:].lstrip()
+            if re.match(r"(?i)[rbuf]{0,2}[\"']", first_line):
+                doc_spans.append(line_span(node.lineno, node.end_lineno or node.lineno))
+    blanked = _blank_spans(blanked, doc_spans)
+
+    funcs: Dict[str, Any] = {}
+    containers = [tree.body] + [n.body for n in tree.body if isinstance(n, ast.ClassDef)]
+    for body in containers:
+        for n in body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in ("upgrade", "downgrade", "up", "down"):
+                funcs.setdefault(n.name, n)
+    for nm in ("downgrade", "down"):
+        fn = funcs.get(nm)
+        if fn is not None:
+            first = min([fn.lineno] + [d.lineno for d in fn.decorator_list])
+            rollback.append(line_span(first, fn.end_lineno or fn.lineno))
+
+    module_fns = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    if module_fns & {"upgrade", "up"}:
+        down_fn = funcs.get("downgrade") or funcs.get("down")
+        if down_fn is None:
+            reason = "no downgrade() rollback function is defined"
+        elif _py_body_trivial(down_fn.body):
+            reason = f"{down_fn.name}() is empty or raises instead of restoring the schema"
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _py_call_name(node.func) == "RunSQL":
+            rev = next((kw.value for kw in node.keywords if kw.arg == "reverse_sql"), None)
+            if rev is None and len(node.args) >= 2:
+                rev = node.args[1]
+            if rev is None or _py_is_noop_reverse(rev):
+                s, e = line_span(node.lineno, node.end_lineno or node.lineno)
+                irrev_spans.append((s, e, "RunSQL has no reverse_sql, so Django cannot roll it back"))
+    return blanked, rollback, reason, irrev_spans
+
+
+def _js_expr_end(text: str, p: int) -> int:
+    i, n, depth, quote = p, len(text), 0, None
+    while i < n:
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif depth == 0 and ch in ";,":
+            return i
+        elif depth == 0 and ch == "\n":
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in ".?":
+                i = j
+                continue
+            return i
+        i += 1
+    return n
+
+
+def _js_parse_function_at(text: str, p: int) -> Optional[Tuple[int, str, bool]]:
+    """Parse a function/arrow/method starting at p. Returns (end, body_text, is_expression)."""
+    n = len(text)
+    m = re.compile(r"\s*(?:async\b\s*)?(?:function\b\s*\*?\s*[\w$]*\s*)?").match(text, p)
+    p = m.end() if m else p
+    ident_param = False
+    if p < n and text[p] == "(":
+        p = _balanced_end(text, p)
+    else:
+        mi = re.compile(r"[\w$]+").match(text, p)
+        if not mi:
+            return None
+        p, ident_param = mi.end(), True
+    while p < n and text[p] in " \t\r\n":
+        p += 1
+    if p < n and text[p] == ":":  # TypeScript return type annotation
+        mt = re.compile(r"=>|\{").search(text, p)
+        if not mt:
+            return None
+        p = mt.start()
+    if text.startswith("=>", p):
+        p += 2
+        while p < n and text[p] in " \t\r\n":
+            p += 1
+        if p < n and text[p] == "{":
+            end = _balanced_end(text, p)
+            return end, text[p + 1:end - 1], False
+        end = _js_expr_end(text, p)
+        return end, text[p:end], True
+    if ident_param:
+        return None
+    if p < n and text[p] == "{":
+        end = _balanced_end(text, p)
+        return end, text[p + 1:end - 1], False
+    return None
+
+
+def _js_function_spans(text: str, name: str) -> List[Tuple[int, int, str, bool]]:
+    found: Dict[int, Tuple[int, int, str, bool]] = {}
+    for tmpl in _JS_FN_HEADER_TEMPLATES:
+        for m in re.finditer(tmpl.replace("{n}", name), text):
+            res = _js_parse_function_at(text, m.end())
+            if res:
+                end, body, is_expr = res
+                found.setdefault(end, (m.start(), end, body, is_expr))
+    return sorted(found.values())
+
+
+def _js_body_trivial(body: str, is_expr: bool) -> bool:
+    b = body.strip()
+    if re.match(r"^(?:return\s+)?(?:Promise\.reject\s*\(|throw\b)", b):
+        return True
+    if is_expr:
+        return bool(re.fullmatch(r"\{\s*\}|null|undefined|Promise\.resolve\(\s*\)|", b))
+    b = re.sub(r"\breturn\s*(?:Promise\.resolve\(\s*\)|null|undefined|\{\s*\})?\s*;?", "", b)
+    return not re.sub(r"[\s;]", "", b)
+
+
+def _js_migration_structure(text: str) -> Tuple[List[Tuple[int, int]], Optional[str]]:
+    downs = _js_function_spans(text, "down")
+    rollback = [(s, e) for s, e, _, _ in downs]
+    reason: Optional[str] = None
+    if _js_function_spans(text, "up"):
+        if not downs:
+            reason = "no down() rollback is defined"
+        elif all(_js_body_trivial(body, is_expr) for _, _, body, is_expr in downs):
+            reason = "down() is empty or throws instead of restoring the schema"
+    return rollback, reason
+
+
+def _rb_migration_structure(text: str) -> Tuple[List[Tuple[int, int]], Optional[str], Optional[Tuple[int, int]]]:
+    defs: Dict[str, Tuple[int, int, str]] = {}
+    for m in _RB_DEF_RE.finditer(text):
+        indent, name, rest = m.group(1), m.group(2), m.group(3)
+        if re.search(r";\s*end\s*$", rest):  # one-liner `def down; end`
+            defs.setdefault(name, (m.start(), m.end(), rest.rsplit("end", 1)[0]))
+            continue
+        me = re.compile(r"^" + re.escape(indent) + r"end\b[^\n]*$", re.MULTILINE).search(text, m.end())
+        end = me.end() if me else len(text)
+        defs.setdefault(name, (m.start(), end, text[m.end():me.start() if me else len(text)]))
+    rollback = [defs["down"][:2]] if "down" in defs else []
+    reason: Optional[str] = None
+    if "down" in defs:
+        body = defs["down"][2]
+        if "IrreversibleMigration" in body or not re.sub(r"[\s;]", "", body):
+            reason = "`down` raises ActiveRecord::IrreversibleMigration or is empty"
+    elif "up" in defs and "change" not in defs:
+        reason = "only `up` is defined, so the migration cannot be rolled back"
+    change_span = defs["change"][:2] if "change" in defs else None
+    return rollback, reason, change_span
+
+
+def _sql_migration_structure(raw: str, blanked: str) -> Tuple[List[Tuple[int, int]], Optional[str]]:
+    markers = list(_SQL_SECTION_MARKER_RE.finditer(raw))
+    if not markers:
+        return [], None
+    sections: List[Tuple[str, int, int]] = []
+    for i, m in enumerate(markers):
+        direction = (m.group(1) or m.group(2) or m.group(3) or "").lower()
+        end = markers[i + 1].start() if i + 1 < len(markers) else len(raw)
+        sections.append((direction, m.end(), end))
+    rollback = [(s, e) for d, s, e in sections if d == "down"]
+    downs = [blanked[s:e] for d, s, e in sections if d == "down"]
+    reason: Optional[str] = None
+    if not downs:
+        reason = "the migration has an Up section but no Down section"
+    elif all(not re.sub(r"[\s;]", "", d) for d in downs):
+        reason = "the Down section is empty"
+    return rollback, reason
+
+
+def _extract_py_orm_events(text: str) -> List[Dict[str, Any]]:
+    evs: List[Dict[str, Any]] = []
+    for m in _ALEMBIC_DROP_TABLE_RE.finditer(text):
+        evs.append(_mk_mig_event("table", m.group(1), m.start()))
+    for m in _ALEMBIC_DROP_COLUMN_RE.finditer(text):
+        evs.append(_mk_mig_event("column", f"{m.group(1)}.{m.group(2)}", m.start()))
+    batch_tables = [(m.start(), m.group(1)) for m in _ALEMBIC_BATCH_TABLE_RE.finditer(text)]
+    for m in _ALEMBIC_BATCH_DROP_COLUMN_RE.finditer(text):
+        table = next((nm for pos, nm in reversed(batch_tables) if pos < m.start()), None)
+        evs.append(_mk_mig_event("column", f"{table}.{m.group(1)}" if table else m.group(1), m.start()))
+    for m in _DJANGO_DELETE_MODEL_RE.finditer(text):
+        evs.append(_mk_mig_event("table", m.group(1), m.start()))
+    for m in _DJANGO_REMOVE_FIELD_RE.finditer(text):
+        open_idx = m.end() - 1
+        args = text[open_idx + 1:_balanced_end(text, open_idx) - 1]
+        m_model = re.search(r"model_name\s*=\s*[\"'](\w+)[\"']", args)
+        m_name = re.search(r"(?<!\w)name\s*=\s*[\"'](\w+)[\"']", args)
+        positional = re.findall(r"(?:^|,)\s*[\"'](\w+)[\"']", args)
+        model = m_model.group(1) if m_model else (positional[0] if positional else None)
+        field_name = m_name.group(1) if m_name else (positional[1] if len(positional) > 1 else None)
+        if field_name:
+            evs.append(_mk_mig_event("column", f"{model}.{field_name}" if model else field_name, m.start()))
+    return evs
+
+
+def _extract_js_orm_events(text: str) -> List[Dict[str, Any]]:
+    evs: List[Dict[str, Any]] = []
+    for m in _JS_DROP_TABLE_CALL_RE.finditer(text):
+        evs.append(_mk_mig_event("table", m.group(1), m.start()))
+    contexts = [(m.start(), m.group(1)) for m in _JS_TABLE_CONTEXT_RE.finditer(text)]
+    for m in _JS_DROP_COLUMN_CALL_RE.finditer(text):
+        obj, meth = m.group(1), m.group(2)
+        open_idx = m.end() - 1
+        strs = _JS_STR_ARG_RE.findall(text[open_idx + 1:_balanced_end(text, open_idx) - 1])
+        if not strs:
+            continue
+        table: Optional[str] = None
+        if obj in ("queryRunner", "queryInterface") or meth == "removeColumn":
+            if len(strs) >= 2:
+                table, cols = strs[0], (strs[1:] if meth == "dropColumns" else strs[1:2])
+            else:
+                cols = strs
+        else:
+            table = next((nm for pos, nm in reversed(contexts) if pos < m.start()), None)
+            cols = strs
+        for c in cols:
+            evs.append(_mk_mig_event("column", f"{table}.{c}" if table else c, m.start()))
+    return evs
+
+
+def _extract_rb_events(text: str, change_span: Optional[Tuple[int, int]]) -> List[Dict[str, Any]]:
+    evs: List[Dict[str, Any]] = []
+
+    def in_change(off: int) -> bool:
+        return bool(change_span and change_span[0] <= off < change_span[1])
+
+    def rest_of_line(off: int) -> str:
+        nl = text.find("\n", off)
+        return text[off:nl if nl != -1 else len(text)]
+
+    for m in _RB_DROP_TABLE_RE.finditer(text):
+        irrev = None
+        if in_change(m.start()) and not re.search(r"\bdo\b|\{", rest_of_line(m.end())):
+            irrev = "drop_table inside `change` has no block, so Rails cannot reverse it"
+        evs.append(_mk_mig_event("table", m.group(1), m.start(), irrev=irrev))
+    for m in _RB_REMOVE_COLUMN_RE.finditer(text):
+        irrev = None
+        if in_change(m.start()) and not re.match(r"\s*,", rest_of_line(m.end())):
+            irrev = "remove_column inside `change` has no column type, so Rails cannot reverse it"
+        evs.append(_mk_mig_event("column", f"{m.group(1)}.{m.group(2)}", m.start(), irrev=irrev))
+    for m in _RB_REMOVE_COLUMNS_RE.finditer(text):
+        rest = m.group(2)
+        irrev = None
+        if in_change(m.start()) and "type:" not in rest:
+            irrev = "remove_columns inside `change` has no type:, so Rails cannot reverse it"
+        for piece in rest.split(","):
+            piece = piece.strip()
+            if not piece or re.match(r"^\w+\s*:", piece):
+                continue
+            mc = re.match(r"^[:\"']?(\w+)", piece)
+            if mc:
+                evs.append(_mk_mig_event("column", f"{m.group(1)}.{mc.group(1)}", m.start(), irrev=irrev))
+    return evs
+
+
+@dataclass(frozen=True)
+class _MigrationAnalysis:
+    lang: Optional[str]
+    events: Tuple[Dict[str, Any], ...]
+    reason: Optional[str]
+
+
+def _analyze_migration_source(file_path: str, src: str) -> _MigrationAnalysis:
+    """Extract forward-direction destructive persistence events from one migration snapshot."""
+    lang = _migration_language(file_path)
+    blanked = _blank_comments(src, lang)
+    rollback: List[Tuple[int, int]] = []
+    irrev_spans: List[Tuple[int, int, str]] = []
+    reason: Optional[str] = None
+    change_span: Optional[Tuple[int, int]] = None
+    if lang == "py":
+        blanked, rollback, reason, irrev_spans = _py_migration_structure(src, blanked)
+    elif lang == "js":
+        rollback, reason = _js_migration_structure(blanked)
+    elif lang == "rb":
+        rollback, reason, change_span = _rb_migration_structure(blanked)
+        if change_span:
+            irrev_spans.append((change_span[0], change_span[1], "SQL `execute` inside `change` cannot be reversed by Rails"))
+    elif lang == "sql":
+        rollback, reason = _sql_migration_structure(src, blanked)
+
+    raw_events = _extract_sql_events(blanked)
+    if lang == "py":
+        raw_events += _extract_py_orm_events(blanked)
+    elif lang == "js":
+        raw_events += _extract_js_orm_events(blanked)
+    elif lang == "rb":
+        raw_events += _extract_rb_events(blanked, change_span)
+
+    starts = _line_starts(src)
+    out: List[Dict[str, Any]] = []
+    seen: Set[Any] = set()
+    for ev in sorted(raw_events, key=lambda e: e["offset"]):
+        off = ev["offset"]
+        if any(s <= off < e for s, e in rollback):
+            continue
+        if ev["irrev"] is None and (lang != "rb" or ev["src"] == "sql"):
+            for s, e, why in irrev_spans:
+                if s <= off < e:
+                    ev["irrev"] = why
+                    break
+        line = _line_of(starts, off)
+        line_txt = src[starts[line - 1]:(starts[line] if line < len(starts) else len(src))].strip()
+        if ev["dynamic"]:
+            key = (ev["kind"], "<dynamic>", re.sub(r"\s+", " ", line_txt))
+        else:
+            key = (ev["kind"], ev["entity"].lower())
+        if (key, line) in seen:
+            continue
+        seen.add((key, line))
+        ev.update(line=line, key=key, snippet=line_txt[:200])
+        out.append(ev)
+    return _MigrationAnalysis(lang=lang, events=tuple(out), reason=reason)
+
+
+def _sql_sibling_down_reason(file_path: str, by_path: Dict[str, "FileDeltaInput"]) -> Optional[str]:
+    """For `*.up.sql` migrations, inspect a sibling `*.down.sql` changed in the same delta."""
+    norm = file_path.replace("\\", "/")
+    bname = norm.rsplit("/", 1)[-1]
+    if not _UP_SQL_FILE_RE.search(bname):
+        return None
+    idx = norm.lower().rfind("up.sql")
+    sibling = norm[:idx] + "down.sql"
+    sfd = by_path.get(sibling) or by_path.get(norm[:idx] + "DOWN.sql")
+    if sfd is None:
+        return None
+    if sfd.change_type == "D" or not sfd.head_source:
+        return f"its rollback file '{sibling}' is deleted in this change"
+    if not re.sub(r"[\s;]", "", _blank_comments(sfd.head_source, "sql")):
+        return f"its rollback file '{sibling}' is empty"
+    return None
+
+
+
 
 
 def _is_test_path(file_path: str) -> bool:
@@ -2545,8 +3206,8 @@ class ConsequenceEngine:
 
 
             # 5. Privileged `workflow_run` combining untrusted artifact download with execution
-            base_has_wfr = bool(re.search(r"\bworkflow_run\b", base_src))
-            head_has_wfr = bool(re.search(r"\bworkflow_run\b", head_src))
+            base_has_wfr = bool(_WORKFLOW_RUN_TRIGGER_RE.search(base_src))
+            head_has_wfr = bool(_WORKFLOW_RUN_TRIGGER_RE.search(head_src))
             head_has_download = bool(re.search(r"actions/download-artifact@", head_src, re.IGNORECASE))
             base_has_download = bool(re.search(r"actions/download-artifact@", base_src, re.IGNORECASE))
             if head_has_wfr and head_has_download and not (base_has_wfr and base_has_download):
@@ -2589,6 +3250,9 @@ class ConsequenceEngine:
             for m in uses_re.finditer(head_src):
                 act_name, ref_val = m.group(1), m.group(2)
                 if act_name.startswith("./") or act_name.startswith("docker://"):
+                    continue
+                owner = act_name.split("/")[0].lower() if "/" in act_name else ""
+                if owner in _GITHUB_OWNED_ACTION_OWNERS:
                     continue
                 if not _SHA40_RE.match(ref_val):
                     if act_name not in base_actions:
@@ -2764,223 +3428,142 @@ class ConsequenceEngine:
         self,
         file_deltas: List[FileDeltaInput],
     ) -> List[ConsequenceFinding]:
-        findings: List[ConsequenceFinding] = []
+        """Report destructive operations newly introduced in FORWARD migration code.
 
-        def _is_temp_entity(name: str) -> bool:
-            clean = name.strip("'\"` ").lower()
-            return any(clean.startswith(p) for p in _TEMP_TABLE_PREFIXES)
+        Rollback code is excluded, only operations absent from the base snapshot are
+        reported, and irreversibility is judged per framework (empty/missing
+        downgrade/down, empty Down section or sibling down.sql, RunSQL without
+        reverse_sql, Rails `change` operations Rails cannot invert).
+        """
+        findings: List[ConsequenceFinding] = []
+        by_path = {fd.file_path.replace("\\", "/"): fd for fd in file_deltas}
 
         for fd in file_deltas:
-            if not _is_migration_file(fd.file_path):
+            if not fd.head_source or not _is_migration_file(fd.file_path):
                 continue
-            if not fd.head_source:
+            head = _analyze_migration_source(fd.file_path, fd.head_source)
+            base_keys: Set[Any] = set()
+            if fd.base_source:
+                base = _analyze_migration_source(fd.old_path or fd.file_path, fd.base_source)
+                base_keys = {ev["key"] for ev in base.events}
+            new_events = [
+                ev for ev in head.events
+                if ev["key"] not in base_keys and not _is_temp_table_entity(ev["entity"], ev["kind"])
+            ]
+            if not new_events:
                 continue
 
-            head_src = fd.head_source
-            base_src = fd.base_source or ""
+            file_reason = head.reason
+            if file_reason is None and head.lang == "sql":
+                file_reason = _sql_sibling_down_reason(fd.file_path, by_path)
 
-            def _clean_sql_lines(text: str) -> List[Tuple[int, str]]:
-                lines: List[Tuple[int, str]] = []
-                in_block_comment = False
-                for idx, line in enumerate(text.splitlines(), start=1):
-                    stripped = line.strip()
-                    if in_block_comment:
-                        if "*/" in stripped:
-                            in_block_comment = False
-                        continue
-                    if stripped.startswith("/*"):
-                        if "*/" not in stripped:
-                            in_block_comment = True
-                        continue
-                    if stripped.startswith("--") or stripped.startswith("//") or stripped.startswith("#"):
-                        continue
-                    lines.append((idx, stripped))
-                return lines
-
-            head_lines = _clean_sql_lines(head_src)
-            base_lines = _clean_sql_lines(base_src)
-            base_line_texts = {l for _, l in base_lines}
-
-            # 1. Catastrophic Database / Schema Drops or Truncations
-            for line_no, line_txt in head_lines:
-                if line_txt in base_line_texts:
+            # 1. Catastrophic wipe-outs: TRUNCATE / DROP DATABASE / DROP SCHEMA
+            for ev in new_events:
+                if ev["kind"] not in ("truncate", "dropdb"):
                     continue
-
-                m_trunc = _SQL_TRUNCATE_RE.search(line_txt)
-                if m_trunc:
-                    target = m_trunc.group(1).strip("'\"` ")
-                    if not _is_temp_entity(target):
-                        findings.append(
-                            ConsequenceFinding(
-                                finding_id=f"PG-D10-TRUNCATE-{fd.file_path}-{line_no}",
-                                detector_id=DETECTOR_D10_MIGRATION,
-                                consequence_class="CATASTROPHIC_DATA_WIPEOUT",
-                                tier=TIER_VERIFIED,
-                                confidence=CONFIDENCE_HIGH,
-                                severity=SEVERITY_CRITICAL,
-                                policy_recommendation=POLICY_BLOCK,
-                                summary=f"Migration '{fd.file_path}' truncates persistent table '{target}', permanently erasing all table data.",
-                                affected_files=(fd.file_path,),
-                                affected_symbols=(target,),
-                                evidence=(
-                                    EvidenceItem(
-                                        kind="TABLE_TRUNCATE",
-                                        file=fd.file_path,
-                                        line=line_no,
-                                        symbol=target,
-                                        detail=f"Line {line_no}: '{line_txt}'",
-                                    ),
-                                ),
-                                remediation="Avoid TRUNCATE in automated production migrations. Use soft archiving, batch deprecation, or explicit manual maintenance procedures.",
-                            )
-                        )
-
-                m_dropdb = _SQL_DROP_DATABASE_RE.search(line_txt)
-                if m_dropdb:
-                    target = m_dropdb.group(1).strip("'\"` ")
-                    findings.append(
-                        ConsequenceFinding(
-                            finding_id=f"PG-D10-DROPDB-{fd.file_path}-{line_no}",
-                            detector_id=DETECTOR_D10_MIGRATION,
-                            consequence_class="CATASTROPHIC_DATA_WIPEOUT",
-                            tier=TIER_VERIFIED,
-                            confidence=CONFIDENCE_HIGH,
-                            severity=SEVERITY_CRITICAL,
-                            policy_recommendation=POLICY_BLOCK,
-                            summary=f"Migration '{fd.file_path}' drops database or schema '{target}', causing irreversible data loss.",
-                            affected_files=(fd.file_path,),
-                            affected_symbols=(target,),
-                            evidence=(
-                                EvidenceItem(
-                                    kind="DATABASE_OR_SCHEMA_DROP",
-                                    file=fd.file_path,
-                                    line=line_no,
-                                    symbol=target,
-                                    detail=f"Line {line_no}: '{line_txt}'",
-                                ),
-                            ),
-                            remediation="Dropping entire databases or schemas must never occur in automated CI/CD pull requests.",
-                        )
-                    )
-
-            # 2. Table and Column Drops in Migrations (SQL & ORM)
-            dropped_tables: List[Tuple[int, str, str]] = []
-            dropped_columns: List[Tuple[int, str, str]] = []
-
-            for line_no, line_txt in head_lines:
-                if line_txt in base_line_texts:
-                    continue
-
-                m_dt = _SQL_DROP_TABLE_RE.search(line_txt)
-                if m_dt:
-                    tname = m_dt.group(1).strip("'\"` ")
-                    if not _is_temp_entity(tname):
-                        dropped_tables.append((line_no, tname, line_txt))
-
-                m_dc = _SQL_DROP_COLUMN_RE.search(line_txt)
-                if m_dc:
-                    cname = m_dc.group(1).strip("'\"` ")
-                    if not _is_temp_entity(cname):
-                        dropped_columns.append((line_no, cname, line_txt))
-
-                m_adt = _ALEMBIC_DROP_TABLE_RE.search(line_txt)
-                if m_adt:
-                    tname = m_adt.group(1)
-                    if not _is_temp_entity(tname):
-                        dropped_tables.append((line_no, tname, line_txt))
-
-                m_adc = _ALEMBIC_DROP_COLUMN_RE.search(line_txt)
-                if m_adc:
-                    tname, cname = m_adc.group(1), m_adc.group(2)
-                    if not _is_temp_entity(tname) and not _is_temp_entity(cname):
-                        dropped_columns.append((line_no, f"{tname}.{cname}", line_txt))
-
-                m_djm = _DJANGO_DELETE_MODEL_RE.search(line_txt)
-                if m_djm:
-                    mname = m_djm.group(1)
-                    dropped_tables.append((line_no, mname, line_txt))
-
-                m_djf = _DJANGO_REMOVE_FIELD_RE.search(line_txt)
-                if m_djf:
-                    mname, fname = m_djf.group(1), m_djf.group(2)
-                    dropped_columns.append((line_no, f"{mname}.{fname}", line_txt))
-
-                m_js = _JS_TS_DROP_RE.search(line_txt)
-                if m_js:
-                    entity = m_js.group(1)
-                    if "table" in line_txt.lower():
-                        dropped_tables.append((line_no, entity, line_txt))
-                    elif "column" in line_txt.lower():
-                        dropped_columns.append((line_no, entity, line_txt))
-
-            if dropped_tables or dropped_columns:
-                is_irreversible = False
-                if "def downgrade" in head_src:
-                    dw_match = re.search(r"def\s+downgrade\s*\([^)]*\)\s*(?:->\s*[^:]+)?\s*:(.*)", head_src, re.DOTALL)
-                    if dw_match:
-                        dw_body = dw_match.group(1)
-                        dw_lines = []
-                        for raw_l in dw_body.splitlines():
-                            if re.match(r"^(?:def|class)\s+", raw_l):
-                                break
-                            clean_l = raw_l.strip()
-                            if clean_l and not clean_l.startswith("#"):
-                                dw_lines.append(clean_l)
-                        if not dw_lines or all(l in ("pass", "...", "return", "pass;", "raise NotImplementedError") for l in dw_lines):
-                            is_irreversible = True
-
-                ev_items: List[EvidenceItem] = []
-                for lno, tname, ltxt in dropped_tables:
-                    ev_items.append(
-                        EvidenceItem(
-                            kind="SCHEMA_TABLE_DROPPED",
-                            file=fd.file_path,
-                            line=lno,
-                            symbol=tname,
-                            detail=f"Line {lno}: Dropped table '{tname}' ({ltxt})",
-                        )
-                    )
-                for lno, cname, ltxt in dropped_columns:
-                    ev_items.append(
-                        EvidenceItem(
-                            kind="SCHEMA_COLUMN_DROPPED",
-                            file=fd.file_path,
-                            line=lno,
-                            symbol=cname,
-                            detail=f"Line {lno}: Dropped column '{cname}' ({ltxt})",
-                        )
-                    )
-
-                all_entities = [t for _, t, _ in dropped_tables] + [c for _, c, _ in dropped_columns]
-                c_class = "IRREVERSIBLE_PERSISTENCE_DROP" if is_irreversible else "DESTRUCTIVE_PERSISTENCE_MIGRATION"
-                sev = SEVERITY_CRITICAL if is_irreversible else SEVERITY_HIGH
-                pol = POLICY_BLOCK if is_irreversible else POLICY_REVIEW
-
-                summary_msg = (
-                    f"Migration '{fd.file_path}' introduces irreversible schema drop(s) ({', '.join(all_entities[:3])}) with no downgrade rollback procedure."
-                    if is_irreversible
-                    else f"Migration '{fd.file_path}' drops persistent database schema element(s) ({', '.join(all_entities[:3])})."
-                )
-
+                dyn = ev["dynamic"]
+                is_trunc = ev["kind"] == "truncate"
+                what = "truncates table" if is_trunc else "drops database/schema"
+                target = "a dynamically built name" if dyn else f"'{ev['entity']}'"
                 findings.append(
                     ConsequenceFinding(
-                        finding_id=f"PG-D10-SCHEMA-{fd.file_path}",
+                        finding_id=f"PG-D10-{'TRUNCATE' if is_trunc else 'DROPDB'}-{fd.file_path}-{ev['line']}",
                         detector_id=DETECTOR_D10_MIGRATION,
-                        consequence_class=c_class,
-                        tier=TIER_VERIFIED,
-                        confidence=CONFIDENCE_HIGH,
-                        severity=sev,
-                        policy_recommendation=pol,
-                        summary=summary_msg,
+                        consequence_class="CATASTROPHIC_DATA_WIPEOUT",
+                        tier=TIER_LIKELY if dyn else TIER_VERIFIED,
+                        confidence=CONFIDENCE_MEDIUM if dyn else CONFIDENCE_HIGH,
+                        severity=SEVERITY_HIGH if dyn else SEVERITY_CRITICAL,
+                        policy_recommendation=POLICY_REVIEW if dyn else POLICY_BLOCK,
+                        summary=f"Migration '{fd.file_path}' {what} {target}, permanently erasing its data.",
                         affected_files=(fd.file_path,),
-                        affected_symbols=tuple(all_entities),
-                        evidence=tuple(ev_items),
+                        affected_symbols=(ev["entity"],),
+                        evidence=(
+                            EvidenceItem(
+                                kind="TABLE_TRUNCATE" if is_trunc else "DATABASE_OR_SCHEMA_DROP",
+                                file=fd.file_path,
+                                line=ev["line"],
+                                symbol=ev["entity"],
+                                detail=f"Line {ev['line']}: {ev['snippet']}",
+                            ),
+                        ),
                         remediation=(
-                            "Adhere to the expand-and-contract pattern: avoid dropping columns or tables in the same deployment as application changes. "
-                            "Ensure migration downgrade/rollback functions are fully implemented with backward compatibility."
+                            "Avoid TRUNCATE in automated production migrations; use soft archiving, batched "
+                            "deletion or an explicit, reviewed maintenance procedure."
+                            if is_trunc
+                            else "Dropping an entire database or schema must never ship in an automated migration."
                         ),
                     )
                 )
+
+            # 2. Table / column drops (grouped per migration file)
+            schema_events = [ev for ev in new_events if ev["kind"] in ("table", "column")]
+            if not schema_events:
+                continue
+            literal = [ev for ev in schema_events if not ev["dynamic"]]
+            reasons: List[str] = [file_reason] if (file_reason and literal) else []
+            for r in sorted({ev["irrev"] for ev in literal if ev["irrev"]}):
+                reasons.append(r)
+            irreversible = bool(literal) and bool(reasons)
+            all_dynamic = not literal
+
+            ev_items: List[EvidenceItem] = [
+                EvidenceItem(
+                    kind="SCHEMA_TABLE_DROPPED" if ev["kind"] == "table" else "SCHEMA_COLUMN_DROPPED",
+                    file=fd.file_path,
+                    line=ev["line"],
+                    symbol=ev["entity"],
+                    detail=(
+                        f"Line {ev['line']}: dropped {'table' if ev['kind'] == 'table' else 'column'} "
+                        f"'{ev['entity']}' ({ev['snippet']})"
+                    ),
+                )
+                for ev in schema_events
+            ]
+            for r in reasons:
+                ev_items.append(
+                    EvidenceItem(kind="ROLLBACK_UNAVAILABLE", file=fd.file_path, line=None, symbol=None, detail=r)
+                )
+
+            entities = [ev["entity"] for ev in schema_events]
+            shown = ", ".join(entities[:3]) + (f" (+{len(entities) - 3} more)" if len(entities) > 3 else "")
+            if irreversible:
+                summary_msg = f"Migration '{fd.file_path}' drops {shown} and cannot be rolled back: {reasons[0]}."
+            elif all_dynamic:
+                summary_msg = (
+                    f"Migration '{fd.file_path}' drops a table/column whose name is built at runtime; "
+                    "the target could not be resolved statically."
+                )
+            else:
+                summary_msg = f"Migration '{fd.file_path}' drops persistent schema element(s): {shown}."
+
+            all_symbols: List[str] = []
+            for ev in schema_events:
+                if ev["entity"] not in all_symbols:
+                    all_symbols.append(ev["entity"])
+                if "." in ev["entity"]:
+                    col_bare = ev["entity"].split(".")[-1]
+                    if col_bare not in all_symbols:
+                        all_symbols.append(col_bare)
+            findings.append(
+                ConsequenceFinding(
+                    finding_id=f"PG-D10-SCHEMA-{fd.file_path}",
+                    detector_id=DETECTOR_D10_MIGRATION,
+                    consequence_class="IRREVERSIBLE_PERSISTENCE_DROP" if irreversible else "DESTRUCTIVE_PERSISTENCE_MIGRATION",
+                    tier=TIER_LIKELY if all_dynamic else TIER_VERIFIED,
+                    confidence=CONFIDENCE_MEDIUM if all_dynamic else CONFIDENCE_HIGH,
+                    severity=SEVERITY_CRITICAL if irreversible else SEVERITY_HIGH,
+                    policy_recommendation=POLICY_BLOCK if irreversible else POLICY_REVIEW,
+                    summary=summary_msg,
+                    affected_files=(fd.file_path,),
+                    affected_symbols=tuple(all_symbols),
+                    evidence=tuple(ev_items),
+                    remediation=(
+                        "Follow expand-and-contract: stop reading/writing the column or table in a prior deploy, "
+                        "then drop it in a separate migration. Provide a working rollback (downgrade/down) "
+                        "or document why the drop is intentionally irreversible."
+                    ),
+                )
+            )
 
         return findings
 
