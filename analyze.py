@@ -28,7 +28,7 @@ import os
 import structural_parser
 import consequence_engine
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 
 # ==============================================================================

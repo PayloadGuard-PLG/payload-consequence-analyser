@@ -2,6 +2,47 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-25 — v1.5.0: Workflow Integrity (D08), Test Erosion (D09), Migration Loss (D10) & Build Wrapper Security
+
+### What was built
+
+Shipped PayloadGuard v1.5.0, expanding the Semantic Consequence Graph (`consequence.v1`) with three new deterministic detectors (`D08`, `D09`, `D10`), extending `D05` with build wrapper tampering detection, and hardening multi-language AST/tokenizer parsing across GitHub Actions workflows, test frameworks, and database persistence layers.
+
+### Detectors & Capabilities Shipped in v1.5.0
+
+**1. `D08_WORKFLOW_INTEGRITY` (CI/CD Supply Chain & Pipeline Security):**
+- **Expression Injection (W02 / CWE-78):** Flags untrusted GitHub event expressions (`${{ github.event.pull_request.title }}`, `${{ github.head_ref }}`, etc.) interpolated directly inside `run:` shell blocks (`UNTRUSTED_WORKFLOW_EXPRESSION_INJECTION`, `BLOCK`). Recommends intermediate `env:` variable binding.
+- **Pwn Request Checkout (W01):** Detects `pull_request_target` workflows checking out untrusted pull request head code (`PULL_REQUEST_TARGET_UNTRUSTED_CHECKOUT`, `BLOCK` with write permissions or secrets access, `REVIEW` otherwise).
+- **Action SHA Pin Downgrade:** Flags GitHub Actions downgraded from immutable 40-character commit SHAs to mutable tags or branch names (`ACTION_PIN_DOWNGRADE`, `REVIEW`).
+- **CI Gate Weakening:** Detects newly added `continue-on-error: true` flags or `permissions: write-all` on modified workflows (`CI_GATE_WEAKENED`, `REVIEW`).
+- **Privileged `workflow_run` Artifact Poisoning:** Detects privileged `workflow_run` triggers downloading untrusted PR artifacts without intermediate sandboxing (`WORKFLOW_RUN_UNTRUSTED_ARTIFACT`, `REVIEW`).
+- **Unpinned Third-Party Actions:** Flags newly introduced third-party actions using mutable tags rather than immutable SHAs (`ACTION_PIN_UNPINNED`, `WARN`). Official first-party `actions/*` and `github/*` namespaces are excluded to eliminate alert fatigue.
+
+**2. `D09_TEST_EROSION` (Test Suite Preservation & Contract Enforcement):**
+- **Tautological Assertion Replacement:** Detects test functions where substantive assertions were hollowed out or replaced with tautologies (`assert True`, `assert 1 == 1`, `expect(true).toBe(true)`), preventing attackers from silently gutting regression tests while keeping CI green (`TEST_ASSERTION_EROSION`, `BLOCK`).
+- **Newly Introduced Test Skips:** Detects newly added test-skipping decorators (`@pytest.mark.skip`, `@pytest.mark.xfail`, `it.skip`, `@Disabled`, `@Ignore`) and runtime skip invocations (`pytest.skip()`, `t.Skip()`), preventing bypass of failing tests (`TEST_SKIPPED_NEWLY`, `REVIEW`).
+
+**3. `D10_MIGRATION_PERSISTENCE_LOSS` (Database & Schema Integrity):**
+- **Catastrophic Wipe-Outs:** Flags `TRUNCATE TABLE` and `DROP DATABASE` / `DROP SCHEMA` statements in automated migrations (`CATASTROPHIC_DATA_WIPEOUT`, `BLOCK`).
+- **Multi-Line SQL AST & Tokenizer:** Parses multi-line SQL statements across inline comments (`/* ... */`, `--`), line breaks, and bracketed/backtick-quoted identifiers (`ALTER TABLE ... DROP [COLUMN]`).
+- **Forward-vs-Rollback Boundary Isolation:** Accurately isolates forward migration operations from rollback code across Alembic (`upgrade()` vs `downgrade()`), Knex/TypeORM/Sequelize (`up()` vs `down()`), Rails ActiveRecord (`change` vs `up`/`down`), and Goose/sql-migrate (`-- +goose Up` vs `-- +goose Down`, paired `*.up.sql`/`*.down.sql`). Legitimate rollback drops emit zero false positives.
+- **Framework-Aware Irreversibility Detection:** Flags Rails `change` migrations using `drop_table` without schema definition blocks, Django migrations using `RunSQL` without `reverse_sql`, and empty/missing `downgrade()` / `down()` functions as `IRREVERSIBLE_PERSISTENCE_DROP` (`BLOCK`). Reversible drops are flagged for review (`DESTRUCTIVE_PERSISTENCE_MIGRATION`, `REVIEW`).
+- **Directory Scoping:** Strictly scopes analysis to migration directories, excluding test fixtures, seeds, docs, and samples.
+
+**4. `D05` Build Wrapper Tampering:**
+- Flags remote script execution and reverse shell patterns (`curl | sh`, `wget | bash`) inside build wrappers (`mvnw`, `gradlew`, `Makefile`, `build.sh`) as `BUILD_WRAPPER_TAMPERING` (`BLOCK`).
+
+**5. Structural Parser Hardening:**
+- Updated `_collect_python_const_bools` in `structural_parser.py` to traverse nested function definitions, correctly identifying variables mutated via `nonlocal` or nested assignment and eliminating false-positive short-circuit detections on inner helper functions.
+
+### Test & Harness Verification Results
+
+- **Pytest Suite:** 330 passed, 0 failed in 2.39s (`test_analyzer.py` + `test_consequence_engine.py`).
+- **Harness Mutation Suite:** 16/16 passed (0 False Positives, 0 False Negatives).
+- **Harness Manifest Oracle (`validate_manifest.py --verify-consequence`):** 41/41 test case entries verified across SQLite schemas v1+v2 and Consequence Engine v1 oracle assertions.
+
+---
+
 ## 2026-10-23 — SCG Consequence Engine (`consequence.v1`) & `D01`–`D06` v2 shipped + validated
 
 ### What was built

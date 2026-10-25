@@ -1,104 +1,127 @@
 # PayloadGuard
 
-**Version:** 1.4.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Updated:** October 2026
+**Version:** 1.5.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Updated:** October 2026
 
 [![Dafny Verification](https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml/badge.svg)](https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml)
+[![Pytest Suite](https://img.shields.io/badge/pytest-330%20passed-brightgreen.svg)](#test-suite--formal-verification)
+[![Formal Proofs](https://img.shields.io/badge/formal%20proofs-36%20contracts%20%7C%2010%20Z3%20%7C%2012%20Dafny-blue.svg)](PROOFS.md)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Formally verified** — 36 CrossHair contracts · 10 Z3 SMT proofs · 12 Dafny postconditions · 315 tests pass · 3 independent proof methods. → [`PROOFS.md`](PROOFS.md)
+**Formally verified** — 36 CrossHair contracts • 10 Z3 SMT proofs • 12 Dafny postconditions • **330 tests pass (100%)** • 3 independent proof methods. → [`PROOFS.md`](PROOFS.md)
 
-PayloadGuard is a GitHub Action and multi-language consequence analysis engine that forensically scans pull requests for destructive, deceptive, or malicious code payloads before they reach your main branch.
+PayloadGuard is a GitHub Action and pre-merge consequence analysis engine that forensically scans pull requests for destructive, deceptive, or supply-chain payloads before they reach your default branch.
 
-It was built for the class of attack where a branch held open for months lands as a *"minor fix"* and wipes the codebase in a single merge — as well as subtle adversarial payloads that invert security guards, swallow transaction rollbacks, gut renamed symbols into no-op stubs, or distribute capability removals below per-file deletion thresholds. Wire it to branch protection and the merge button is blocked automatically.
+It was engineered for the class of attacks and human errors that slip past standard linters, test runners, and merge queues: branches held open for months that land as a *"minor fix"* and wipe the codebase in a single merge, tests that pass only because assertions were silently replaced with tautologies (`assert True`), database migrations that permanently wipe production data without rollback procedures, CI workflows modified to execute untrusted PR expressions, and security guards neutralized with boolean short-circuits (`if not verify() and False:`). 
+
+Wire PayloadGuard to your branch protection rules, and catastrophic pull requests are blocked automatically.
+
+---
+
+## Key Benefits
+
+- **Deterministic & Instant CI Integration:** Runs in seconds directly inside GitHub Actions with **zero LLM dependency**, **zero external API latency**, and **zero non-determinism**.
+- **Semantic Change Graph (SCG) Consequence Engine (`consequence.v1`):** Understands high-level program structure across Python, JavaScript, TypeScript, Go, Rust, and Java. Distinguishes benign symbol renames and cross-file moves from hollow stubs, broken callers, and deleted capabilities.
+- **Catches What Test Suites and Linters Miss:**
+  - **Test Erosion (`D09`):** Flags tests gutted into tautologies (`assert True`, `expect(true).toBe(true)`) or newly skipped (`@pytest.mark.skip`, `t.Skip()`).
+  - **CI Workflow Integrity (`D08`):** Blocks untrusted expression injection in `run:` shell blocks, `pull_request_target` untrusted checkout ("Pwn Request"), action SHA pin downgrades, and `continue-on-error: true` gate weakening.
+  - **Migration & Persistence Protection (`D10`):** Blocks `TRUNCATE` and `DROP DATABASE/SCHEMA` in automated migrations; isolates forward migration drops from rollback procedures across Alembic, Knex, Rails, Goose, and Django.
+  - **Security Guard Regressions (`D06`):** Detects removed auth decorators, dropped transaction rollbacks, inverted guard polarities, and `and False` / `|| true` short-circuits.
+  - **Build Wrapper Tampering (`D05`):** Detects unauthorized remote downloads or reverse shells (`curl | sh`) inside `mvnw`, `gradlew`, `Makefile`, and `build.sh`.
+- **Formally Verified Decision Engine:** Scoring thresholds, severity floors, and verdict bijections are mathematically proven across CrossHair symbolic execution, Z3 SMT theorem proving, and Dafny machine-checked proofs.
+- **Actionable Remediation Guidance:** Every finding includes exact line numbers, source snippets, affected symbols, and precise remediation advice formatted in interactive, collapsible GitHub markdown comments and SARIF 2.1.0 output.
 
 ---
 
 ## What PayloadGuard Detects
 
-| Threat | Example |
-|---|---|
-| Mass deletion disguised as a refactor | 312-day-old branch submitted as *"minor syntax fix"*, deleting 60 files and 11,967 lines |
-| Structural gutting & stub replacement | Authentication layer silently removed function by function across multiple files, or renamed and gutted into `pass` / `return None` stubs (`D02`) |
-| Distributed deletion & threshold gaming | Removing 1 capability per file across 5 files (`A03`) or padding deleted security methods with trivial 1-line getters (`A06`) (`D03`) |
-| Broken cross-file callers & API contracts | Deleting a function/method or tightening required parameters while callers (including aliased imports) still invoke the old contract (`D04`) |
-| Security guard & rollback regression | Removing `@require_auth` decorators, dropping `self._rollback()`, inverting guard polarity (`if not verify()` $\to$ `if verify()`), inserting early `return True` bypasses, or swallowing exceptions (`D06`) |
-| Deceptive PR descriptions | Description says *"update config"* — diff deletes the entire security module (`L5b`) |
-| Workflow poisoning | Base64 payloads, credential exfiltration, OIDC token theft, dormant triggers (`L2c`) |
-| AI tooling config poisoning | Malicious `.claude/settings.json` or `package.json` hook that executes when a developer opens the repo in an AI coding agent or IDE (`L2d`) |
-| Supply chain & manifest drift | Unverified packages added to manifests (`L2b`) or manifest dependencies changed without lockfile updates (`D05`) |
-| Typosquatted CI actions | `aws-actions-unofficial/` instead of `aws-actions/` — OIDC token handed to attacker |
+| Threat Category | Detector / Layer | Real-World Attack / Error Scenario | Default Policy |
+|---|---|---|---|
+| **Mass Deletion Disguised as Refactor** | `L1`, `L2`, `L4` | 312-day-old branch submitted as *"minor syntax fix"*, deleting 60 files and 11,967 lines | `BLOCK` |
+| **Structural Gutting & Stub Replacement** | `D02_BODY_WEAKENING` | Security or authentication methods renamed and gutted into `pass`, `...`, or `return None` stubs | `BLOCK` |
+| **Distributed Loss & Threshold Gaming** | `D03_COMPOUND_LOSS` | Removing 1 security function per file across 5 files (`A03`) or padding deleted methods with trivial getters (`A06`) | `BLOCK` |
+| **Broken Cross-File Callers & API Breaks** | `D04_PUBLIC_API_BREAK` | Deleting exported functions or tightening required parameters while surviving callers (including aliased imports) still invoke the old contract | `BLOCK` |
+| **Build Wrapper Script Tampering** | `D05_BUILD_DEPENDENCY_DELTA` | Remote script execution or reverse shell (`curl \| sh`) injected into `mvnw`, `gradlew`, `Makefile`, or `build.sh` | `BLOCK` |
+| **Manifest Dependency Drift** | `D05_BUILD_DEPENDENCY_DELTA` | Dependency added to `package.json` or `pyproject.toml` without accompanying lockfile update | `REVIEW` |
+| **Security Guard & Rollback Regression** | `D06_GUARD_REGRESSION` | Removing `@require_auth`, dropping `self._rollback()`, inverting guard polarity (`if not verify()` $	o$ `if verify()`), or inserting `and False` short-circuits | `BLOCK` |
+| **Untrusted CI Expression Injection** | `D08_WORKFLOW_INTEGRITY` | Interpolating untrusted context (`${{ github.event.pull_request.title }}`) directly inside `run:` shell blocks (W02 / CWE-78) | `BLOCK` |
+| **Pwn Request Checkout** | `D08_WORKFLOW_INTEGRITY` | Combining privileged `pull_request_target` trigger with checkout of untrusted pull request head ref (W01) | `BLOCK` |
+| **Action SHA Pin Downgrade** | `D08_WORKFLOW_INTEGRITY` | Action downgraded from an immutable 40-character commit SHA to a mutable tag or branch (`@v4`, `@main`) | `REVIEW` |
+| **CI Gate Weakening** | `D08_WORKFLOW_INTEGRITY` | Adding `continue-on-error: true` to required test/lint steps or adding broad `permissions: write-all` | `REVIEW` |
+| **Privileged Artifact Poisoning** | `D08_WORKFLOW_INTEGRITY` | Privileged `workflow_run` trigger downloading and unpacking untrusted artifacts without sandboxing | `REVIEW` |
+| **Test Assertion Erosion** | `D09_TEST_EROSION` | Substantive test assertions replaced with tautologies (`assert True`, `expect(true).toBe(true)`), keeping CI green while gutting coverage | `BLOCK` |
+| **Newly Skipped Tests** | `D09_TEST_EROSION` | Adding test-skip decorators (`@pytest.mark.skip`, `@pytest.mark.xfail`, `it.skip`) or runtime skip calls (`pytest.skip()`, `t.Skip()`) | `REVIEW` |
+| **Catastrophic Persistence Wipe-Out** | `D10_MIGRATION_PERSISTENCE_LOSS` | Migration executing `TRUNCATE TABLE` or `DROP DATABASE` / `DROP SCHEMA` on persistent data | `BLOCK` |
+| **Irreversible Schema Drop** | `D10_MIGRATION_PERSISTENCE_LOSS` | Dropping tables or columns with empty/missing `downgrade()`, Rails `change` without block, or Django `RunSQL` without `reverse_sql` | `BLOCK` |
+| **Destructive Migration Drop** | `D10_MIGRATION_PERSISTENCE_LOSS` | Dropping persistent table or column in forward migration (with working rollback procedure) | `REVIEW` |
+| **Workflow Actions Poisoning & OIDC** | `L2c` | Workflow files modified to exfiltrate secrets, steal OIDC tokens, or forge CI identities | `BLOCK` |
+| **AI Tooling Config Poisoning** | `L2d` | Malicious `.claude/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, or lifecycle scripts executing on folder open | `BLOCK` |
+| **Deceptive PR Descriptions** | `L5b` | PR description says *"minor copy fix"* while the diff alters authentication or drops database tables | `BLOCK` |
 
 ---
 
 ## Analysis Tiers
 
-PayloadGuard has three tiers of analysis. Each tier is a superset of the one before it. Start with **Core** and add tiers as your threat model requires.
+PayloadGuard operates across three analysis tiers. Each tier builds on the one before it:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  CORE  (L1 · L2 · L3)                                       │
-│  Surface scan → Forensic analysis → Verdict                 │
-│  Dependency: GitPython only                                 │
-├─────────────────────────────────────────────────────────────┤
-│  STANDARD  (adds L2c · L2d · L4 · L5a · L5b)               │
-│  + Workflow poisoning · AI config poisoning                 │
-│  + Structural drift · Temporal drift · Semantic transparency│
-│  Dependency: adds tree-sitter grammars                      │
-├─────────────────────────────────────────────────────────────┤
+│  CORE  (L1 • L2 • L2b • L3)                                 │
+│  Surface scan → Forensic file analysis → Weighted scoring   │
+│  Zero external dependencies (GitPython, PyYAML, PyJWT)      │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│  STANDARD  (adds L2c • L2d • L4 • L5a • L5b • consequence.v1│
+│  + CI workflow integrity (D08) & Actions poisoning (L2c)    │
+│  + AI tooling configuration poisoning (L2d)                 │
+│  + Semantic Change Graph Consequence Engine (D01–D10)       │
+│  + Test erosion (D09) & Migration persistence loss (D10)    │
+│  + Temporal drift (L5a) & Semantic transparency (L5b)       │
+│  Dependencies: Tree-sitter multi-language grammars          │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
 │  FULL  (adds L5c)                                           │
-│  + eBPF runtime agent — blocks exfiltration on the runner   │
-│  Dependency: adds Linux BPF support                         │
+│  + eBPF runner runtime agent (execve, egress, ptrace)       │
+│  Dependencies: Linux runner with kernel BPF support         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Core — L1, L2, L3
+---
 
-The minimum viable deployment. Catches bulk deletion attacks, critical-path file removal, suspicious added files, and unverified dependency injection. No additional system dependencies beyond GitPython.
+## SCG Consequence Engine (`consequence.v1`)
 
-| Layer | What it does |
-|---|---|
-| **L1 — Surface Scan** | File and line counts, deletion ratios, binary files, permission changes, symlinks |
-| **L2 — Forensic Analysis** | Critical-path deletions, security-sensitive file removal, added file content (shell patterns, CI triggers) |
-| **L2b — SCA** | Package manifest diffs scanned against your allowlist for unverified dependencies |
-| **L3 — Consequence Model** | Weighted scoring across all signals → single deterministic verdict |
+The Consequence Engine (`consequence_engine.py`) matches `base` and `head` symbols through a 5-stage Semantic Change Graph (SCG) pipeline:
+1. **Exact ID Match:** Matches qualified symbols unchanged in name and container.
+2. **Body Hash & Signature Match:** Detects symbols moved across files or renamed within the same container when their normalized AST tokens match.
+3. **Cross-File Move Resolution:** Tracks symbols transferred across module boundaries.
+4. **Fuzzy Container / Member Match:** Distinguishes genuine refactoring from structural gutting.
+5. **Residual Classification:** Emits symbol transitions (`ADDED`, `MODIFIED`, `DELETED`, `RENAMED`, `MOVED`).
 
-**Verdict:** SAFE · REVIEW · CAUTION · DESTRUCTIVE  
-**Exit codes:** `0` = SAFE/REVIEW/CAUTION · `1` = analysis error · `2` = DESTRUCTIVE (merge blocked)
+### Consequence Detectors Reference
 
-### Standard — adds L2c, L2d, L4, L5a, L5b, and SCG Consequence Engine (`consequence.v1`)
-
-Adds layers that catch sophisticated evasion: workflow-based attacks, AI tooling config poisoning, structural gutting distributed across files, Semantic Change Graph (SCG) differential consequence analysis, stale branches from slow-burn campaigns, and PRs with descriptions designed to mislead reviewers.
-
-| Layer | What it adds |
-|---|---|
-| **L2c — Actions Poisoning** | Workflow files scanned for base64 payloads, credential exfiltration, OIDC escalation, forged identities, dormant triggers, unsafe `pull_request_target` |
-| **L2d — AI Config Poisoning** | AI tooling config files scanned for shell commands in session hooks, folder-open tasks, lifecycle scripts, `binding.gyp` shell chains, MCP local server commands, and Cursor NL imperatives — 9 file surfaces |
-| **L4 — Structural Drift** | AST-level diff — which named classes, functions, and constants were deleted, per file and cross-file |
-| **SCG Consequence Engine (`consequence.v1`)** | 5-stage symbol matching across renames/moves + 6 deterministic consequence detectors (`D01`–`D06`) covering stub weakening, distributed loss (`A03`), threshold gaming (`A06`), broken callers/API contracts, manifest drift, and guard/rollback regressions (`shadow`/`advisory`/`enforce`) |
-| **L5a — Temporal Drift** | Branch age × target commit velocity — quantified staleness score to catch slow-burn campaigns |
-| **L5b — Semantic Transparency** | Whether the PR description matches what the diff actually does |
-
-**Additional dependency:** tree-sitter grammar packages (Python, JS/TS, Go, Rust, Java — see `requirements.txt`)
-
-### Full — adds L5c
-
-Adds the eBPF runtime agent to monitor the CI runner itself during a scan. Captures outbound network connections, process execution, ptrace activity, and `/proc/mem` access. Can operate in audit or block mode.
-
-| Layer | What it adds |
-|---|---|
-| **L5c — Runtime Agent** | eBPF tracepoints: execve · egress connect · ptrace · procmem — audit log or block mode |
-
-**Additional dependency:** Linux kernel with BPF support. Requires elevated runner permissions (`SYS_BPF`, `SYS_PTRACE`). See [Runtime Agent setup](#runtime-agent-l5c).
+| Detector ID | Consequence Classes | Epistemic Tier | Default Policy | Description |
+|---|---|---|---|---|
+| `D01_PARSER_INCOMPLETE` | `ANALYSIS_INCOMPLETE` | `ANALYSIS_INCOMPLETE` | `WARN` / `REVIEW` | File syntax errors, missing grammar packages, or unsupported extensions. |
+| `D02_BODY_WEAKENING` | `BODY_GUTTED`, `RENAME_WITH_BODY_WEAKENING`, `AMBIGUOUS_REFACTOR` | `VERIFIED_CONSEQUENCE` | `BLOCK` / `WARN` | Surviving or renamed symbols gutted to no-op stubs (`pass`, `...`, `return None`, empty `{}`). |
+| `D03_COMPOUND_LOSS` | `DISTRIBUTED_SYMBOL_LOSS`, `THRESHOLD_GAMING_DELETION` | `VERIFIED_CONSEQUENCE` | `BLOCK` / `REVIEW` | Cross-file sub-threshold deletion (`A03`) and deletion-ratio dilution via trivial getters (`A06`). |
+| `D04_PUBLIC_API_BREAK` | `UNRESOLVED_CALLER`, `PUBLIC_API_REMOVAL`, `PUBLIC_API_SIGNATURE_BREAK` | `VERIFIED_CONSEQUENCE` | `BLOCK` / `REVIEW` | Deleted symbols with surviving callers (including aliased imports) or broken signatures. |
+| `D05_BUILD_DEPENDENCY_DELTA` | `BUILD_WRAPPER_TAMPERING`, `BUILD_SCRIPT_MODIFICATION`, `DEPENDENCY_LOCKFILE_MISMATCH` | `VERIFIED_CONSEQUENCE` | `BLOCK` / `REVIEW` | Remote script execution in build wrappers (`mvnw`, `gradlew`), lifecycle scripts, or unpinned dependencies. |
+| `D06_GUARD_REGRESSION` | `SECURITY_GUARD_REMOVED`, `SECURITY_GUARD_WEAKENED` | `VERIFIED_CONSEQUENCE` | `BLOCK` | Removed auth decorators, dropped transaction rollbacks, inverted polarities, or `and False` short-circuits. |
+| `D08_WORKFLOW_INTEGRITY` | `UNTRUSTED_WORKFLOW_EXPRESSION_INJECTION`, `PULL_REQUEST_TARGET_UNTRUSTED_CHECKOUT`, `ACTION_PIN_DOWNGRADE`, `CI_GATE_WEAKENED`, `WORKFLOW_RUN_UNTRUSTED_ARTIFACT`, `ACTION_PIN_UNPINNED` | `VERIFIED_CONSEQUENCE` | `BLOCK` / `REVIEW` / `WARN` | Untrusted expression injection, Pwn Request checkout, SHA pin downgrade, gate weakening, and unpinned 3rd-party actions. |
+| `D09_TEST_EROSION` | `TEST_ASSERTION_EROSION`, `TEST_SKIPPED_NEWLY` | `VERIFIED_CONSEQUENCE` | `BLOCK` / `REVIEW` | Test assertions replaced with tautologies (`assert True`) or newly skipped test decorators/calls. |
+| `D10_MIGRATION_PERSISTENCE_LOSS` | `CATASTROPHIC_DATA_WIPEOUT`, `IRREVERSIBLE_PERSISTENCE_DROP`, `DESTRUCTIVE_PERSISTENCE_MIGRATION` | `VERIFIED_CONSEQUENCE` | `BLOCK` / `REVIEW` | Automated `TRUNCATE`, `DROP DATABASE`, irreversible table/column drops, or forward schema removals. |
 
 ---
 
-## Quick Start
+## GitHub Action Installation & Setup
 
-### Core (recommended starting point)
+### 1. Add Workflow to Your Repository
 
-Add `.github/workflows/payloadguard.yml` to your repository:
+Create `.github/workflows/payloadguard.yml` in your default branch:
 
 ```yaml
-name: PayloadGuard
+name: PayloadGuard Analysis
 
 on:
   pull_request:
@@ -106,402 +129,247 @@ on:
 
 jobs:
   scan:
+    name: PayloadGuard Pre-Merge Consequence Analysis
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: write       # Required to post interactive review comments
+      security-events: write     # Required if saving SARIF to GitHub Code Scanning
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0         # Required: full git history needed for merge-base analysis
 
-      - name: PayloadGuard Scan
+      - name: Run PayloadGuard Scan
         id: payloadguard
         uses: PayloadGuard-PLG/payload-consequence-analyser@main
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           pr-description: ${{ github.event.pull_request.body }}
+          save-markdown: payloadguard-report.md
 
-      - name: Enforce verdict
+      - name: Enforce Merge Policy
         if: always()
         env:
           EXIT_CODE: ${{ steps.payloadguard.outputs.exit-code }}
         run: |
-          if [ "$EXIT_CODE" = "1" ]; then exit 1; fi
-          if [ "$EXIT_CODE" = "2" ]; then exit 2; fi
+          echo "PayloadGuard scan exited with code: $EXIT_CODE"
+          if [ "$EXIT_CODE" = "2" ]; then
+            echo "::error::PayloadGuard detected verified DESTRUCTIVE code consequences. Merge is blocked."
+            exit 2
+          fi
+          if [ "$EXIT_CODE" = "1" ]; then
+            echo "::error::PayloadGuard encountered an analysis error."
+            exit 1
+          fi
+          echo "PayloadGuard verdict is SAFE or REVIEW. Proceed with review."
 ```
 
-Set the `scan` job as a **required status check** in your branch protection rules. DESTRUCTIVE PRs fail the check and cannot be merged.
+### 2. Configure Branch Protection (Enforce Blocking)
 
-### Standard (adds workflow + structural analysis)
+To prevent pull requests with destructive payloads from merging:
+1. In your GitHub repository, navigate to **Settings** → **Branches** → **Branch protection rules**.
+2. Select your default branch (e.g., `main`).
+3. Check **Require status checks to pass before merging**.
+4. Search for and select the `scan` (or `PayloadGuard Pre-Merge Consequence Analysis`) check.
+5. Save changes. Any PR with verified destructive consequences (`exit code 2`) will now fail the check and block the merge button.
 
-Same workflow as above — all Standard layers activate automatically when tree-sitter grammars are available. The action installs them via `requirements.txt` on the runner.
+### 3. Consequence Modes
 
-To add the PR description for semantic analysis (recommended):
+PayloadGuard supports three policy enforcement modes configured via `payloadguard.yml` or `--consequence-mode`:
 
+| Mode | Behavior | Use Case |
+|---|---|---|
+| `shadow` *(default)* | Runs all consequence detectors, logs findings in JSON, PR comments, and SARIF, but does not escalate the exit code to `2`. | Initial trial / baseline observation in existing repositories. |
+| `advisory` | Emits findings, labels findings in PR comments, requests human review for `POLICY_REVIEW` / `POLICY_WARN`, but allows override. | Team transition / soft enforcement. |
+| `enforce` | Verified blocking consequences (`POLICY_BLOCK`) immediately set the exit code to `2`, blocking CI merge checks. | Production repositories requiring strict pre-merge safety guarantees. |
+
+To enforce blocking mode via your workflow:
 ```yaml
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          pr-description: ${{ github.event.pull_request.body }}
-```
-
-### Full (adds eBPF runtime agent)
-
-```yaml
-    permissions:
-      contents: read
-      pull-requests: write
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: PayloadGuard Scan
-        id: payloadguard
+      - name: Run PayloadGuard Scan (Enforce)
         uses: PayloadGuard-PLG/payload-consequence-analyser@main
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           pr-description: ${{ github.event.pull_request.body }}
         env:
-          PAYLOADGUARD_RUNTIME: "1"
+          PYTHONUTF8: "1"
 ```
-
-The runtime agent requires a Linux runner with BPF capabilities. See [Runtime Agent setup](#runtime-agent-l5c) for kernel requirements and block-mode configuration.
+Or place a `payloadguard.yml` in your repository root:
+```yaml
+consequence:
+  mode: enforce
+```
 
 ---
 
-## Installation
+## Local CLI Usage
 
-### From the GitHub Actions Marketplace
+You can run PayloadGuard locally or in custom CI pipelines without GitHub Actions:
 
-Reference `PayloadGuard-PLG/payload-consequence-analyser@main` in your workflow. No local install required.
-
-### Python package
+### Installation via pip
 
 ```bash
 pip install payloadguard-plg
 ```
 
-### From source
+### From Source
 
 ```bash
 git clone https://github.com/PayloadGuard-PLG/payload-consequence-analyser.git
-
-# Core only (GitPython, PyYAML, PyJWT, requests)
-pip install gitpython pyyaml pyjwt requests
-
-# Standard (adds tree-sitter grammars for L4 structural analysis)
+cd payload-consequence-analyser
 pip install -r requirements.txt
 ```
 
-**Python 3.8+** required.
-
----
-
-## CLI Usage
-
-Scan a branch locally without opening a PR:
+### Running Scans
 
 ```bash
-# Core scan (consequence engine runs in shadow mode by default)
-python analyze.py . feature/auth-refactor main
+# Basic scan of a feature branch against main
+python analyze.py . feature/my-branch main
 
-# With PR description (enables semantic transparency — L5b)
-python analyze.py . feature/auth-refactor main \
-  --pr-description "Refactor authentication module"
+# Scan with PR description for Semantic Transparency analysis (Layer 5b)
+python analyze.py . feature/my-branch main   --pr-description "Add user profile endpoint and migrate session table"
 
-# Run with SCG Consequence Engine enforcement (shadow | advisory | enforce)
-python analyze.py . feature/auth-refactor main --consequence-mode enforce
+# Run in strict consequence enforcement mode
+python analyze.py . feature/my-branch main --consequence-mode enforce
 
-# Save JSON, GitHub Markdown, and SARIF 2.1.0 Code Scanning reports
-python analyze.py . feature/auth-refactor main --save-json
-python analyze.py . feature/auth-refactor main --save-markdown reports/scan.md
-python analyze.py . feature/auth-refactor main --save-sarif reports/payloadguard.sarif
+# Generate JSON, GitHub Markdown, and SARIF 2.1.0 reports
+python analyze.py . feature/my-branch main   --save-json reports/scan.json   --save-markdown reports/scan.md   --save-sarif reports/scan.sarif
 ```
+
+### Exit Codes
+
+| Exit Code | Meaning | Action in CI |
+|---|---|---|
+| `0` | `SAFE`, `REVIEW`, or `CAUTION` | Proceed with standard peer review |
+| `1` | `ANALYSIS_ERROR` | Infrastructure or git execution error |
+| `2` | `DESTRUCTIVE` | **Merge blocked** — verified destructive consequence detected |
 
 ---
 
-## Real Incident Reconstruction
+## Configuration (`payloadguard.yml`)
 
-This is the verdict PayloadGuard would have produced on the April 2026 incident — a branch open for 312 days, submitted as a *"minor syntax fix"*, containing a diff that deleted 60 files, 11,967 lines, and the entire application architecture.
-
-```
-======================================================================
-PAYLOADGUARD ANALYSIS: codex-suggestion → main
-======================================================================
-
-📅 TEMPORAL
-   Branch age: 312 days
-   Branch commit: fa3c21d (2025-06-04)
-   Target commit: b87e90a (2026-04-22)
-
-📁 FILE CHANGES
-   Added:       2   Deleted:  61   Modified:   4   Total: 67
-
-   61 files deleted — DESTRUCTIVE threshold exceeded (>50).
-
-📝 LINE CHANGES
-   Added:       214   Deleted: 11,967   Net: -11,753
-   Deletion ratio: 98.2%
-
-   98.2% deletion ratio — almost the entire changeset is removal.
-
-🧬 STRUCTURAL DRIFT (Layer 4)
-   Overall severity: CRITICAL
-   src/core/auth.py: 12 nodes deleted (94.0%) [CRITICAL]
-      Removed: AuthManager, SessionStore, TokenValidator,
-               PermissionGate, RoleRegistry
-
-⏱  TEMPORAL DRIFT (Layer 5a)
-   Status: DANGEROUS   Drift score: 3120.0
-   Target velocity: 10.0 commits/day
-
-🔎 SEMANTIC TRANSPARENCY (Layer 5b) — DECEPTIVE_PAYLOAD
-   MCI score: 0.700
-   Signals:   scope_understated, operation_mutation
-   ❌ DO NOT MERGE. PR description is inconsistent with actual diff scope.
-
-🔍 VERDICT: DESTRUCTIVE [CRITICAL]
-   ❌ DO NOT MERGE — This would catastrophically alter the codebase
-
-   Flags:
-   ⚠  Branch is 312 days old
-   ⚠  61 files deleted (massive scope)
-   ⚠  98.2% deletion ratio
-   ⚠  Structural drift CRITICAL — core authentication layer removed
-   ⚠  11,967 lines deleted
-   ⚠  5 critical-path files deleted
-   ⚠  Description contradicts actual severity
-======================================================================
-```
-
-Every signal was present and quantifiable before the merge button was pressed.
-
----
-
-## GitHub App (optional — named check runs)
-
-Without GitHub App secrets the scan still runs and the verdict is enforced via exit code. The App is only needed to post a named **PayloadGuard** check in the PR checks tab.
-
-Register a GitHub App and add three secrets to your repo:
-
-| Secret | Value |
-|---|---|
-| `PAYLOADGUARD_APP_ID` | App ID from GitHub App settings |
-| `PAYLOADGUARD_PRIVATE_KEY` | RSA private key (PEM format) |
-| `PAYLOADGUARD_INSTALLATION_ID` | Installation ID from `github.com/settings/installations` |
+Place `payloadguard.yml` in your repository root to customize rules and thresholds. All fields are optional:
 
 ```yaml
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          pr-description: ${{ github.event.pull_request.body }}
-          app-id: ${{ secrets.PAYLOADGUARD_APP_ID }}
-          private-key: ${{ secrets.PAYLOADGUARD_PRIVATE_KEY }}
-          installation-id: ${{ secrets.PAYLOADGUARD_INSTALLATION_ID }}
-```
+# Consequence Engine Configuration
+consequence:
+  mode: enforce                       # shadow | advisory | enforce
+  max_repo_files: 500                 # max head files indexed for cross-file caller verification
 
----
-
-## Configuration
-
-Place `payloadguard.yml` in your repository root to override defaults. All fields are optional.
-
-```yaml
+# Structural & Deletion Thresholds
 thresholds:
-  branch_age_days: [90, 180, 365]    # days → +1/+2/+3 score
-  files_deleted:   [10, 20, 50]      # files → +1/+2/+3 score
+  branch_age_days: [90, 180, 365]     # days → +1/+2/+3 score
+  files_deleted:   [10, 20, 50]       # files → +1/+2/+3 score
   lines_deleted:   [5000, 10000, 50000]
   temporal:
-    stale:     250                   # drift_score threshold (STALE)
-    dangerous: 1000                  # drift_score threshold (DANGEROUS)
+    stale:     250                    # drift_score threshold (STALE)
+    dangerous: 1000                   # drift_score threshold (DANGEROUS)
   structural:
-    deletion_ratio:    0.20          # 20% of nodes deleted → CRITICAL
+    deletion_ratio:    0.20           # 20% of symbols deleted → CRITICAL
     min_deleted_nodes: 3
 
+# Software Composition Analysis (SCA)
 sca:
-  fail_on_unknown: true              # unverified package → +3 score
+  fail_on_unknown: true               # Unverified package in manifest → +3 score
 
+# GitHub Actions Security
 actions:
   enabled: true
   critical_signal_score: 5
   high_signal_score: 3
   trusted_oidc_consumers:
-    - my-org/custom-deploy-action    # add your own OIDC consumers here
+    - my-org/custom-deploy-action
 
+# Semantic Transparency Analysis
 semantic:
   micro_scope_churn_limit: 50
   insertion_ratio_fix_threshold: 0.9
-
-consequence:
-  mode: shadow                       # shadow | advisory | enforce
-  max_repo_files: 200                # max head files indexed for cross-file caller verification
 ```
 
-### SCA Allowlist (Layer 2b)
+### Approved Dependencies Allowlist (`allowlist.yml`)
 
-Create `allowlist.yml` listing approved packages. Any package in a manifest diff not on the allowlist scores +3.
+If `sca.fail_on_unknown: true` is configured, dependencies added in package manifests (`package.json`, `requirements.txt`, `pyproject.toml`, `Gemfile`, `go.mod`) are checked against `allowlist.yml`:
 
 ```yaml
 packages:
   - requests
-  - numpy
-  - django
+  - pydantic
+  - sqlalchemy
+  - tree-sitter
 ```
 
 ---
 
-## Runtime Agent: L5c
+## Test Suite & Formal Verification
 
-The eBPF agent monitors the CI runner itself during execution. It captures four event types:
+PayloadGuard's consequence and scoring logic is mathematically proven to eliminate non-deterministic scoring errors. A flaw would have to produce an identical error across three independent mathematical frameworks simultaneously:
 
-| Event | What it catches |
-|---|---|
-| `execve` | Unexpected process spawning — shells, interpreters, downloaders |
-| `egress_connect` | Outbound network connections — data exfiltration, C2 callbacks |
-| `ptrace_attach` | Process injection attempts |
-| `procmem_open` | `/proc/<pid>/mem` read access — memory scraping |
-
-**Kernel requirements:** Linux 5.4+ with `CONFIG_BPF=y`, `CONFIG_BPF_SYSCALL=y`. The agent uses BTF type info — kernel must be compiled with `CONFIG_DEBUG_INFO_BTF=y`.
-
-**Audit mode** (default) — events are logged to the JSON report. No blocking.
-
-**Block mode** — set `PAYLOADGUARD_RUNTIME_BLOCK=1`. Detected events send `SIGKILL` to the offending process.
-
-```yaml
-        env:
-          PAYLOADGUARD_RUNTIME: "1"
-          PAYLOADGUARD_RUNTIME_BLOCK: "1"    # optional — block rather than audit
-```
-
----
-
-## Technical Reference
-
-### Verdict Scoring
-
-The verdict is a deterministic function of `severity_score ∈ [0, 36]`:
-
-| Score | Verdict | Meaning |
+| Method | Specification & Tool | What is Proven |
 |---|---|---|
-| 0 | SAFE | No signals detected |
-| 1–2 | REVIEW | Minor signals — human review recommended |
-| 3–4 | CAUTION | Elevated signals — scrutinise before merging |
-| ≥ 5 | DESTRUCTIVE | Merge blocked |
+| **SMT Prover** | **Z3** | Score upper bounds, verdict bijection, safety-critical floors, empty-input guarantees (P1–P10). |
+| **Symbolic Execution** | **CrossHair** | Postcondition contracts across consequence scoring, structural drift, temporal drift, and semantic transparency (C1–C12, S1–S7, T1–T7, M1–M9). |
+| **Machine-Checked Proofs** | **Dafny** | Full input domain coverage and 12 machine-checked postconditions verified with zero verification errors (POST-1–12). |
 
-### Score Contributions
-
-| Signal | Points |
-|---|---|
-| Branch age > 90 / 180 / 365 days | +1 / +2 / +3 |
-| Files deleted > 10 / 20 / 50 | +1 / +2 / +3 |
-| Deletion ratio > 50% / 70% / 90% (≥100 lines) | +1 / +2 / +3 |
-| Lines deleted > 5k / 10k / 50k | +1 / +2 / +3 |
-| Critical path files deleted | +2 |
-| Security files deleted | +5 |
-| Structural severity CRITICAL (L4) | +5 |
-| Unverified dependency — SCA (per package) | +3 |
-| Added file content: shell or CI patterns | +2 per match, capped +4 |
-| Actions poisoning CRITICAL signal (L2c) | +5 |
-| Actions poisoning HIGH signal (L2c) | +3 |
-| AI config poisoning CRITICAL signal (L2d) | +5 |
-| AI config poisoning HIGH signal (L2d) | +3 |
-
-The three deletion sub-scores (files, ratio, lines) are correlated and capped to prevent triple-counting.
-
-### Actions Poisoning Signals (L2c)
-
-| Signal | Severity | Description |
-|---|---|---|
-| `base64_payload` | CRITICAL | Base64-encoded content piped to a shell interpreter |
-| `credential_harvest` | CRITICAL | Env var exfiltration, cloud metadata endpoint, secret grep |
-| `pull_request_target_with_write_permissions` | CRITICAL | pwn-request attack vector |
-| `oidc_elevation_typosquatted` | CRITICAL | OIDC consumer name typosquatted against a known-safe prefix |
-| `dormant_trigger_with_payload` | HIGH | `workflow_dispatch` or `schedule` + shell execution — hidden activation |
-| `forged_bot_author` | HIGH | Git identity configured to impersonate a known bot |
-| `oidc_elevation_no_consumer` | HIGH | `id-token: write` with no recognised OIDC consumer |
-| `dangerous_trigger_pull_request_target` | HIGH | `pull_request_target` without write permissions |
-
-### AI Config Poisoning Signals (L2d)
-
-Scans added or modified AI tooling config files across 9 surfaces: `.claude/settings.json`, `.gemini/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, `package.json`, `composer.json`, `Gemfile`, `binding.gyp`, and `mcp.json`.
-
-| Signal | Severity | Description |
-|---|---|---|
-| `command_in_session_hook` | CRITICAL | Shell command in a Claude/Gemini `SessionStart` hook |
-| `command_in_folder_open_task` | CRITICAL | VS Code task with `runOn: folderOpen` + dangerous shell command |
-| `lifecycle_script_hijack` | CRITICAL | `preinstall`/`postinstall`/`prepare` npm script with dangerous command |
-| `composer_post_install` | CRITICAL | Composer `post-install-cmd` / `post-update-cmd` with dangerous command |
-| `gemfile_system_call` | CRITICAL | Top-level `system()`, `exec()`, or backtick expression in a Gemfile |
-| `binding_gyp_command_substitution` | CRITICAL | Shell chain (`\|\|`, `&&`, output redirect) inside a `binding.gyp` `<!()` |
-| `cursor_nl_exec_imperative` | HIGH | Cursor rule with `alwaysApply: true` and an execute imperative |
-| `mcp_local_server_command` | HIGH | MCP server config launching a repo-local script |
-| `hidden_unicode` | HIGH | Zero-width, bidi, or Unicode tag-block characters in any config value |
-
-### Temporal Drift (L5a)
-
-`drift_score = branch_age_days × target_commits_per_day`
-
-| Status | drift_score | Meaning |
-|---|---|---|
-| CURRENT | < 250 | Branch context is valid |
-| STALE | 250–999 | Significant divergence — review diff carefully |
-| DANGEROUS | ≥ 1,000 | Rebase required before merging |
-
-### Structural Analysis Languages (L4 & `consequence.v1`)
-
-| Language | Tracked constructs (`SymbolFact` v1 + legacy L4) |
-|---|---|
-| Python | Functions, methods, classes, async functions, module-level assignments, decorators, call sites, guard conditions, import aliases |
-| JavaScript / JSX | Functions, methods, classes, arrow functions, variable declarators, ES/CommonJS exports & imports, call sites, guard conditions |
-| TypeScript / TSX | Functions, methods, classes, interfaces, type aliases, enums, exports & imports, call sites, guard conditions |
-| Go | Functions, receiver-qualified methods, structs, interfaces, type specs, const specs, call sites, guard conditions |
-| Rust | Functions, `impl`-qualified methods, structs, enums, traits, const and static items, `use` aliases, call sites, guard conditions |
-| Java | Methods, classes, interfaces, enums, annotations, visibility modifiers, call sites, guard conditions |
-
-Files in languages without an installed grammar or with syntax errors are reported explicitly via `D01_PARSER_INCOMPLETE` (`PARSE_ERROR`, `GRAMMAR_UNAVAILABLE`, `UNSUPPORTED_EXTENSION`).
-
-### SCG Consequence Engine (`consequence.v1`)
-
-The Consequence Engine (`consequence_engine.py`) matches `base` and `head` symbols through a 5-stage Semantic Change Graph (SCG) pipeline (exact ID $\to$ same-container signature/body match $\to$ cross-file move $\to$ container/member similarity rename $\to$ residual `REMOVED`/`ADDED`) and runs six deterministic detectors:
-
-| Detector ID | Consequence Classes | Epistemic Tier | Policy | What it detects |
-|---|---|---|---|---|
-| `D01_PARSER_INCOMPLETE` | `ANALYSIS_INCOMPLETE` | `ANALYSIS_INCOMPLETE` | `WARN` / `REVIEW` | Syntax errors (`PARSE_ERROR`), missing grammar packages, or unsupported extensions |
-| `D02_BODY_WEAKENING` / `D02_AMBIGUOUS_REFACTOR` | `BODY_GUTTED`, `RENAME_WITH_BODY_WEAKENING`, `AMBIGUOUS_REFACTOR` | `VERIFIED_CONSEQUENCE` / `ANALYSIS_INCOMPLETE` | `BLOCK` / `WARN` | Surviving or renamed/moved symbols whose bodies were gutted to no-op stubs (`pass`, `...`, `return None`, empty `{}`) |
-| `D03_COMPOUND_LOSS` | `DISTRIBUTED_SYMBOL_LOSS`, `THRESHOLD_GAMING_DELETION` | `VERIFIED_CONSEQUENCE` / `LIKELY_CONSEQUENCE` | `BLOCK` / `REVIEW` | Cross-file sub-threshold capability deletion (`A03`) and deletion-ratio dilution via trivial 1-line getters/comment padding (`A06`) |
-| `D04_PUBLIC_API_BREAK` | `UNRESOLVED_CALLER`, `PUBLIC_API_REMOVAL`, `PUBLIC_API_SIGNATURE_BREAK`, `PUBLIC_API_VISIBILITY_REDUCED` | `VERIFIED_CONSEQUENCE` / `LIKELY_CONSEQUENCE` | `BLOCK` / `REVIEW` / `WARN` | Removed symbols with surviving cross-file callers (including aliased imports), tightened required parameters breaking call sites, or reduced export visibility |
-| `D05_BUILD_DEPENDENCY_DELTA` | `BUILD_SCRIPT_MODIFICATION`, `DEPENDENCY_LOCKFILE_MISMATCH` | `VERIFIED_CONSEQUENCE` / `LIKELY_CONSEQUENCE` | `BLOCK` / `REVIEW` / `WARN` | Suspicious lifecycle script commands (`package.json`) and manifest dependency changes without accompanying lockfile updates |
-| `D06_GUARD_REGRESSION` | `SECURITY_GUARD_REMOVED`, `SECURITY_GUARD_WEAKENED` | `VERIFIED_CONSEQUENCE` | `BLOCK` | Removed security decorators/rollback calls, inverted guard condition polarity (`if not verify()` $\to$ `if verify()`), neutralized guard branches (`raise` $\to$ `pass`), unconditional early-return bypasses, and swallowed exception handlers |
-
----
-
-## Formal Verification
-
-PayloadGuard's scoring and consequence models are mathematically verified to ensure deterministic outputs. A bug would have to produce a consistent false result across three independent frameworks simultaneously to go undetected.
-
-| Framework | What is proven |
-|---|---|
-| **CrossHair** — symbolic execution | Consequence model (C1–C12), structural drift (S1–S7), temporal drift (T1–T7), semantic transparency (M1–M9) |
-| **Z3** — SMT theorem prover | Score bounds, verdict bijection, safety-critical floors, empty-input guarantee (P1–P10) |
-| **Dafny** — machine-checked proofs | Full input domain coverage, 12 postconditions verified, 0 errors (POST-1–11a + POST-12) |
-
-**Current test state:** 315 tests pass (`test_analyzer.py` + `test_consequence_engine.py`), 7 proof-wrapper tests skipped without external solver install.
-
-→ [`VERIFICATION.md`](VERIFICATION.md) — contracts, methods, and run instructions  
-→ [`VERIFICATION_SPEC.md`](VERIFICATION_SPEC.md) — formal specification for external auditors
-
----
-
-## Contributing
+### Test Metrics
 
 ```bash
-python -m pytest test_analyzer.py test_consequence_engine.py tests/proofs/ -q
+# Run complete test suite
+python -m pytest test_analyzer.py test_consequence_engine.py -q
+# 330 passed in 2.39s
 ```
 
-315 pass, 7 skip. New detection signals require test coverage in the relevant layer's test class. Open findings are tracked in [`AUDIT_LOG.md`](AUDIT_LOG.md).
+- **Core & Consequence Test Suite:** **330 passed, 0 failed** (`test_analyzer.py` + `test_consequence_engine.py`).
+- **Mutation Suite:** **16 / 16 passed** with **0 False Positives and 0 False Negatives** ([`run_mutation_suite.py`](tools/run_mutation_suite.py)).
+- **Harness Manifest Oracle:** **41 / 41 passed** across schema validations and Consequence Engine v1 assertions ([`validate_manifest.py`](tools/validate_manifest.py)).
+
+Detailed specifications and mathematical proofs are documented in [`VERIFICATION.md`](VERIFICATION.md) and [`PROOFS.md`](PROOFS.md).
 
 ---
 
-*PayloadGuard is maintained by [PayloadGuard-PLG](https://github.com/PayloadGuard-PLG).*
+## What's New in v1.5.0
+
+PayloadGuard **v1.5.0** introduces major enhancements across CI/CD pipeline integrity, test suite preservation, database persistence security, and AST parsing robustness:
+
+1. **`D08_WORKFLOW_INTEGRITY`:**
+   - Detects untrusted expression injection in `run:` shell blocks (`${{ github.event.pull_request.title }}`).
+   - Blocks `pull_request_target` workflows checking out untrusted PR head code ("Pwn Request").
+   - Flags immutable 40-character commit SHA pin downgrades to mutable refs.
+   - Detects CI gate weakening via added `continue-on-error: true` flags or broad `permissions: write-all`.
+   - Flags privileged `workflow_run` triggers downloading untrusted PR artifacts without sandboxing.
+   - Flags newly introduced unpinned third-party actions while excluding official `actions/*` and `github/*` namespaces.
+2. **`D09_TEST_EROSION`:**
+   - Detects test assertions gutted into tautologies (`assert True`, `expect(true).toBe(true)`), preventing silent test coverage destruction.
+   - Detects newly introduced test-skip decorators (`@pytest.mark.skip`, `@pytest.mark.xfail`) and runtime skip calls (`pytest.skip()`, `t.Skip()`).
+3. **`D10_MIGRATION_PERSISTENCE_LOSS`:**
+   - Blocks catastrophic `TRUNCATE TABLE` and `DROP DATABASE` / `DROP SCHEMA` statements in automated migrations.
+   - Tokenizer-based multi-line SQL statement parsing handling inline comments (`/* ... */`, `--`), whitespace, and quoted identifiers (`ALTER TABLE ... DROP COLUMN`).
+   - Forward-vs-rollback boundary isolation across Alembic, Knex/TypeORM/Sequelize, Rails ActiveRecord, Goose/sql-migrate, and Django. Drops inside rollback functions emit zero false positives.
+   - Framework-aware irreversibility analysis flagging Rails `change` drops without blocks and Django `RunSQL` without `reverse_sql` as `BLOCK`.
+4. **`D05` Build Wrapper Tampering:**
+   - Detects remote script execution and reverse shell patterns (`curl | sh`, `wget | bash`) inside build wrappers (`mvnw`, `gradlew`, `Makefile`, `build.sh`).
+5. **Parser Scope Hardening:**
+   - Fixed `_collect_python_const_bools` in `structural_parser.py` to traverse nested function scopes, correctly identifying variables mutated via `nonlocal` or nested assignment and eliminating false-positive short-circuit flags on inner helper functions.
+
+---
+
+## Contributing & Development
+
+```bash
+# Clone the repository
+git clone https://github.com/PayloadGuard-PLG/payload-consequence-analyser.git
+cd payload-consequence-analyser
+
+# Install development dependencies
+pip install -r requirements.txt
+
+# Run full test suite
+python -m pytest test_analyzer.py test_consequence_engine.py -q
+```
+
+All new detectors require corresponding test cases in [`test_consequence_engine.py`](test_consequence_engine.py). Open findings and vulnerability disclosures are tracked in [`AUDIT_LOG.md`](AUDIT_LOG.md).
+
+---
+
+*PayloadGuard is engineered and maintained by [PayloadGuard-PLG](https://github.com/PayloadGuard-PLG).*
