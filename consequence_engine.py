@@ -25,6 +25,8 @@ Core Capabilities & Detectors:
 
 from __future__ import annotations
 
+import ast
+import bisect
 import json
 import os
 import re
@@ -87,6 +89,9 @@ DETECTOR_D03_COMPOUND = "D03_COMPOUND_LOSS"
 DETECTOR_D04_API = "D04_PUBLIC_API_BREAK"
 DETECTOR_D05_BUILD = "D05_BUILD_DEPENDENCY_DELTA"
 DETECTOR_D06_GUARD = "D06_GUARD_REGRESSION"
+DETECTOR_D08_WORKFLOW = "D08_WORKFLOW_INTEGRITY"
+DETECTOR_D09_TEST = "D09_TEST_EROSION"
+DETECTOR_D10_MIGRATION = "D10_MIGRATION_PERSISTENCE_LOSS"
 
 # Security & Integrity Guard / Critical Symbol Vocabulary
 _SECURITY_SYMBOL_TOKENS = frozenset({
@@ -134,6 +139,792 @@ _SUSPICIOUS_SCRIPT_PATTERNS = re.compile(
     r"node\s+-e\s+['\"].*child_process|base64\s+-d\s*\|)",
     re.IGNORECASE,
 )
+
+# Build Wrapper Basenames for D05
+_BUILD_WRAPPER_BASENAMES = frozenset({
+    "mvnw", "mvnw.cmd", "gradlew", "gradlew.bat", "makefile", "gnumakefile", "build.sh", "make.bat",
+})
+
+# Workflow / Action Integrity Patterns for D08
+_WORKFLOW_OR_ACTION_PATH_RE = re.compile(
+    r"(?:^|/)(?:\.github/workflows/[^/]+\.ya?ml|(?:\.github/actions/[^/]+/)?action\.ya?ml)$",
+    re.IGNORECASE,
+)
+
+_UNTRUSTED_GH_EXPR_RE = re.compile(
+    r"\$\{\{\s*("
+    r"github\.head_ref\b"
+    r"|github\.event\.(?:pull_request|issue|discussion)\.(?:title|body)\b"
+    r"|github\.event\.pull_request\.head\.(?:ref|label|repo\.default_branch)\b"
+    r"|github\.event\.(?:comment|review|review_comment)\.body\b"
+    r"|github\.event\.pages\[[^\]]*\]\.page_name\b"
+    r"|github\.event\.commits\[[^\]]*\]\.(?:message|author\.(?:name|email))\b"
+    r"|github\.event\.head_commit\.(?:message|author\.(?:name|email))\b"
+    r"|github\.event\.workflow_run\.(?:head_branch|head_commit\.message)\b"
+    r")[^}]*\}\}",
+    re.IGNORECASE,
+)
+
+_SHA40_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+
+_PRT_TRIGGER_RE = re.compile(r"\bpull_request_target\b")
+_PRT_UNTRUSTED_REF_RE = re.compile(
+    r"ref\s*:\s*['\"]?\$\{\{\s*github\.event\.pull_request\.head\.(?:sha|ref)\b"
+    r"|ref\s*:\s*['\"]?refs/pull/",
+    re.IGNORECASE,
+)
+_WORKFLOW_WRITE_OR_SECRETS_RE = re.compile(
+    r"(?:permissions\s*:\s*write-all\b"
+    r"|(?:contents|pull-requests|packages|deployments|id-token|actions|security-events|statuses|checks)\s*:\s*write\b"
+    r"|\$\{\{\s*secrets\.)",
+    re.IGNORECASE,
+)
+
+# Test Skip Decorators for D09
+_TEST_SKIP_DECORATOR_TOKENS = frozenset({
+    "skip", "skipif", "xfail", "expectedfailure", "disabled", "ignore",
+})
+
+
+# Migration & Persistence Patterns for D10
+# ---------------------------------------------------------------------------
+# D10 analyses FORWARD migration code only. Rollback code (Alembic downgrade(),
+# Knex/TypeORM/Sequelize down(), Rails `def down`, goose/sql-migrate/dbmate Down
+# sections, *.down.sql / Flyway undo files) legitimately drops what the forward
+# migration created and must never be reported as data loss.
+_MIGRATION_DIR_TOKENS = frozenset({"migrations", "migration", "migrate", "flyway", "liquibase"})
+_MIGRATION_EXCLUDED_DIRS = frozenset({
+    "test", "tests", "__tests__", "spec", "specs", "testdata", "test_data",
+    "seed", "seeds", "seeders", "seeding", "fixture", "fixtures",
+    "example", "examples", "sample", "samples", "doc", "docs",
+    "node_modules", "vendor", "third_party", "site-packages",
+})
+_MIGRATION_EXTS = (".sql", ".py", ".rb", ".js", ".mjs", ".cjs", ".ts")
+_FLYWAY_VERSIONED_RE = re.compile(r"^v\d+(?:[._]\d+)*__.+\.sql$", re.IGNORECASE)
+_ROLLBACK_SQL_FILE_RE = re.compile(
+    r"(?:^|[._-])(?:down|rollback|undo)\.sql$|^u\d+(?:[._]\d+)*__.+\.sql$",
+    re.IGNORECASE,
+)
+_UP_SQL_FILE_RE = re.compile(r"(?:^|[._-])up\.sql$", re.IGNORECASE)
+_TEMP_TABLE_PREFIXES = ("temp_", "tmp_", "staging_", "_scratch", "temporary")
+
+# Comment / string tokenisers per migration language. Comments are blanked
+# (replaced by spaces, newlines kept) so offsets and line numbers stay aligned;
+# string literals are kept because migrations embed SQL in strings.
+_COMMENT_STRING_RES: Dict[str, "re.Pattern[str]"] = {
+    "sql": re.compile(
+        r"(?P<c>--[^\n]*|/\*.*?(?:\*/|\Z))|(?P<s>'(?:[^']|'')*'|\"[^\"]*\"|`[^`]*`)",
+        re.S,
+    ),
+    "js": re.compile(
+        r"(?P<c>//[^\n]*|/\*.*?(?:\*/|\Z))"
+        r"|(?P<s>'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\"|`(?:\\.|[^`\\])*`)",
+        re.S,
+    ),
+    "py": re.compile(
+        r"(?P<c>#[^\n]*)"
+        r"|(?P<s>'''(?:\\.|[^\\])*?'''|\"\"\"(?:\\.|[^\\])*?\"\"\"|'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\")",
+        re.S,
+    ),
+    "rb": re.compile(
+        r"(?P<c>^=begin\b.*?^=end\b[^\n]*|#[^\n]*)|(?P<s>'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\")",
+        re.S | re.M,
+    ),
+}
+
+# SQL statement grammar (statement-level, whitespace/newline tolerant)
+_SQL_IDENT_PART = r'(?:\\?"[^"\n\\]+\\?"|`[^`\n]+`|\[[^\]\n]+\]|[A-Za-z_][\w$]*)'
+_SQL_IDENT = _SQL_IDENT_PART + r"(?:[ \t]*\.[ \t]*" + _SQL_IDENT_PART + r")*"
+_SQL_IDENT_RE = re.compile(_SQL_IDENT)
+# Non-literal table names: f-strings, ${}, #{}, %s, ?, or string concatenation
+_SQL_DYNAMIC_RE = re.compile(
+    r"(?:\{[^}\n]*\}|\$\{[^}\n]*\}|#\{[^}\n]*\}|%\(\w+\)s|%s|\?"
+    r"|\\?[\"'`][ \t]*(?:\+|\|\||\.\.|%|\.format\b)|\+[ \t]*\w)"
+)
+_SQL_LIST_SEP_RE = re.compile(r"[ \t]*,[ \t]*")
+# A literal target must be followed by a statement/string boundary. This rejects
+# English prose such as "truncate long names" inside log strings.
+_SQL_TERMINATOR_RE = re.compile(
+    r"[ \t]*(?:;|\)|\\?[\"'`]|\r?\n|$|,|(?:CASCADE|RESTRICT|PURGE|RESTART|CONTINUE)\b)",
+    re.IGNORECASE,
+)
+_SQL_DROP_TABLE_HEAD_RE = re.compile(r"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?", re.IGNORECASE)
+_SQL_DROP_COLUMN_HEAD_RE = re.compile(r"\bDROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?", re.IGNORECASE)
+_SQL_TRUNCATE_HEAD_RE = re.compile(r"\bTRUNCATE\s+(?:TABLE\s+)?(?:ONLY\s+)?", re.IGNORECASE)
+_SQL_DROP_DB_HEAD_RE = re.compile(r"\bDROP\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+EXISTS\s+)?", re.IGNORECASE)
+_SQL_ALTER_TABLE_RE = re.compile(
+    r"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(" + _SQL_IDENT + r")", re.IGNORECASE
+)
+# `ALTER TABLE t DROP col` (COLUMN keyword omitted; valid in PostgreSQL/MySQL)
+_SQL_ALTER_DROP_IMPLICIT_RE = re.compile(
+    r"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(" + _SQL_IDENT + r")\s+DROP\s+"
+    r"(?!(?:COLUMN|CONSTRAINT|INDEX|KEY|PRIMARY|FOREIGN|CHECK|DEFAULT|NOT|IDENTITY|EXPRESSION"
+    r"|PARTITION|UNIQUE|PERIOD|SYSTEM|FULLTEXT|SPATIAL|IF|TRIGGER|ROW|OIDS)\b)",
+    re.IGNORECASE,
+)
+_SQL_SECTION_MARKER_RE = re.compile(
+    r"^[ \t]*--[ \t]*(?:\+goose[ \t]+(up|down)|\+migrate[ \t]+(up|down)|migrate:(up|down))\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# ORM / DSL drop operations
+_ALEMBIC_DROP_TABLE_RE = re.compile(r"\bop\.drop_table\(\s*(?:table_name\s*=\s*)?[\"']([\w.]+)[\"']")
+_ALEMBIC_DROP_COLUMN_RE = re.compile(
+    r"\bop\.drop_column\(\s*(?:table_name\s*=\s*)?[\"']([\w.]+)[\"']\s*,\s*(?:column_name\s*=\s*)?[\"'](\w+)[\"']"
+)
+_ALEMBIC_BATCH_TABLE_RE = re.compile(r"\bop\.batch_alter_table\(\s*(?:table_name\s*=\s*)?[\"']([\w.]+)[\"']")
+_ALEMBIC_BATCH_DROP_COLUMN_RE = re.compile(
+    r"\b(?!op\.)[A-Za-z_]\w*\.drop_column\(\s*(?:column_name\s*=\s*)?[\"'](\w+)[\"']\s*[,)]"
+)
+_DJANGO_DELETE_MODEL_RE = re.compile(r"\b(?:migrations\.)?DeleteModel\(\s*(?:name\s*=\s*)?[\"'](\w+)[\"']")
+_DJANGO_REMOVE_FIELD_RE = re.compile(r"\b(?:migrations\.)?RemoveField\(")
+_JS_DROP_TABLE_CALL_RE = re.compile(r"\.dropTable(?:IfExists)?\(\s*[\"'`]([\w.]+)[\"'`]")
+_JS_DROP_COLUMN_CALL_RE = re.compile(r"\b([\w$]+)\.(dropColumns?|removeColumn)\(")
+_JS_TABLE_CONTEXT_RE = re.compile(r"\.(?:alterTable|table)\(\s*[\"'`]([\w.]+)[\"'`]")
+_JS_STR_ARG_RE = re.compile(r"[\"'`]([\w.]+)[\"'`]")
+_JS_FN_HEADER_TEMPLATES = (
+    r"\b(?:module\.)?exports\.{n}\s*=\s*",
+    r"(?<![.\w$]){n}\s*:\s*",
+    r"\bexport\s+(?:const|let|var)\s+{n}\b\s*(?::[^=\n]+)?=\s*",
+    r"\bexport\s+(?:default\s+)?(?:async\s+)?function\s+{n}\b\s*",
+    r"(?<![.\w$])(?:(?:public|private|protected|static|override)\s+)*(?:async\s+)?{n}\s*(?=\()",
+)
+_RB_DEF_RE = re.compile(r"^([ \t]*)def[ \t]+(?:self\.)?(up|down|change)\b([^\n]*)$", re.MULTILINE)
+_RB_DROP_TABLE_RE = re.compile(r"(?<![.\w])drop_table\s*\(?\s*[:\"']?(\w+)[\"']?")
+_RB_REMOVE_COLUMN_RE = re.compile(
+    r"(?<![.\w])remove_column\s*\(?\s*[:\"']?(\w+)[\"']?\s*,\s*[:\"']?(\w+)[\"']?"
+)
+_RB_REMOVE_COLUMNS_RE = re.compile(r"(?<![.\w])remove_columns\s*\(?\s*[:\"']?(\w+)[\"']?\s*,([^\n]*)")
+
+# D08: workflow_run as an actual trigger (not merely a `github.event.workflow_run.*` expression)
+_WORKFLOW_RUN_TRIGGER_RE = re.compile(
+    r"^\s*(?:on\s*:\s*(?:\[[^\]\n]*\bworkflow_run\b|workflow_run\b)|workflow_run\s*:|-\s*workflow_run\s*$)",
+    re.MULTILINE,
+)
+# D08: GitHub-owned action namespaces excluded from ACTION_PIN_UNPINNED (third-party only).
+_GITHUB_OWNED_ACTION_OWNERS = frozenset({"actions", "github"})
+
+
+def _is_migration_file(file_path: str) -> bool:
+    """Return True if file_path is a forward database migration.
+
+    Requires a recognised migration directory (migrations/, migration/, migrate/,
+    flyway/, liquibase/, alembic/.../versions/) or a Flyway versioned filename
+    (V<n>__*.sql). Seed, fixture, sample, docs, vendored and test directories are
+    excluded, as are rollback-only SQL files (*.down.sql, *.rollback.sql, Flyway
+    U<n>__ undo scripts).
+    """
+    norm = file_path.replace("\\", "/").lower()
+    parts = [p for p in norm.split("/") if p]
+    if not parts:
+        return False
+    bname, dirs = parts[-1], parts[:-1]
+    if not bname.endswith(_MIGRATION_EXTS) or bname.endswith(".d.ts"):
+        return False
+    if any(d in _MIGRATION_EXCLUDED_DIRS for d in dirs) or bname.startswith("seed"):
+        return False
+    if bname.endswith(".sql") and _ROLLBACK_SQL_FILE_RE.search(bname):
+        return False
+    if any(d in _MIGRATION_DIR_TOKENS for d in dirs):
+        return True
+    if "alembic" in dirs and "versions" in dirs:
+        return True
+    return bool(_FLYWAY_VERSIONED_RE.match(bname))
+
+
+def _migration_language(file_path: str) -> Optional[str]:
+    low = file_path.lower()
+    if low.endswith(".sql"):
+        return "sql"
+    if low.endswith(".py"):
+        return "py"
+    if low.endswith(".rb"):
+        return "rb"
+    if low.endswith((".js", ".mjs", ".cjs", ".ts")):
+        return "js"
+    return None
+
+
+def _is_temp_table_entity(entity: str, kind: str) -> bool:
+    """True when the dropped/truncated TABLE is a temporary/staging table.
+
+    Column names are never treated as temporary (`sensors.temp_celsius` is real data).
+    """
+    if entity == "<dynamic>":
+        return False
+    parts = entity.lower().split(".")
+    if kind == "column":
+        if len(parts) < 2:
+            return False
+        table = parts[-2]
+    else:
+        table = parts[-1]
+    return table.startswith(_TEMP_TABLE_PREFIXES)
+
+
+def _blank_spans(text: str, spans: List[Tuple[int, int]]) -> str:
+    if not spans:
+        return text
+    out: List[str] = []
+    last = 0
+    for s, e in sorted(spans):
+        s = max(s, last)
+        if s >= e:
+            continue
+        out.append(text[last:s])
+        out.append(re.sub(r"[^\n]", " ", text[s:e]))
+        last = e
+    out.append(text[last:])
+    return "".join(out)
+
+
+def _blank_comments(text: str, lang: Optional[str]) -> str:
+    """Replace comments with spaces (quote-aware, offsets preserved)."""
+    rx = _COMMENT_STRING_RES.get(lang or "")
+    if rx is None or not text:
+        return text
+    spans = [m.span() for m in rx.finditer(text) if m.group("c") is not None]
+    return _blank_spans(text, spans)
+
+
+def _line_starts(text: str) -> List[int]:
+    return [0] + [m.end() for m in re.finditer("\n", text)]
+
+
+def _line_of(starts: List[int], offset: int) -> int:
+    return bisect.bisect_right(starts, offset)
+
+
+def _balanced_end(text: str, open_idx: int, limit: int = 200_000) -> int:
+    """Index just past the bracket matching text[open_idx] (quote-aware); bounded scan."""
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    stack = [pairs[text[open_idx]]]
+    i, n, quote = open_idx + 1, min(len(text), open_idx + limit), None
+    while i < n:
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in pairs:
+            stack.append(pairs[ch])
+        elif ch in ")]}":
+            if ch != stack[-1]:
+                return i + 1
+            stack.pop()
+            if not stack:
+                return i + 1
+        i += 1
+    return n
+
+
+def _mk_mig_event(kind: str, entity: str, offset: int, dynamic: bool = False,
+                  irrev: Optional[str] = None, src: str = "orm") -> Dict[str, Any]:
+    return {"kind": kind, "entity": entity, "offset": offset, "dynamic": dynamic, "irrev": irrev, "src": src}
+
+
+def _sql_norm_ident(raw: str) -> str:
+    return re.sub(r'[\\"`\[\]\s]', "", raw)
+
+
+def _sql_parse_targets(text: str, pos: int, allow_list: bool) -> Optional[Tuple[List[str], bool]]:
+    """Parse the target identifier(s) of a destructive SQL statement at `pos`.
+
+    Returns (names, is_dynamic) or None when the text is not a well-formed target.
+    """
+    if _SQL_DYNAMIC_RE.match(text, pos):
+        return ["<dynamic>"], True
+    names: List[str] = []
+    p = pos
+    while True:
+        m = _SQL_IDENT_RE.match(text, p)
+        if not m:
+            break
+        names.append(_sql_norm_ident(m.group(0)))
+        p = m.end()
+        if not allow_list:
+            break
+        sep = _SQL_LIST_SEP_RE.match(text, p)
+        if sep and _SQL_IDENT_RE.match(text, sep.end()) and not _SQL_DYNAMIC_RE.match(text, sep.end()):
+            p = sep.end()
+            continue
+        break
+    if not names:
+        return None
+    if _SQL_DYNAMIC_RE.match(text, p):  # e.g. "DROP TABLE prefix_" + name
+        return ["<dynamic>"], True
+    if not _SQL_TERMINATOR_RE.match(text, p):
+        return None
+    return names, False
+
+
+def _sql_alter_table_before(text: str, pos: int) -> Optional[str]:
+    seg = text[max(0, pos - 2000):pos]
+    semi = seg.rfind(";")
+    if semi != -1:
+        seg = seg[semi + 1:]
+    last = None
+    for m in _SQL_ALTER_TABLE_RE.finditer(seg):
+        last = m
+    return _sql_norm_ident(last.group(1)) if last else None
+
+
+def _extract_sql_events(text: str) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    heads = (
+        (_SQL_DROP_TABLE_HEAD_RE, "table", True),
+        (_SQL_TRUNCATE_HEAD_RE, "truncate", True),
+        (_SQL_DROP_DB_HEAD_RE, "dropdb", False),
+        (_SQL_DROP_COLUMN_HEAD_RE, "column", False),
+    )
+    for head_re, kind, allow_list in heads:
+        for m in head_re.finditer(text):
+            parsed = _sql_parse_targets(text, m.end(), allow_list)
+            if not parsed:
+                continue
+            names, dyn = parsed
+            for nm in names:
+                ent = nm
+                if kind == "column" and not dyn:
+                    tbl = _sql_alter_table_before(text, m.start())
+                    if tbl:
+                        ent = f"{tbl}.{nm}"
+                events.append(_mk_mig_event(kind, ent, m.start(), dyn, src="sql"))
+    for m in _SQL_ALTER_DROP_IMPLICIT_RE.finditer(text):
+        parsed = _sql_parse_targets(text, m.end(), False)
+        if not parsed:
+            continue
+        names, dyn = parsed
+        tbl = _sql_norm_ident(m.group(1))
+        for nm in names:
+            events.append(_mk_mig_event("column", nm if dyn else f"{tbl}.{nm}", m.start(), dyn, src="sql"))
+    return events
+
+
+def _py_body_trivial(body: List[Any]) -> bool:
+    """True if a Python function body cannot restore anything (pass/.../docstring/return None/raise)."""
+    stmts = list(body)
+    if stmts and isinstance(stmts[0], ast.Expr) and isinstance(getattr(stmts[0], "value", None), ast.Constant) \
+            and isinstance(stmts[0].value.value, str):
+        stmts = stmts[1:]
+    if any(isinstance(s, ast.Raise) for s in stmts):
+        return True
+    for s in stmts:
+        if isinstance(s, ast.Pass):
+            continue
+        if isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant):
+            continue
+        if isinstance(s, ast.Return) and (s.value is None or (isinstance(s.value, ast.Constant) and s.value.value is None)):
+            continue
+        return False
+    return True
+
+
+def _py_call_name(func: Any) -> str:
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return ""
+
+
+def _py_is_noop_reverse(node: Any) -> bool:
+    if isinstance(node, ast.Attribute) and node.attr == "noop":
+        return True
+    return isinstance(node, ast.Constant) and node.value in (None, "", [])
+
+
+def _py_migration_structure(
+    src: str, blanked: str
+) -> Tuple[str, List[Tuple[int, int]], Optional[str], List[Tuple[int, int, str]]]:
+    """Return (blanked_text, rollback_spans, irreversible_reason, irreversible_spans) for Python migrations."""
+    starts = _line_starts(src)
+
+    def line_span(first: int, last: int) -> Tuple[int, int]:
+        return starts[first - 1], (starts[last] if last < len(starts) else len(src))
+
+    rollback: List[Tuple[int, int]] = []
+    irrev_spans: List[Tuple[int, int, str]] = []
+    reason: Optional[str] = None
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        tree = None
+
+    if tree is None:
+        for m in re.finditer(r"^(?:async[ \t]+)?def[ \t]+(?:downgrade|down)[ \t]*\(", blanked, re.MULTILINE):
+            nxt = re.compile(r"^\S", re.MULTILINE).search(blanked, m.end())
+            rollback.append((m.start(), nxt.start() if nxt else len(blanked)))
+        return blanked, rollback, None, irrev_spans
+
+    # Blank bare string statements (docstrings) so prose like "drop table users" is not parsed as SQL.
+    doc_spans: List[Tuple[int, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            first_line = src[starts[node.lineno - 1]:].lstrip()
+            if re.match(r"(?i)[rbuf]{0,2}[\"']", first_line):
+                doc_spans.append(line_span(node.lineno, node.end_lineno or node.lineno))
+    blanked = _blank_spans(blanked, doc_spans)
+
+    funcs: Dict[str, Any] = {}
+    containers = [tree.body] + [n.body for n in tree.body if isinstance(n, ast.ClassDef)]
+    for body in containers:
+        for n in body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in ("upgrade", "downgrade", "up", "down"):
+                funcs.setdefault(n.name, n)
+    for nm in ("downgrade", "down"):
+        fn = funcs.get(nm)
+        if fn is not None:
+            first = min([fn.lineno] + [d.lineno for d in fn.decorator_list])
+            rollback.append(line_span(first, fn.end_lineno or fn.lineno))
+
+    module_fns = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    if module_fns & {"upgrade", "up"}:
+        down_fn = funcs.get("downgrade") or funcs.get("down")
+        if down_fn is None:
+            reason = "no downgrade() rollback function is defined"
+        elif _py_body_trivial(down_fn.body):
+            reason = f"{down_fn.name}() is empty or raises instead of restoring the schema"
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _py_call_name(node.func) == "RunSQL":
+            rev = next((kw.value for kw in node.keywords if kw.arg == "reverse_sql"), None)
+            if rev is None and len(node.args) >= 2:
+                rev = node.args[1]
+            if rev is None or _py_is_noop_reverse(rev):
+                s, e = line_span(node.lineno, node.end_lineno or node.lineno)
+                irrev_spans.append((s, e, "RunSQL has no reverse_sql, so Django cannot roll it back"))
+    return blanked, rollback, reason, irrev_spans
+
+
+def _js_expr_end(text: str, p: int) -> int:
+    i, n, depth, quote = p, len(text), 0, None
+    while i < n:
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif depth == 0 and ch in ";,":
+            return i
+        elif depth == 0 and ch == "\n":
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in ".?":
+                i = j
+                continue
+            return i
+        i += 1
+    return n
+
+
+def _js_parse_function_at(text: str, p: int) -> Optional[Tuple[int, str, bool]]:
+    """Parse a function/arrow/method starting at p. Returns (end, body_text, is_expression)."""
+    n = len(text)
+    m = re.compile(r"\s*(?:async\b\s*)?(?:function\b\s*\*?\s*[\w$]*\s*)?").match(text, p)
+    p = m.end() if m else p
+    ident_param = False
+    if p < n and text[p] == "(":
+        p = _balanced_end(text, p)
+    else:
+        mi = re.compile(r"[\w$]+").match(text, p)
+        if not mi:
+            return None
+        p, ident_param = mi.end(), True
+    while p < n and text[p] in " \t\r\n":
+        p += 1
+    if p < n and text[p] == ":":  # TypeScript return type annotation
+        mt = re.compile(r"=>|\{").search(text, p)
+        if not mt:
+            return None
+        p = mt.start()
+    if text.startswith("=>", p):
+        p += 2
+        while p < n and text[p] in " \t\r\n":
+            p += 1
+        if p < n and text[p] == "{":
+            end = _balanced_end(text, p)
+            return end, text[p + 1:end - 1], False
+        end = _js_expr_end(text, p)
+        return end, text[p:end], True
+    if ident_param:
+        return None
+    if p < n and text[p] == "{":
+        end = _balanced_end(text, p)
+        return end, text[p + 1:end - 1], False
+    return None
+
+
+def _js_function_spans(text: str, name: str) -> List[Tuple[int, int, str, bool]]:
+    found: Dict[int, Tuple[int, int, str, bool]] = {}
+    for tmpl in _JS_FN_HEADER_TEMPLATES:
+        for m in re.finditer(tmpl.replace("{n}", name), text):
+            res = _js_parse_function_at(text, m.end())
+            if res:
+                end, body, is_expr = res
+                found.setdefault(end, (m.start(), end, body, is_expr))
+    return sorted(found.values())
+
+
+def _js_body_trivial(body: str, is_expr: bool) -> bool:
+    b = body.strip()
+    if re.match(r"^(?:return\s+)?(?:Promise\.reject\s*\(|throw\b)", b):
+        return True
+    if is_expr:
+        return bool(re.fullmatch(r"\{\s*\}|null|undefined|Promise\.resolve\(\s*\)|", b))
+    b = re.sub(r"\breturn\s*(?:Promise\.resolve\(\s*\)|null|undefined|\{\s*\})?\s*;?", "", b)
+    return not re.sub(r"[\s;]", "", b)
+
+
+def _js_migration_structure(text: str) -> Tuple[List[Tuple[int, int]], Optional[str]]:
+    downs = _js_function_spans(text, "down")
+    rollback = [(s, e) for s, e, _, _ in downs]
+    reason: Optional[str] = None
+    if _js_function_spans(text, "up"):
+        if not downs:
+            reason = "no down() rollback is defined"
+        elif all(_js_body_trivial(body, is_expr) for _, _, body, is_expr in downs):
+            reason = "down() is empty or throws instead of restoring the schema"
+    return rollback, reason
+
+
+def _rb_migration_structure(text: str) -> Tuple[List[Tuple[int, int]], Optional[str], Optional[Tuple[int, int]]]:
+    defs: Dict[str, Tuple[int, int, str]] = {}
+    for m in _RB_DEF_RE.finditer(text):
+        indent, name, rest = m.group(1), m.group(2), m.group(3)
+        if re.search(r";\s*end\s*$", rest):  # one-liner `def down; end`
+            defs.setdefault(name, (m.start(), m.end(), rest.rsplit("end", 1)[0]))
+            continue
+        me = re.compile(r"^" + re.escape(indent) + r"end\b[^\n]*$", re.MULTILINE).search(text, m.end())
+        end = me.end() if me else len(text)
+        defs.setdefault(name, (m.start(), end, text[m.end():me.start() if me else len(text)]))
+    rollback = [defs["down"][:2]] if "down" in defs else []
+    reason: Optional[str] = None
+    if "down" in defs:
+        body = defs["down"][2]
+        if "IrreversibleMigration" in body or not re.sub(r"[\s;]", "", body):
+            reason = "`down` raises ActiveRecord::IrreversibleMigration or is empty"
+    elif "up" in defs and "change" not in defs:
+        reason = "only `up` is defined, so the migration cannot be rolled back"
+    change_span = defs["change"][:2] if "change" in defs else None
+    return rollback, reason, change_span
+
+
+def _sql_migration_structure(raw: str, blanked: str) -> Tuple[List[Tuple[int, int]], Optional[str]]:
+    markers = list(_SQL_SECTION_MARKER_RE.finditer(raw))
+    if not markers:
+        return [], None
+    sections: List[Tuple[str, int, int]] = []
+    for i, m in enumerate(markers):
+        direction = (m.group(1) or m.group(2) or m.group(3) or "").lower()
+        end = markers[i + 1].start() if i + 1 < len(markers) else len(raw)
+        sections.append((direction, m.end(), end))
+    rollback = [(s, e) for d, s, e in sections if d == "down"]
+    downs = [blanked[s:e] for d, s, e in sections if d == "down"]
+    reason: Optional[str] = None
+    if not downs:
+        reason = "the migration has an Up section but no Down section"
+    elif all(not re.sub(r"[\s;]", "", d) for d in downs):
+        reason = "the Down section is empty"
+    return rollback, reason
+
+
+def _extract_py_orm_events(text: str) -> List[Dict[str, Any]]:
+    evs: List[Dict[str, Any]] = []
+    for m in _ALEMBIC_DROP_TABLE_RE.finditer(text):
+        evs.append(_mk_mig_event("table", m.group(1), m.start()))
+    for m in _ALEMBIC_DROP_COLUMN_RE.finditer(text):
+        evs.append(_mk_mig_event("column", f"{m.group(1)}.{m.group(2)}", m.start()))
+    batch_tables = [(m.start(), m.group(1)) for m in _ALEMBIC_BATCH_TABLE_RE.finditer(text)]
+    for m in _ALEMBIC_BATCH_DROP_COLUMN_RE.finditer(text):
+        table = next((nm for pos, nm in reversed(batch_tables) if pos < m.start()), None)
+        evs.append(_mk_mig_event("column", f"{table}.{m.group(1)}" if table else m.group(1), m.start()))
+    for m in _DJANGO_DELETE_MODEL_RE.finditer(text):
+        evs.append(_mk_mig_event("table", m.group(1), m.start()))
+    for m in _DJANGO_REMOVE_FIELD_RE.finditer(text):
+        open_idx = m.end() - 1
+        args = text[open_idx + 1:_balanced_end(text, open_idx) - 1]
+        m_model = re.search(r"model_name\s*=\s*[\"'](\w+)[\"']", args)
+        m_name = re.search(r"(?<!\w)name\s*=\s*[\"'](\w+)[\"']", args)
+        positional = re.findall(r"(?:^|,)\s*[\"'](\w+)[\"']", args)
+        model = m_model.group(1) if m_model else (positional[0] if positional else None)
+        field_name = m_name.group(1) if m_name else (positional[1] if len(positional) > 1 else None)
+        if field_name:
+            evs.append(_mk_mig_event("column", f"{model}.{field_name}" if model else field_name, m.start()))
+    return evs
+
+
+def _extract_js_orm_events(text: str) -> List[Dict[str, Any]]:
+    evs: List[Dict[str, Any]] = []
+    for m in _JS_DROP_TABLE_CALL_RE.finditer(text):
+        evs.append(_mk_mig_event("table", m.group(1), m.start()))
+    contexts = [(m.start(), m.group(1)) for m in _JS_TABLE_CONTEXT_RE.finditer(text)]
+    for m in _JS_DROP_COLUMN_CALL_RE.finditer(text):
+        obj, meth = m.group(1), m.group(2)
+        open_idx = m.end() - 1
+        strs = _JS_STR_ARG_RE.findall(text[open_idx + 1:_balanced_end(text, open_idx) - 1])
+        if not strs:
+            continue
+        table: Optional[str] = None
+        if obj in ("queryRunner", "queryInterface") or meth == "removeColumn":
+            if len(strs) >= 2:
+                table, cols = strs[0], (strs[1:] if meth == "dropColumns" else strs[1:2])
+            else:
+                cols = strs
+        else:
+            table = next((nm for pos, nm in reversed(contexts) if pos < m.start()), None)
+            cols = strs
+        for c in cols:
+            evs.append(_mk_mig_event("column", f"{table}.{c}" if table else c, m.start()))
+    return evs
+
+
+def _extract_rb_events(text: str, change_span: Optional[Tuple[int, int]]) -> List[Dict[str, Any]]:
+    evs: List[Dict[str, Any]] = []
+
+    def in_change(off: int) -> bool:
+        return bool(change_span and change_span[0] <= off < change_span[1])
+
+    def rest_of_line(off: int) -> str:
+        nl = text.find("\n", off)
+        return text[off:nl if nl != -1 else len(text)]
+
+    for m in _RB_DROP_TABLE_RE.finditer(text):
+        irrev = None
+        if in_change(m.start()) and not re.search(r"\bdo\b|\{", rest_of_line(m.end())):
+            irrev = "drop_table inside `change` has no block, so Rails cannot reverse it"
+        evs.append(_mk_mig_event("table", m.group(1), m.start(), irrev=irrev))
+    for m in _RB_REMOVE_COLUMN_RE.finditer(text):
+        irrev = None
+        if in_change(m.start()) and not re.match(r"\s*,", rest_of_line(m.end())):
+            irrev = "remove_column inside `change` has no column type, so Rails cannot reverse it"
+        evs.append(_mk_mig_event("column", f"{m.group(1)}.{m.group(2)}", m.start(), irrev=irrev))
+    for m in _RB_REMOVE_COLUMNS_RE.finditer(text):
+        rest = m.group(2)
+        irrev = None
+        if in_change(m.start()) and "type:" not in rest:
+            irrev = "remove_columns inside `change` has no type:, so Rails cannot reverse it"
+        for piece in rest.split(","):
+            piece = piece.strip()
+            if not piece or re.match(r"^\w+\s*:", piece):
+                continue
+            mc = re.match(r"^[:\"']?(\w+)", piece)
+            if mc:
+                evs.append(_mk_mig_event("column", f"{m.group(1)}.{mc.group(1)}", m.start(), irrev=irrev))
+    return evs
+
+
+@dataclass(frozen=True)
+class _MigrationAnalysis:
+    lang: Optional[str]
+    events: Tuple[Dict[str, Any], ...]
+    reason: Optional[str]
+
+
+def _analyze_migration_source(file_path: str, src: str) -> _MigrationAnalysis:
+    """Extract forward-direction destructive persistence events from one migration snapshot."""
+    lang = _migration_language(file_path)
+    blanked = _blank_comments(src, lang)
+    rollback: List[Tuple[int, int]] = []
+    irrev_spans: List[Tuple[int, int, str]] = []
+    reason: Optional[str] = None
+    change_span: Optional[Tuple[int, int]] = None
+    if lang == "py":
+        blanked, rollback, reason, irrev_spans = _py_migration_structure(src, blanked)
+    elif lang == "js":
+        rollback, reason = _js_migration_structure(blanked)
+    elif lang == "rb":
+        rollback, reason, change_span = _rb_migration_structure(blanked)
+        if change_span:
+            irrev_spans.append((change_span[0], change_span[1], "SQL `execute` inside `change` cannot be reversed by Rails"))
+    elif lang == "sql":
+        rollback, reason = _sql_migration_structure(src, blanked)
+
+    raw_events = _extract_sql_events(blanked)
+    if lang == "py":
+        raw_events += _extract_py_orm_events(blanked)
+    elif lang == "js":
+        raw_events += _extract_js_orm_events(blanked)
+    elif lang == "rb":
+        raw_events += _extract_rb_events(blanked, change_span)
+
+    starts = _line_starts(src)
+    out: List[Dict[str, Any]] = []
+    seen: Set[Any] = set()
+    for ev in sorted(raw_events, key=lambda e: e["offset"]):
+        off = ev["offset"]
+        if any(s <= off < e for s, e in rollback):
+            continue
+        if ev["irrev"] is None and (lang != "rb" or ev["src"] == "sql"):
+            for s, e, why in irrev_spans:
+                if s <= off < e:
+                    ev["irrev"] = why
+                    break
+        line = _line_of(starts, off)
+        line_txt = src[starts[line - 1]:(starts[line] if line < len(starts) else len(src))].strip()
+        if ev["dynamic"]:
+            key = (ev["kind"], "<dynamic>", re.sub(r"\s+", " ", line_txt))
+        else:
+            key = (ev["kind"], ev["entity"].lower())
+        if (key, line) in seen:
+            continue
+        seen.add((key, line))
+        ev.update(line=line, key=key, snippet=line_txt[:200])
+        out.append(ev)
+    return _MigrationAnalysis(lang=lang, events=tuple(out), reason=reason)
+
+
+def _sql_sibling_down_reason(file_path: str, by_path: Dict[str, "FileDeltaInput"]) -> Optional[str]:
+    """For `*.up.sql` migrations, inspect a sibling `*.down.sql` changed in the same delta."""
+    norm = file_path.replace("\\", "/")
+    bname = norm.rsplit("/", 1)[-1]
+    if not _UP_SQL_FILE_RE.search(bname):
+        return None
+    idx = norm.lower().rfind("up.sql")
+    sibling = norm[:idx] + "down.sql"
+    sfd = by_path.get(sibling) or by_path.get(norm[:idx] + "DOWN.sql")
+    if sfd is None:
+        return None
+    if sfd.change_type == "D" or not sfd.head_source:
+        return f"its rollback file '{sibling}' is deleted in this change"
+    if not re.sub(r"[\s;]", "", _blank_comments(sfd.head_source, "sql")):
+        return f"its rollback file '{sibling}' is empty"
+    return None
+
+
+
+
+
+def _is_test_path(file_path: str) -> bool:
+    """Return True if file_path looks like a unit/integration test file."""
+    norm = file_path.replace("\\", "/").lower()
+    parts = [p for p in norm.split("/") if p]
+    if any(p in ("test", "tests", "__tests__", "spec", "specs") for p in parts[:-1]):
+        return True
+    bname = parts[-1] if parts else norm
+    return (
+        bname.startswith("test_")
+        or "_test." in bname
+        or ".test." in bname
+        or ".spec." in bname
+        or bname.endswith("test.java")
+        or bname.endswith("tests.java")
+    )
 
 
 def _is_security_relevant_name(name: str) -> bool:
@@ -800,7 +1591,7 @@ class ConsequenceEngine:
         stage_timing["symbol_matching"] = (time.perf_counter() - t2) * 1000.0
 
         # ------------------------------------------------------------------
-        # Stage D: Run Detectors D01 - D06
+        # Stage D: Run Detectors D01 - D09
         # ------------------------------------------------------------------
         t3 = time.perf_counter()
         findings: List[ConsequenceFinding] = []
@@ -818,6 +1609,9 @@ class ConsequenceEngine:
             )
         )
         findings.extend(self._detect_d05_build_dependency_delta(file_deltas))
+        findings.extend(self._detect_d08_workflow_integrity(file_deltas))
+        findings.extend(self._detect_d09_test_erosion(transitions))
+        findings.extend(self._detect_d10_migration_persistence_loss(file_deltas))
 
         # Sort findings deterministically by severity rank then finding_id
         sev_rank = {
@@ -875,6 +1669,7 @@ class ConsequenceEngine:
             "base_symbol_count": len(base_symbols),
             "head_symbol_count": len(head_symbols),
             "repo_indexed_call_sites": len(repo_call_sites),
+            "repo_call_sites": len(repo_call_sites),
             "transition_counts": counts_by_kind,
             "container_renames": container_rename_map,
             "renamed_files": renamed_file_map,
@@ -1126,7 +1921,7 @@ class ConsequenceEngine:
             removed_calls = sorted(base_guard_calls - head_guard_calls)
 
             # 3. Check guard condition polarity inversion, enforcement neutralization,
-            #    early-return bypass, and exception-swallowing (D06 v2)
+            #    boolean short-circuiting, early-return bypass, and exception-swallowing (D06 v2)
             b_conds = getattr(bs, "guard_conditions", ()) or ()
             h_conds = getattr(hs, "guard_conditions", ()) or ()
             b_if = _parse_if_guards(b_conds)
@@ -1196,6 +1991,36 @@ class ConsequenceEngine:
                                 )
                             )
 
+            # Boolean short-circuiting of guard conditions (`and False`, `|| true`, `if False:`)
+            b_sc = {c for c in b_conds if c.startswith("if_short_circuit:")}
+            h_sc = {c for c in h_conds if c.startswith("if_short_circuit:")}
+            new_sc = sorted(h_sc - b_sc)
+            for sc in new_sc:
+                parts = sc.split(":", 3)
+                if len(parts) == 4:
+                    _, target, sc_kind, act = parts
+                    # Only flag if the short-circuited branch was an enforcing guard or inside a security function
+                    is_enforcing = (
+                        (sc_kind == "and_false" and act in ("raise", "return_deny", "rollback"))
+                        or (sc_kind == "or_true" and act in ("return_allow", "other", "noop"))
+                        or _is_guard_call(target)
+                        or _is_security_relevant_name(bs.qualified_name)
+                    )
+                    if is_enforcing and (b_if or b_conds or base_guard_calls or _is_security_relevant_name(bs.qualified_name)):
+                        weakened_notes.append(f"{target} short-circuited ({sc_kind})")
+                        ev_items.append(
+                            EvidenceItem(
+                                kind="GUARD_SHORT_CIRCUITED",
+                                file=hs.file_path,
+                                line=hs.start_line,
+                                symbol=hs.qualified_name,
+                                detail=(
+                                    f"Guard condition on '{target}' in '{hs.qualified_name}' was "
+                                    f"short-circuited with '{sc_kind}' ({act})"
+                                ),
+                            )
+                        )
+
             # Early-return bypass before remaining statements/guards
             b_early = {c for c in b_conds if c.startswith("early_return_bypass:")}
             h_early = {c for c in h_conds if c.startswith("early_return_bypass:")}
@@ -1221,7 +2046,7 @@ class ConsequenceEngine:
             removed_state_guards = sorted(b_state_guards - h_state_guards)
             # Only flag if the function did not replace the state guard with a new call-based guard
             added_if_callees = set(h_if.keys()) - set(b_if.keys())
-            if removed_state_guards and not added_if_callees and not hs.is_stub:
+            if removed_state_guards and not added_if_callees and not new_sc and not hs.is_stub:
                 for sg in removed_state_guards:
                     parts = sg.split(":", 3)
                     if len(parts) == 4:
@@ -2073,7 +2898,675 @@ class ConsequenceEngine:
                         )
                     )
 
+
+            # 3. Check build wrapper scripts (mvnw, gradlew, Makefile, build.sh)
+            if bname.lower() in _BUILD_WRAPPER_BASENAMES and fd.head_source:
+                base_s = fd.base_source or ""
+                head_s = fd.head_source
+                suspicious_matches = []
+                for idx, line in enumerate(head_s.splitlines(), start=1):
+                    stripped = line.strip()
+                    if stripped.startswith("#"):
+                        continue
+                    if _SUSPICIOUS_SCRIPT_PATTERNS.search(stripped):
+                        if stripped not in base_s:
+                            suspicious_matches.append((idx, stripped))
+
+                if suspicious_matches:
+                    findings.append(
+                        ConsequenceFinding(
+                            finding_id=f"PG-D05-WRAPPER-{fd.file_path}",
+                            detector_id=DETECTOR_D05_BUILD,
+                            consequence_class="BUILD_WRAPPER_TAMPERING",
+                            tier=TIER_VERIFIED,
+                            confidence=CONFIDENCE_HIGH,
+                            severity=SEVERITY_CRITICAL,
+                            policy_recommendation=POLICY_BLOCK,
+                            summary=(
+                                f"Build wrapper script '{fd.file_path}' introduces suspicious remote execution "
+                                f"or binary payload ({suspicious_matches[0][1][:60]})."
+                            ),
+                            affected_files=(fd.file_path,),
+                            affected_symbols=(bname,),
+                            evidence=tuple(
+                                EvidenceItem(
+                                    kind="SUSPICIOUS_BUILD_WRAPPER",
+                                    file=fd.file_path,
+                                    line=lno,
+                                    symbol=bname,
+                                    detail=f"Line {lno}: {ltxt}",
+                                )
+                                for lno, ltxt in suspicious_matches
+                            ),
+                            remediation=(
+                                f"Ensure build wrapper '{fd.file_path}' is generated by official toolchains and does "
+                                "not download or pipe unverified remote code directly to execution shells."
+                            ),
+                        )
+                    )
+
         return findings
+
+    # ------------------------------------------------------------------
+    # D08: Workflow / CI Integrity & Supply-Chain Detector
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _extract_workflow_run_lines(yaml_text: str) -> List[Tuple[int, str]]:
+        """Extract (line_number, line_text) pairs belonging to YAML `run:` step blocks."""
+        if not yaml_text:
+            return []
+        run_lines: List[Tuple[int, str]] = []
+        in_run_block = False
+        run_indent = 0
+        run_key_re = re.compile(r"^(\s*)(?:-\s*)?run\s*:\s*(.*)$")
+        yaml_key_re = re.compile(r"^(\s*)(?:-\s*)?[A-Za-z0-9_-]+\s*:")
+
+        for idx, raw_line in enumerate(yaml_text.splitlines(), start=1):
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            m_run = run_key_re.match(raw_line)
+            if m_run:
+                prefix, rest = m_run.group(1), m_run.group(2).strip()
+                # Effective indentation of the `run` property itself
+                dash_offset = raw_line.find("run")
+                run_indent = dash_offset if dash_offset >= 0 else len(prefix)
+                if rest in ("|", "|-", "|+", ">", ">-", ">+", ""):
+                    in_run_block = True
+                else:
+                    in_run_block = True
+                    run_lines.append((idx, rest))
+                continue
+
+            if in_run_block:
+                leading_spaces = len(raw_line) - len(raw_line.lstrip(" "))
+                m_key = yaml_key_re.match(raw_line)
+                if leading_spaces <= run_indent:
+                    in_run_block = False
+                elif m_key and (len(raw_line) - len(raw_line.lstrip(" -"))) <= run_indent:
+                    in_run_block = False
+                else:
+                    run_lines.append((idx, stripped))
+        return run_lines
+
+    def _detect_d08_workflow_integrity(
+        self,
+        file_deltas: List[FileDeltaInput],
+    ) -> List[ConsequenceFinding]:
+        findings: List[ConsequenceFinding] = []
+        uses_re = re.compile(r"uses\s*:\s*['\"]?([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)@([^\s'\"#]+)")
+        continue_on_error_re = re.compile(r"^\s*continue-on-error\s*:\s*true\b", re.IGNORECASE | re.MULTILINE)
+        write_all_re = re.compile(r"^\s*permissions\s*:\s*write-all\b", re.IGNORECASE | re.MULTILINE)
+
+        for fd in file_deltas:
+            norm_path = fd.file_path.replace("\\", "/")
+            if not _WORKFLOW_OR_ACTION_PATH_RE.search(norm_path):
+                continue
+            if not fd.head_source:
+                continue
+            base_src = fd.base_source or ""
+            head_src = fd.head_source
+
+            # 1. Untrusted GitHub expression interpolation inside `run:` shell blocks (W02)
+            base_run_exprs = {
+                m.group(1).strip()
+                for _, line_txt in self._extract_workflow_run_lines(base_src)
+                for m in _UNTRUSTED_GH_EXPR_RE.finditer(line_txt)
+            }
+            head_run_matches: List[Tuple[int, str]] = []
+            for line_no, line_txt in self._extract_workflow_run_lines(head_src):
+                for m in _UNTRUSTED_GH_EXPR_RE.finditer(line_txt):
+                    expr = m.group(1).strip()
+                    if expr not in base_run_exprs:
+                        head_run_matches.append((line_no, expr))
+
+            if head_run_matches:
+                unique_exprs = sorted({expr for _, expr in head_run_matches})
+                ev = tuple(
+                    EvidenceItem(
+                        kind="WORKFLOW_RUN_EXPRESSION_INJECTION",
+                        file=fd.file_path,
+                        line=line_no,
+                        symbol="run",
+                        detail=f"Untrusted GitHub context '${{{{ {expr} }}}}' interpolated directly into `run:` shell script",
+                    )
+                    for line_no, expr in head_run_matches
+                )
+                findings.append(
+                    ConsequenceFinding(
+                        finding_id=f"PG-D08-INJECTION-{fd.file_path}",
+                        detector_id=DETECTOR_D08_WORKFLOW,
+                        consequence_class="UNTRUSTED_WORKFLOW_EXPRESSION_INJECTION",
+                        tier=TIER_VERIFIED,
+                        confidence=CONFIDENCE_HIGH,
+                        severity=SEVERITY_CRITICAL,
+                        policy_recommendation=POLICY_BLOCK,
+                        summary=(
+                            f"Workflow '{fd.file_path}' interpolates untrusted GitHub event context "
+                            f"({', '.join(unique_exprs[:3])}) directly inside a `run:` shell block."
+                        ),
+                        affected_files=(fd.file_path,),
+                        affected_symbols=("run",),
+                        evidence=ev,
+                        remediation=(
+                            "Bind the untrusted GitHub expression to an intermediate step `env:` variable "
+                            "and reference it as a double-quoted shell variable (`\"$VAR\"`) inside `run:`."
+                        ),
+                    )
+                )
+
+            # 2. pull_request_target + untrusted PR head checkout ("Pwn Request" W01)
+            base_has_prt_checkout = bool(
+                _PRT_TRIGGER_RE.search(base_src) and _PRT_UNTRUSTED_REF_RE.search(base_src)
+            )
+            head_has_prt_checkout = bool(
+                _PRT_TRIGGER_RE.search(head_src) and _PRT_UNTRUSTED_REF_RE.search(head_src)
+            )
+            if head_has_prt_checkout and not base_has_prt_checkout:
+                m_ref = _PRT_UNTRUSTED_REF_RE.search(head_src)
+                ref_line = head_src[: m_ref.start()].count("\n") + 1 if m_ref else 1
+                has_priv = bool(_WORKFLOW_WRITE_OR_SECRETS_RE.search(head_src))
+                sev = SEVERITY_CRITICAL if has_priv else SEVERITY_HIGH
+                pol = POLICY_BLOCK if has_priv else POLICY_REVIEW
+                findings.append(
+                    ConsequenceFinding(
+                        finding_id=f"PG-D08-PRT-{fd.file_path}",
+                        detector_id=DETECTOR_D08_WORKFLOW,
+                        consequence_class="PULL_REQUEST_TARGET_UNTRUSTED_CHECKOUT",
+                        tier=TIER_VERIFIED,
+                        confidence=CONFIDENCE_HIGH,
+                        severity=sev,
+                        policy_recommendation=pol,
+                        summary=(
+                            f"Workflow '{fd.file_path}' combines `pull_request_target` with an explicit "
+                            "checkout of untrusted pull request head code."
+                        ),
+                        affected_files=(fd.file_path,),
+                        affected_symbols=("on.pull_request_target",),
+                        evidence=(
+                            EvidenceItem(
+                                kind="PRT_UNTRUSTED_CHECKOUT",
+                                file=fd.file_path,
+                                line=ref_line,
+                                symbol="on.pull_request_target",
+                                detail=(
+                                    "Workflow triggers on `pull_request_target` and checks out "
+                                    "untrusted PR head ref"
+                                    + (" with write permissions or secrets access" if has_priv else "")
+                                ),
+                            ),
+                        ),
+                        remediation=(
+                            "Do not check out untrusted PR head code inside a `pull_request_target` workflow; "
+                            "use an unprivileged `pull_request` workflow and pass artifacts to a separate workflow_run."
+                        ),
+                    )
+                )
+
+            # 3. Action SHA pin downgrade to mutable tag/branch (W03)
+            downgraded: List[Tuple[int, str, str, str]] = []
+            if base_src:
+                base_sha_pins: Dict[str, str] = {}
+                for m in uses_re.finditer(base_src):
+                    act_name, ref_val = m.group(1), m.group(2)
+                    if _SHA40_RE.match(ref_val):
+                        base_sha_pins[act_name] = ref_val
+
+                downgraded: List[Tuple[int, str, str, str]] = []
+                for m in uses_re.finditer(head_src):
+                    act_name, ref_val = m.group(1), m.group(2)
+                    if act_name in base_sha_pins and not _SHA40_RE.match(ref_val):
+                        line_no = head_src[: m.start()].count("\n") + 1
+                        downgraded.append((line_no, act_name, base_sha_pins[act_name], ref_val))
+
+                if downgraded:
+                    ev = tuple(
+                        EvidenceItem(
+                            kind="ACTION_SHA_PIN_DOWNGRADED",
+                            file=fd.file_path,
+                            line=line_no,
+                            symbol=act_name,
+                            detail=f"Action '{act_name}' downgraded from immutable SHA '{old_sha[:12]}...' to mutable ref '@{new_ref}'",
+                        )
+                        for line_no, act_name, old_sha, new_ref in downgraded
+                    )
+                    findings.append(
+                        ConsequenceFinding(
+                            finding_id=f"PG-D08-PINDOWN-{fd.file_path}",
+                            detector_id=DETECTOR_D08_WORKFLOW,
+                            consequence_class="ACTION_PIN_DOWNGRADE",
+                            tier=TIER_VERIFIED,
+                            confidence=CONFIDENCE_HIGH,
+                            severity=SEVERITY_HIGH,
+                            policy_recommendation=POLICY_REVIEW,
+                            summary=(
+                                f"Workflow '{fd.file_path}' downgraded {len(downgraded)} GitHub Action(s) "
+                                f"from immutable 40-char commit SHAs to mutable refs ({', '.join(a for _, a, _, _ in downgraded[:3])})."
+                            ),
+                            affected_files=(fd.file_path,),
+                            affected_symbols=tuple(sorted({a for _, a, _, _ in downgraded})),
+                            evidence=ev,
+                            remediation="Pin third-party GitHub Actions to full 40-character commit SHAs instead of mutable tags or branch names.",
+                        )
+                    )
+
+            # 4. CI gate weakened (`continue-on-error: true` or `permissions: write-all` added on modified workflow)
+            if fd.change_type == "M" and base_src:
+                base_coe = len(continue_on_error_re.findall(base_src))
+                head_coe = len(continue_on_error_re.findall(head_src))
+                base_wa = bool(write_all_re.search(base_src))
+                head_wa = bool(write_all_re.search(head_src))
+
+                gate_ev: List[EvidenceItem] = []
+                if head_coe > base_coe:
+                    m_coe = continue_on_error_re.search(head_src)
+                    line_no = head_src[: m_coe.start()].count("\n") + 1 if m_coe else 1
+                    gate_ev.append(
+                        EvidenceItem(
+                            kind="CONTINUE_ON_ERROR_ADDED",
+                            file=fd.file_path,
+                            line=line_no,
+                            symbol="continue-on-error",
+                            detail=f"Added `continue-on-error: true` ({base_coe} -> {head_coe}) allowing failing CI steps to pass silently",
+                        )
+                    )
+                if head_wa and not base_wa:
+                    m_wa = write_all_re.search(head_src)
+                    line_no = head_src[: m_wa.start()].count("\n") + 1 if m_wa else 1
+                    gate_ev.append(
+                        EvidenceItem(
+                            kind="PERMISSIONS_WRITE_ALL_ADDED",
+                            file=fd.file_path,
+                            line=line_no,
+                            symbol="permissions",
+                            detail="Added overly broad `permissions: write-all` to workflow",
+                        )
+                    )
+
+                if gate_ev:
+                    findings.append(
+                        ConsequenceFinding(
+                            finding_id=f"PG-D08-CIGATE-{fd.file_path}",
+                            detector_id=DETECTOR_D08_WORKFLOW,
+                            consequence_class="CI_GATE_WEAKENED",
+                            tier=TIER_VERIFIED,
+                            confidence=CONFIDENCE_HIGH,
+                            severity=SEVERITY_MEDIUM,
+                            policy_recommendation=POLICY_REVIEW,
+                            summary=(
+                                f"Workflow '{fd.file_path}' weakens CI enforcement gates or permissions "
+                                f"({', '.join(e.symbol or e.kind for e in gate_ev)})."
+                            ),
+                            affected_files=(fd.file_path,),
+                            affected_symbols=tuple(e.symbol for e in gate_ev if e.symbol),
+                            evidence=tuple(gate_ev),
+                            remediation="Remove `continue-on-error: true` from required verification steps and scope `permissions:` to least privilege.",
+                        )
+                    )
+
+
+            # 5. Privileged `workflow_run` combining untrusted artifact download with execution
+            base_has_wfr = bool(_WORKFLOW_RUN_TRIGGER_RE.search(base_src))
+            head_has_wfr = bool(_WORKFLOW_RUN_TRIGGER_RE.search(head_src))
+            head_has_download = bool(re.search(r"actions/download-artifact@", head_src, re.IGNORECASE))
+            base_has_download = bool(re.search(r"actions/download-artifact@", base_src, re.IGNORECASE))
+            if head_has_wfr and head_has_download and not (base_has_wfr and base_has_download):
+                m_dl = re.search(r"actions/download-artifact@", head_src, re.IGNORECASE)
+                lno = head_src[: m_dl.start()].count("\n") + 1 if m_dl else 1
+                findings.append(
+                    ConsequenceFinding(
+                        finding_id=f"PG-D08-WORKFLOWRUN-{fd.file_path}",
+                        detector_id=DETECTOR_D08_WORKFLOW,
+                        consequence_class="WORKFLOW_RUN_UNTRUSTED_ARTIFACT",
+                        tier=TIER_VERIFIED,
+                        confidence=CONFIDENCE_HIGH,
+                        severity=SEVERITY_HIGH,
+                        policy_recommendation=POLICY_REVIEW,
+                        summary=(
+                            f"Workflow '{fd.file_path}' triggers on privileged `workflow_run` and downloads "
+                            "untrusted PR artifacts, introducing artifact poisoning risk."
+                        ),
+                        affected_files=(fd.file_path,),
+                        affected_symbols=("on.workflow_run",),
+                        evidence=(
+                            EvidenceItem(
+                                kind="WORKFLOW_RUN_ARTIFACT_DOWNLOAD",
+                                file=fd.file_path,
+                                line=lno,
+                                symbol="on.workflow_run",
+                                detail="Workflow triggers on `workflow_run` and downloads untrusted artifacts",
+                            ),
+                        ),
+                        remediation=(
+                            "Do not execute or unpack untrusted pull request artifacts directly in a privileged `workflow_run` "
+                            "job that holds repository secrets or write tokens."
+                        ),
+                    )
+                )
+
+            # 6. Unpinned Third-Party Action Introduced (when action is newly introduced in head)
+            base_actions = {m.group(1): m.group(2) for m in uses_re.finditer(base_src)}
+            unpinned_new = []
+            for m in uses_re.finditer(head_src):
+                act_name, ref_val = m.group(1), m.group(2)
+                if act_name.startswith("./") or act_name.startswith("docker://"):
+                    continue
+                owner = act_name.split("/")[0].lower() if "/" in act_name else ""
+                if owner in _GITHUB_OWNED_ACTION_OWNERS:
+                    continue
+                if not _SHA40_RE.match(ref_val):
+                    if act_name not in base_actions:
+                        lno = head_src[: m.start()].count("\n") + 1
+                        unpinned_new.append((lno, act_name, ref_val))
+
+            if unpinned_new and not downgraded and not head_has_prt_checkout:
+                ev_unpinned = tuple(
+                    EvidenceItem(
+                        kind="ACTION_PIN_UNPINNED",
+                        file=fd.file_path,
+                        line=lno,
+                        symbol=act_name,
+                        detail=f"Action '{act_name}' introduced with mutable ref '@{ref_val}' instead of 40-character commit SHA",
+                    )
+                    for lno, act_name, ref_val in unpinned_new
+                )
+                findings.append(
+                    ConsequenceFinding(
+                        finding_id=f"PG-D08-UNPINNED-{fd.file_path}",
+                        detector_id=DETECTOR_D08_WORKFLOW,
+                        consequence_class="ACTION_PIN_UNPINNED",
+                        tier=TIER_VERIFIED,
+                        confidence=CONFIDENCE_HIGH,
+                        severity=SEVERITY_MEDIUM,
+                        policy_recommendation=POLICY_WARN,
+                        summary=(
+                            f"Workflow '{fd.file_path}' introduces {len(unpinned_new)} unpinned third-party Action(s) "
+                            f"({', '.join(a for _, a, _ in unpinned_new[:3])}) using mutable refs."
+                        ),
+                        affected_files=(fd.file_path,),
+                        affected_symbols=tuple(sorted({a for _, a, _ in unpinned_new})),
+                        evidence=ev_unpinned,
+                        remediation="Pin third-party GitHub Actions to immutable full 40-character commit SHAs (e.g., `uses: actions/checkout@11bd71901ebe5b1630ceea73d27597364c9af683 # v4.2.2`).",
+                    )
+                )
+
+        return findings
+
+    # ------------------------------------------------------------------
+    # D09: Test Erosion & Assertion Removal Detector
+    # ------------------------------------------------------------------
+    def _detect_d09_test_erosion(
+        self,
+        transitions: List[SymbolTransition],
+    ) -> List[ConsequenceFinding]:
+        findings: List[ConsequenceFinding] = []
+
+        def _parse_test_assertions(conds: Tuple[str, ...]) -> Optional[Tuple[int, int]]:
+            for c in conds:
+                if c.startswith("test_assertions:"):
+                    parts = c.split(":")
+                    if len(parts) == 3:
+                        try:
+                            return int(parts[1]), int(parts[2])
+                        except ValueError:
+                            return None
+            return None
+
+        def _is_skip_deco(deco: str) -> bool:
+            low = deco.lower().lstrip("@")
+            return any(tok in low for tok in _TEST_SKIP_DECORATOR_TOKENS)
+
+        for tr in transitions:
+            bs = tr.base_symbol
+            hs = tr.head_symbol
+            if bs is None or hs is None:
+                continue
+            if bs.kind not in ("function", "method"):
+                continue
+            if not (_is_test_path(bs.file_path) or _is_test_path(hs.file_path)):
+                continue
+
+            b_conds = getattr(bs, "guard_conditions", ()) or ()
+            h_conds = getattr(hs, "guard_conditions", ()) or ()
+            b_asserts = _parse_test_assertions(b_conds)
+            h_asserts = _parse_test_assertions(h_conds)
+
+            is_test_symbol = (
+                bs.name.startswith("test")
+                or bs.name.startswith("Test")
+                or any("test" in d.lower() for d in bs.decorators)
+                or b_asserts is not None
+            )
+            if not is_test_symbol:
+                continue
+
+            # 1. Check newly added skip decorators or skip calls
+            base_skip_decos = {d for d in bs.decorators if _is_skip_deco(d)}
+            head_skip_decos = {d for d in hs.decorators if _is_skip_deco(d)}
+            added_skip_decos = sorted(head_skip_decos - base_skip_decos)
+            added_skip_call = ("test_skip_call:true" in h_conds) and ("test_skip_call:true" not in b_conds)
+
+            if added_skip_decos or added_skip_call:
+                detail_parts: List[str] = []
+                if added_skip_decos:
+                    detail_parts.append(f"added skip decorator(s) {', '.join(added_skip_decos)}")
+                if added_skip_call:
+                    detail_parts.append("inserted runtime skip call")
+                findings.append(
+                    ConsequenceFinding(
+                        finding_id=f"PG-D09-SKIP-{hs.file_path}-{hs.qualified_name}",
+                        detector_id=DETECTOR_D09_TEST,
+                        consequence_class="TEST_SKIPPED_OR_DISABLED",
+                        tier=TIER_VERIFIED,
+                        confidence=CONFIDENCE_HIGH,
+                        severity=SEVERITY_MEDIUM,
+                        policy_recommendation=POLICY_REVIEW,
+                        summary=(
+                            f"Existing test '{hs.qualified_name}' in '{hs.file_path}' was skipped or disabled "
+                            f"({'; '.join(detail_parts)})."
+                        ),
+                        affected_files=(hs.file_path,),
+                        affected_symbols=(hs.qualified_name,),
+                        evidence=(
+                            EvidenceItem(
+                                kind="TEST_NEWLY_SKIPPED",
+                                file=hs.file_path,
+                                line=hs.start_line,
+                                symbol=hs.qualified_name,
+                                detail=f"Test '{hs.qualified_name}' disabled via {'; '.join(detail_parts)}",
+                            ),
+                        ),
+                        remediation=f"Fix the underlying failure in '{hs.qualified_name}' instead of skipping the test.",
+                    )
+                )
+                continue
+
+            # 2. Check test assertion erosion (effective assertions dropped from >=1 to 0)
+            if b_asserts is not None and not hs.is_stub:
+                b_eff, _ = b_asserts
+                h_eff, h_triv = h_asserts if h_asserts is not None else (0, 0)
+                if b_eff >= 1 and h_eff == 0:
+                    detail_msg = (
+                        f"Replaced {b_eff} effective assertion(s) with {h_triv} tautological assertion(s) (`assert True`)"
+                        if h_triv > 0
+                        else f"Removed all {b_eff} assertion(s) from test '{hs.qualified_name}' while leaving body statements"
+                    )
+                    findings.append(
+                        ConsequenceFinding(
+                            finding_id=f"PG-D09-EROSION-{hs.file_path}-{hs.qualified_name}",
+                            detector_id=DETECTOR_D09_TEST,
+                            consequence_class="TEST_ASSERTION_EROSION",
+                            tier=TIER_VERIFIED,
+                            confidence=CONFIDENCE_HIGH,
+                            severity=SEVERITY_HIGH,
+                            policy_recommendation=POLICY_BLOCK,
+                            summary=(
+                                f"Test '{hs.qualified_name}' in '{hs.file_path}' lost all effective assertions "
+                                f"({b_eff} -> 0)."
+                            ),
+                            affected_files=(hs.file_path,),
+                            affected_symbols=(hs.qualified_name,),
+                            evidence=(
+                                EvidenceItem(
+                                    kind="TEST_ASSERTIONS_GUTTED",
+                                    file=hs.file_path,
+                                    line=hs.start_line,
+                                    symbol=hs.qualified_name,
+                                    detail=detail_msg,
+                                ),
+                            ),
+                            remediation=f"Restore meaningful assertions in test '{hs.qualified_name}' to verify expected behavior.",
+                        )
+                    )
+
+        return findings
+
+    # ------------------------------------------------------------------
+    # D10: Migration & Persistence Loss Detector
+    # ------------------------------------------------------------------
+    def _detect_d10_migration_persistence_loss(
+        self,
+        file_deltas: List[FileDeltaInput],
+    ) -> List[ConsequenceFinding]:
+        """Report destructive operations newly introduced in FORWARD migration code.
+
+        Rollback code is excluded, only operations absent from the base snapshot are
+        reported, and irreversibility is judged per framework (empty/missing
+        downgrade/down, empty Down section or sibling down.sql, RunSQL without
+        reverse_sql, Rails `change` operations Rails cannot invert).
+        """
+        findings: List[ConsequenceFinding] = []
+        by_path = {fd.file_path.replace("\\", "/"): fd for fd in file_deltas}
+
+        for fd in file_deltas:
+            if not fd.head_source or not _is_migration_file(fd.file_path):
+                continue
+            head = _analyze_migration_source(fd.file_path, fd.head_source)
+            base_keys: Set[Any] = set()
+            if fd.base_source:
+                base = _analyze_migration_source(fd.old_path or fd.file_path, fd.base_source)
+                base_keys = {ev["key"] for ev in base.events}
+            new_events = [
+                ev for ev in head.events
+                if ev["key"] not in base_keys and not _is_temp_table_entity(ev["entity"], ev["kind"])
+            ]
+            if not new_events:
+                continue
+
+            file_reason = head.reason
+            if file_reason is None and head.lang == "sql":
+                file_reason = _sql_sibling_down_reason(fd.file_path, by_path)
+
+            # 1. Catastrophic wipe-outs: TRUNCATE / DROP DATABASE / DROP SCHEMA
+            for ev in new_events:
+                if ev["kind"] not in ("truncate", "dropdb"):
+                    continue
+                dyn = ev["dynamic"]
+                is_trunc = ev["kind"] == "truncate"
+                what = "truncates table" if is_trunc else "drops database/schema"
+                target = "a dynamically built name" if dyn else f"'{ev['entity']}'"
+                findings.append(
+                    ConsequenceFinding(
+                        finding_id=f"PG-D10-{'TRUNCATE' if is_trunc else 'DROPDB'}-{fd.file_path}-{ev['line']}",
+                        detector_id=DETECTOR_D10_MIGRATION,
+                        consequence_class="CATASTROPHIC_DATA_WIPEOUT",
+                        tier=TIER_LIKELY if dyn else TIER_VERIFIED,
+                        confidence=CONFIDENCE_MEDIUM if dyn else CONFIDENCE_HIGH,
+                        severity=SEVERITY_HIGH if dyn else SEVERITY_CRITICAL,
+                        policy_recommendation=POLICY_REVIEW if dyn else POLICY_BLOCK,
+                        summary=f"Migration '{fd.file_path}' {what} {target}, permanently erasing its data.",
+                        affected_files=(fd.file_path,),
+                        affected_symbols=(ev["entity"],),
+                        evidence=(
+                            EvidenceItem(
+                                kind="TABLE_TRUNCATE" if is_trunc else "DATABASE_OR_SCHEMA_DROP",
+                                file=fd.file_path,
+                                line=ev["line"],
+                                symbol=ev["entity"],
+                                detail=f"Line {ev['line']}: {ev['snippet']}",
+                            ),
+                        ),
+                        remediation=(
+                            "Avoid TRUNCATE in automated production migrations; use soft archiving, batched "
+                            "deletion or an explicit, reviewed maintenance procedure."
+                            if is_trunc
+                            else "Dropping an entire database or schema must never ship in an automated migration."
+                        ),
+                    )
+                )
+
+            # 2. Table / column drops (grouped per migration file)
+            schema_events = [ev for ev in new_events if ev["kind"] in ("table", "column")]
+            if not schema_events:
+                continue
+            literal = [ev for ev in schema_events if not ev["dynamic"]]
+            reasons: List[str] = [file_reason] if (file_reason and literal) else []
+            for r in sorted({ev["irrev"] for ev in literal if ev["irrev"]}):
+                reasons.append(r)
+            irreversible = bool(literal) and bool(reasons)
+            all_dynamic = not literal
+
+            ev_items: List[EvidenceItem] = [
+                EvidenceItem(
+                    kind="SCHEMA_TABLE_DROPPED" if ev["kind"] == "table" else "SCHEMA_COLUMN_DROPPED",
+                    file=fd.file_path,
+                    line=ev["line"],
+                    symbol=ev["entity"],
+                    detail=(
+                        f"Line {ev['line']}: dropped {'table' if ev['kind'] == 'table' else 'column'} "
+                        f"'{ev['entity']}' ({ev['snippet']})"
+                    ),
+                )
+                for ev in schema_events
+            ]
+            for r in reasons:
+                ev_items.append(
+                    EvidenceItem(kind="ROLLBACK_UNAVAILABLE", file=fd.file_path, line=None, symbol=None, detail=r)
+                )
+
+            entities = [ev["entity"] for ev in schema_events]
+            shown = ", ".join(entities[:3]) + (f" (+{len(entities) - 3} more)" if len(entities) > 3 else "")
+            if irreversible:
+                summary_msg = f"Migration '{fd.file_path}' drops {shown} and cannot be rolled back: {reasons[0]}."
+            elif all_dynamic:
+                summary_msg = (
+                    f"Migration '{fd.file_path}' drops a table/column whose name is built at runtime; "
+                    "the target could not be resolved statically."
+                )
+            else:
+                summary_msg = f"Migration '{fd.file_path}' drops persistent schema element(s): {shown}."
+
+            all_symbols: List[str] = []
+            for ev in schema_events:
+                if ev["entity"] not in all_symbols:
+                    all_symbols.append(ev["entity"])
+                if "." in ev["entity"]:
+                    col_bare = ev["entity"].split(".")[-1]
+                    if col_bare not in all_symbols:
+                        all_symbols.append(col_bare)
+            findings.append(
+                ConsequenceFinding(
+                    finding_id=f"PG-D10-SCHEMA-{fd.file_path}",
+                    detector_id=DETECTOR_D10_MIGRATION,
+                    consequence_class="IRREVERSIBLE_PERSISTENCE_DROP" if irreversible else "DESTRUCTIVE_PERSISTENCE_MIGRATION",
+                    tier=TIER_LIKELY if all_dynamic else TIER_VERIFIED,
+                    confidence=CONFIDENCE_MEDIUM if all_dynamic else CONFIDENCE_HIGH,
+                    severity=SEVERITY_CRITICAL if irreversible else SEVERITY_HIGH,
+                    policy_recommendation=POLICY_BLOCK if irreversible else POLICY_REVIEW,
+                    summary=summary_msg,
+                    affected_files=(fd.file_path,),
+                    affected_symbols=tuple(all_symbols),
+                    evidence=tuple(ev_items),
+                    remediation=(
+                        "Follow expand-and-contract: stop reading/writing the column or table in a prior deploy, "
+                        "then drop it in a separate migration. Provide a working rollback (downgrade/down) "
+                        "or document why the drop is intentionally irreversible."
+                    ),
+                )
+            )
+
+        return findings
+
 
     # ------------------------------------------------------------------
     # Verdict & Score Recommendation

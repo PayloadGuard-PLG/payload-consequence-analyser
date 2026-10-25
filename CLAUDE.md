@@ -3,12 +3,22 @@
 ## Handover (update this block at the end of every session)
 
 - **Active branch:** `main` (merged PR #97 `cb74a6e` in analyser / PR #75 `dcc5522` in harness)
-- **Consequence Engine v1 (`consequence.v1`) + Detector Accuracy & Usability v2 — COMPLETE & MERGED (2026-10-23):**
-  - `structural_parser.py`: Upgraded with `SymbolFact` v1 (including `guard_conditions`), `CallSiteFact`, `ParseResult`, 7-dimension capability vectors (`universal`, `syntax`, `symbolic`, `typed`, `reachability`, `flow`, `runtime`), import-alias extraction (`as` bindings and CommonJS `require`), intra-function guard condition extraction (`_python_extract_guard_conditions`, `_ts_extract_guard_conditions`), and explicit parser completeness (`AVAILABLE`, `PARSE_ERROR`, `GRAMMAR_UNAVAILABLE`, `UNSUPPORTED_EXTENSION`, `TIMEOUT`) across `.py`, `.js`/`.jsx`, `.ts`/`.tsx`, `.go`, `.rs`, and `.java`. Legacy `extract_named_nodes(source, path) -> set[str]` preserved 100% unchanged.
-  - `consequence_engine.py`: Semantic Change Graph (SCG) 5-stage symbol matching pipeline + 6 deterministic consequence detectors (`D01_PARSER_INCOMPLETE`, `D02_BODY_WEAKENING` / `D02_AMBIGUOUS_REFACTOR`, `D03_COMPOUND_LOSS`, `D04_PUBLIC_API_BREAK` v2 with import-alias/module disambiguation and container/file consolidation, `D05_BUILD_DEPENDENCY_DELTA`, `D06_GUARD_REGRESSION` v2 with guard condition polarity inversion, enforcement neutralization, unconditional early-return bypass, and exception-swallowing detection).
+- **D10 Migration/Persistence Loss + D05/D08 Extensions (Robust Real-Diff Hardening) — COMPLETE (2026-10-25, branch eat/d08-d09-d10-consequence-detectors):**
+  - consequence_engine.py: Hardened D10_MIGRATION_PERSISTENCE_LOSS with multi-statement SQL AST/tokenizer parser, forward-vs-rollback boundary isolation, and framework-aware irreversibility:
+    - Multi-line statement parsing for SQL migrations (handling comments, quoted identifiers, and ALTER TABLE ... DROP [COLUMN]).
+    - Multi-language forward-vs-rollback isolation across Alembic (upgrade() vs downgrade()), Knex/TypeORM/Sequelize (up() vs down()), Rails (change vs up/down), and Goose/sql-migrate (-- +goose Up vs -- +goose Down, paired *.up.sql/*.down.sql). Legitimate drops inside rollback code/sections are excluded (0 false-positives).
+    - Framework-specific irreversibility detection: Rails change drops without blocks, Django RunSQL without 
+everse_sql, empty/missing downgrade() or down() functions, or missing/empty rollback scripts flag IRREVERSIBLE_PERSISTENCE_DROP (BLOCK); reversible drops flag DESTRUCTIVE_PERSISTENCE_MIGRATION (REVIEW).
+    - Hardened migration directory detection excluding seed/, ixtures/, doc/, sample/, and vendor/test paths.
+  - D08_WORKFLOW_INTEGRITY: Refined _WORKFLOW_RUN_TRIGGER_RE to match actual workflow triggers (on: workflow_run) rather than shell string expressions; excluded first-party GitHub-owned action namespaces (ctions/*, github/*) from ACTION_PIN_UNPINNED to focus exclusively on third-party supply chain risks.
+  - D05_BUILD_DEPENDENCY_DELTA: BUILD_WRAPPER_TAMPERING (BLOCK) for new remote-exec/reverse-shell lines in mvnw, gradlew, Makefile, uild.sh.
+  - **Tests:** 330 passed (284 	est_analyzer.py + 46 	est_consequence_engine.py); harness mutation suite 16/16 (0 FP / 0 FN); alidate_manifest.py --verify-consequence 41/41.
+- **Consequence Engine v1 (`consequence.v1`) + Detector Accuracy & Usability v2 + D08/D09 Differential Workflow & Test Integrity — COMPLETE (2026-10-24):**
+  - `structural_parser.py`: Upgraded with `SymbolFact` v1 (including `guard_conditions`), `CallSiteFact`, `ParseResult`, 7-dimension capability vectors (`universal`, `syntax`, `symbolic`, `typed`, `reachability`, `flow`, `runtime`), import-alias extraction (`as` bindings and CommonJS `require`), intra-function guard condition & test contract extraction (`_python_extract_guard_conditions`, `_ts_extract_guard_conditions` — including boolean short-circuit `if_short_circuit:`, Python/Go/JS state guards `if_state_guard:`, test assertion counts `test_assertions:<eff>:<triv>`, and skip calls `test_skip_call:true`), and explicit parser completeness (`AVAILABLE`, `PARSE_ERROR`, `GRAMMAR_UNAVAILABLE`, `UNSUPPORTED_EXTENSION`, `TIMEOUT`) across `.py`, `.js`/`.jsx`, `.ts`/`.tsx`, `.go`, `.rs`, and `.java`. Legacy `extract_named_nodes(source, path) -> set[str]` preserved 100% unchanged.
+  - `consequence_engine.py`: Semantic Change Graph (SCG) 5-stage symbol matching pipeline + 8 deterministic consequence detectors (`D01_PARSER_INCOMPLETE`, `D02_BODY_WEAKENING` / `D02_AMBIGUOUS_REFACTOR`, `D03_COMPOUND_LOSS`, `D04_PUBLIC_API_BREAK` v2 with import-alias/module disambiguation and container/file consolidation, `D05_BUILD_DEPENDENCY_DELTA`, `D06_GUARD_REGRESSION` v2 with guard condition polarity inversion, enforcement neutralization, boolean short-circuiting `and False`/`|| true`, Python/Go/JS state-guard removal, unconditional early-return bypass, and exception-swallowing detection, `D08_WORKFLOW_INTEGRITY` differential CI/workflow detector for `run:` expression injection, `pull_request_target` untrusted checkout, SHA pin downgrade, and `continue-on-error: true` gate weakening, and `D09_TEST_EROSION` for tautological assertion replacement and newly skipped tests).
   - `analyze.py`: Integrated `consequence_analysis` report section (`consequence.v1`) with configurable policy mode (`shadow` default, `advisory`, `enforce` via `payloadguard.yml` or `--consequence-mode`), CLI `print_report()` consequence output, collapsible `<details><summary>Evidence & Remediation</summary>` drill-down in `format_markdown_report()`, and SARIF 2.1.0 output (`format_sarif_report()`, `save_sarif_report()`, `--save-sarif`).
-  - **A03, A06 & Multi-Language Payload Validation**: Both previously bypassing adversarial cases (`adversarial/slow-deletion` and `adversarial/threshold-gaming`) plus 8 synthesized harness payloads (guard polarity inversion, early-return bypass, transaction exception swallow, rename+stub gutting, 4-language distributed loss, signature contract break, massive JS/TS rename refactor, and cross-file module split) are deterministically verified across `shadow`, `advisory`, and `enforce` modes, alongside all 38 permanent harness branches (`validate_manifest.py --verify-consequence`).
-  - **Test suite:** `315 passed in 2.50s` (`284` in `test_analyzer.py` + `31` in `test_consequence_engine.py`).
+  - **A03, A06, Mutation Suite & Multi-Language Payload Validation**: Both previously bypassing adversarial cases (`adversarial/slow-deletion` and `adversarial/threshold-gaming`), 16/16 adversarial and benign mutations in `run_mutation_suite.py` (0 FPs, 0 FNs), and all 41 test harness manifest cases (`validate_manifest.py --verify-consequence`) pass deterministically.
+  - **Test suite:** `320 passed in 2.79s` (`284` in `test_analyzer.py` + `36` in `test_consequence_engine.py`).
 - **Previous Sprint 1 — COMPLETE (2026-06-11, SHA 257d1f3):**
   - L2d AI tooling config poisoning detection shipped: `_scan_ai_tooling_configs()` + 8 helper functions.
   - Confirmed Miasma surfaces covered: `.claude/settings.json`, `.gemini/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, `package.json` lifecycle scripts, `composer.json` post-install-cmd, `Gemfile` system(), `binding.gyp` shell chain, `mcp.json`.
@@ -52,7 +62,7 @@
   - `scripts/pc-smoke-test.sh`: one-command build+run+verify. Run with `sudo bash scripts/pc-smoke-test.sh`.
 - **Phase 2 Stage 2 (Z3 proofs):** `tests/proofs/test_z3_properties.py`: P1–P10. `_MAX_OTHER_SCORE` updated 19→24 (Sprint 1).
 - **Phase 2 Stage 1 (auto-remediation):** `remediate.py` `WorkflowRemediator` operational.
-- **Test suite:** `python -m pytest test_analyzer.py -q` → **274 pass, 0 fail**. (Z3/CrossHair proof tests skip without external install.)
+- **Test suite:** `python -m pytest test_analyzer.py -q` → **284 pass, 0 fail**. (Z3/CrossHair proof tests skip without external install.)
 - **Open findings:** INC-3 (direct push to main).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
@@ -88,14 +98,14 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 | L5a Temporal | Branch age × target velocity drift score | `TemporalDriftAnalyzer` |
 | L5b Semantic | PR-MCI three-phase heuristic — deceptive description detection | `SemanticTransparencyAnalyzer` |
 | L5c Runtime | eBPF tracepoint agent — execve/connect/ptrace/procmem, audit+block | `agent/`, `_load_runtime_events()` |
-| SCG Consequence (`consequence.v1`) | 5-stage symbol matching + D01–D06 differential consequence detectors (`shadow`/`advisory`/`enforce`) | `consequence_engine.py`, `ConsequenceEngine` |
+| SCG Consequence (`consequence.v1`) | 5-stage symbol matching + D01–D09 differential consequence detectors (`shadow`/`advisory`/`enforce`) | `consequence_engine.py`, `ConsequenceEngine` |
 
 ### Key Files
 
 ```
 analyze.py                  — core analyser, all layers, CLI entry point
 structural_parser.py        — AST & Tree-sitter SymbolFact v1 + legacy node extraction (Python/JS/TS/TSX/Go/Rust/Java)
-consequence_engine.py       — Semantic Change Graph (SCG) 5-stage matcher & D01-D06 consequence detectors
+consequence_engine.py       — Semantic Change Graph (SCG) 5-stage matcher & D01-D09 consequence detectors
 post_check_run.py           — posts GitHub Check Run via App JWT (RS256)
 remediate.py                — auto-remediation: resolves action tags to SHAs, opens PR
 action.yml                  — GitHub Action composite wrapper
@@ -103,7 +113,7 @@ agent/                      — eBPF runtime defence agent (Go + cilium/ebpf)
 agent/bpf/probe.c           — 4 tracepoint probes + pg_config/egress_allow_ipv4 BPF maps
 scripts/pc-smoke-test.sh    — one-command build+verify on real kernel
 test_analyzer.py            — legacy & layer pytest suite (284 tests)
-test_consequence_engine.py  — SCG & consequence engine pytest suite (31 tests)
+test_consequence_engine.py  — SCG & consequence engine pytest suite (36 tests)
 tests/proofs/               — Z3 formal property proofs (P1–P10) + CrossHair pytest wrapper
 verification/        — CrossHair verification targets: consequence_pure (C1-C12), temporal_pure (T1-T7), structural_pure (S1-S7), semantic_pure (M1-M9)
 allowlist.yml        — SCA package allowlist (user-created, not in repo by default)
