@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "payloadguard-plg"
-version = "1.4.0"
+version = "1.5.0"
 description = "Scans a branch before merge and tells you exactly how badly it's going to hurt."
 readme = "README.md"
 license = "MIT"
