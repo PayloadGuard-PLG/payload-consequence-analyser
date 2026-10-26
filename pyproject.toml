@@ -47,8 +47,7 @@ Repository = "https://github.com/PayloadGuard-PLG/payload-consequence-analyser"
 "Bug Tracker" = "https://github.com/PayloadGuard-PLG/payload-consequence-analyser/issues"
 
 [tool.setuptools]
-py-modules = ["analyze", "structural_parser", "post_check_run", "remediate"]
-packages = ["consequence_engine"]
+py-modules = ["analyze", "structural_parser", "consequence_engine", "post_check_run", "remediate"]
 
 [tool.pytest.ini_options]
 markers = [

@@ -2,6 +2,14 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-26 — Distribution builds again (AUDIT_LOG §V3)
+
+**Defect:** `pyproject.toml` listed `consequence_engine` under `packages`, but it is the single-file module `consequence_engine.py`. setuptools stopped with "package directory 'consequence_engine' does not exist", so `pip install .` and the `python -m build` step in `publish.yml` failed for v1.4.0 and v1.5.0.
+
+**Repair:** `consequence_engine` moved to `py-modules`. Deleting the `packages` line alone would build a wheel without `consequence_engine.py`, which `analyze.py` imports at load time.
+
+**Tests:** `TestDistributionPackaging` checks the declared modules, checks that every first-party import of the shipped modules is shipped, and builds sdist → wheel as `publish.yml` does before running a scan through the installed entry point. 2 fail on `main` (`a388f05`); 3 pass after. A fresh-venv `pip install` and the `payloadguard` console script were verified separately (exit 2 destructive, exit 0 benign). Suite: 347 passed, 15 skipped. Harness oracle 41/41; mutation suite 16/16.
+
 ## 2026-10-26 — Action scans the PR head commit (AUDIT_LOG §V2)
 
 **Defect:** `action.yml` passed `github.head_ref` to `analyze.py`. Fork PR head branches do not exist in the base repository: a fork branch `patch-1` exited 1, and a fork branch named `main` resolved to the base repository's `main`, so base was diffed against itself and a PR gutting `Auth.verify` scanned SAFE with exit 0.
