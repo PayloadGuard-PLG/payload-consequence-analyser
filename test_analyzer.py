@@ -3256,13 +3256,16 @@ class TestPolicyReadFromTargetBranch(unittest.TestCase):
         _force_rmtree(cls.tmp)
 
     @classmethod
-    def _scan(cls, branch, description):
+    def _scan(cls, branch, description, extra_args=(), extra_env=None, tag=""):
         _run_git(cls.repo, "checkout", "-q", "--detach", branch)
-        report_path = os.path.join(cls.tmp, branch.replace("/", "_") + ".json")
+        report_path = os.path.join(cls.tmp, branch.replace("/", "_") + tag + ".json")
+        env = _fixture_env()
+        env.pop("PAYLOADGUARD_CONSEQUENCE_MODE", None)
+        env.update(extra_env or {})
         proc = subprocess.run(
             [sys.executable, _ANALYZE_PY, cls.repo, branch, "main",
-             "--pr-description", description, "--save-json", report_path],
-            env=_fixture_env(), capture_output=True, text=True, encoding="utf-8", errors="replace",
+             "--pr-description", description, "--save-json", report_path, *extra_args],
+            env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         if not os.path.exists(report_path):
             raise AssertionError(f"no report for {branch}:\n{proc.stdout}\n{proc.stderr}")
@@ -3297,6 +3300,24 @@ class TestPolicyReadFromTargetBranch(unittest.TestCase):
         self.assertEqual(rep["consequence_analysis"]["findings"], [])
         self.assertTrue(rep["sca"]["allowlist_active"])
         self.assertEqual(rep["verdict"]["status"], "SAFE")
+        self.assertEqual(code, 0)
+
+    # AUDIT_LOG §V6: --consequence-mode > PAYLOADGUARD_CONSEQUENCE_MODE > payloadguard.yml.
+
+    def test_cli_flag_takes_precedence_over_env_mode(self):
+        code, rep = self._scan(
+            "pr/gut-verify", "Tidy auth module", extra_args=("--consequence-mode", "shadow"),
+            extra_env={"PAYLOADGUARD_CONSEQUENCE_MODE": "enforce"}, tag="_flag",
+        )
+        self.assertEqual(rep["consequence_analysis"]["mode"], "shadow")
+        self.assertEqual(code, 0)
+
+    def test_env_mode_still_overrides_policy_file(self):
+        code, rep = self._scan(
+            "pr/gut-verify", "Tidy auth module",
+            extra_env={"PAYLOADGUARD_CONSEQUENCE_MODE": "advisory"}, tag="_env",
+        )
+        self.assertEqual(rep["consequence_analysis"]["mode"], "advisory")
         self.assertEqual(code, 0)
 
     def test_load_config_ref_reads_commit_not_working_tree(self):
@@ -3375,16 +3396,18 @@ class TestActionPolicyTrustBoundary(unittest.TestCase):
     def tearDownClass(cls):
         _force_rmtree(cls.tmp)
 
-    def _pr_scan(self, name, head_repo, head_branch, files, description, event_head_sha=True):
+    def _pr_scan(self, name, head_repo, head_branch, files, description, event_head_sha=True,
+                 consequence_mode=""):
         """Commit files on head_branch in head_repo, check the PR out as CI does, run the scan steps.
 
         event_head_sha=False leaves github.event.pull_request.head.sha empty, as on
-        events without a pull_request payload.
+        events without a pull_request payload. consequence_mode is the action's
+        `consequence-mode` input.
         """
         import yaml
 
         _run_git(head_repo, "checkout", "-q", "-B", head_branch, "origin/main")
-        _commit_files(head_repo, files, description)
+        _commit_files(head_repo, files, description or f"change on {head_branch}")
         if head_repo == self.seed:
             _run_git(head_repo, "push", "-q", "origin", head_branch)
 
@@ -3409,6 +3432,7 @@ class TestActionPolicyTrustBoundary(unittest.TestCase):
             "github.event.pull_request.head.sha": head_sha if event_head_sha else "",
             "inputs.pr-description": description,
             "inputs.save-markdown": "payloadguard-report.md",
+            "inputs.consequence-mode": consequence_mode,
         }
 
         def expand(value):
@@ -3440,8 +3464,11 @@ class TestActionPolicyTrustBoundary(unittest.TestCase):
 
         with open(output, encoding="utf-8") as fh:
             outputs = dict(line.split("=", 1) for line in fh.read().splitlines() if "=" in line)
-        with open(os.path.join(ci, "payloadguard-report.json"), encoding="utf-8") as fh:
-            report = json.load(fh)
+        report_path = os.path.join(ci, "payloadguard-report.json")
+        report = {}
+        if os.path.exists(report_path):
+            with open(report_path, encoding="utf-8") as fh:
+                report = json.load(fh)
         return outputs, report, head_sha
 
     def test_pr_policy_downgrade_still_blocks_through_action(self):
@@ -3495,6 +3522,45 @@ class TestActionPolicyTrustBoundary(unittest.TestCase):
         )
         self.assertEqual(report["temporal"]["branch_commit_hash"], head_sha[:7])
         self.assertEqual(outputs["exit_code"], "2")
+
+    # AUDIT_LOG §V5: the `verdict` output must carry REVIEW and CAUTION, not only
+    # SAFE/DESTRUCTIVE derived from the exit code.
+
+    def test_verdict_output_reports_review(self):
+        outputs, report, _ = self._pr_scan(
+            "verdict-review", self.seed, "feature/no-description", _POLICY_README_EDIT, "",
+        )
+        self.assertEqual(report["verdict"]["status"], "REVIEW")
+        self.assertEqual(outputs["exit_code"], "0")
+        self.assertEqual(outputs["verdict"], "REVIEW")
+
+    def test_verdict_output_reports_caution(self):
+        outputs, report, _ = self._pr_scan(
+            "verdict-caution", self.seed, "feature/new-dependency",
+            {"requirements.txt": "requests\nevilpkg\n"}, "Add HTTP helper dependency",
+        )
+        self.assertEqual(report["verdict"]["status"], "CAUTION")
+        self.assertEqual(outputs["exit_code"], "0")
+        self.assertEqual(outputs["verdict"], "CAUTION")
+
+    # AUDIT_LOG §V6: the action exposes the consequence mode as an input.
+
+    def test_consequence_mode_input_reaches_the_analyser(self):
+        outputs, report, _ = self._pr_scan(
+            "mode-input", self.seed, "feature/advisory",
+            {"auth.py": _POLICY_AUTH_GUTTED}, "Tidy auth module", consequence_mode="advisory",
+        )
+        self.assertEqual(report["consequence_analysis"]["mode"], "advisory")
+        self.assertEqual(outputs["exit_code"], "0")
+        self.assertEqual(outputs["verdict"], "REVIEW")
+
+    def test_invalid_consequence_mode_input_is_an_error_not_destructive(self):
+        outputs, _report, _ = self._pr_scan(
+            "mode-invalid", self.seed, "feature/bad-mode", _POLICY_README_EDIT,
+            "Document login helper usage", consequence_mode="enforced",
+        )
+        self.assertEqual(outputs["exit_code"], "1")
+        self.assertEqual(outputs["verdict"], "ERROR")
 
     def test_legitimate_fork_pr_passes_through_action(self):
         outputs, report, head_sha = self._pr_scan(

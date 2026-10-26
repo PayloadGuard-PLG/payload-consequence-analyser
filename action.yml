@@ -15,6 +15,13 @@ inputs:
     description: PR description for semantic transparency analysis — pass github.event.pull_request.body
     required: false
     default: ""
+  consequence-mode:
+    description: >
+      Consequence engine policy mode: shadow | advisory | enforce. Empty uses
+      consequence.mode from payloadguard.yml on the target branch (default shadow).
+      enforce sets exit code 2 on BLOCK findings.
+    required: false
+    default: ""
   save-markdown:
     description: Filename for the markdown report
     required: false
@@ -57,7 +64,7 @@ outputs:
     description: Absolute path to the generated JSON report
     value: ${{ steps.scan.outputs.json_report_path }}
   verdict:
-    description: "Verdict string: SAFE, REVIEW, CAUTION, or DESTRUCTIVE"
+    description: "Verdict string: SAFE, REVIEW, CAUTION, or DESTRUCTIVE (ERROR when the analysis failed)"
     value: ${{ steps.scan.outputs.verdict }}
   runtime-events-path:
     description: Path to pg-runtime-events.json (only set when runtime-mode != disabled)
@@ -113,6 +120,7 @@ runs:
       env:
         PYTHONUTF8: "1"
         PG_PR_DESCRIPTION: ${{ inputs.pr-description }}
+        PG_CONSEQUENCE_MODE: ${{ inputs.consequence-mode }}
         PG_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         PG_HEAD_REF: ${{ github.head_ref }}
         PG_BASE_REF: ${{ github.base_ref }}
@@ -120,20 +128,39 @@ runs:
         JSON_REPORT_PATH: ${{ github.workspace }}/payloadguard-report.json
       run: |
         set +e
-        python "$GITHUB_ACTION_PATH/analyze.py" . \
-          "${PG_HEAD_SHA:-$PG_HEAD_REF}" "$PG_BASE_REF" \
-          --pr-description "$PG_PR_DESCRIPTION" \
-          --save-markdown "$REPORT_PATH" \
-          --save-json "$JSON_REPORT_PATH"
-        EXIT=$?
+        # Validate the mode here: an argparse usage error exits 2, which would
+        # read as DESTRUCTIVE.
+        MODE_ARGS=()
+        case "$PG_CONSEQUENCE_MODE" in
+          "") ;;
+          shadow|advisory|enforce) MODE_ARGS=(--consequence-mode "$PG_CONSEQUENCE_MODE") ;;
+          *) MODE_INVALID=1 ;;
+        esac
+        if [ -n "$MODE_INVALID" ]; then
+          echo "::error::consequence-mode must be one of: shadow, advisory, enforce"
+          EXIT=1
+        else
+          python "$GITHUB_ACTION_PATH/analyze.py" . \
+            "${PG_HEAD_SHA:-$PG_HEAD_REF}" "$PG_BASE_REF" \
+            --pr-description "$PG_PR_DESCRIPTION" \
+            --save-markdown "$REPORT_PATH" \
+            --save-json "$JSON_REPORT_PATH" \
+            "${MODE_ARGS[@]}"
+          EXIT=$?
+        fi
         echo "exit_code=$EXIT" >> "$GITHUB_OUTPUT"
         echo "report_path=$REPORT_PATH" >> "$GITHUB_OUTPUT"
         echo "json_report_path=$JSON_REPORT_PATH" >> "$GITHUB_OUTPUT"
-        case $EXIT in
-          0) echo "verdict=SAFE"        >> "$GITHUB_OUTPUT" ;;
-          2) echo "verdict=DESTRUCTIVE" >> "$GITHUB_OUTPUT" ;;
-          *) echo "verdict=ERROR"       >> "$GITHUB_OUTPUT" ;;
-        esac
+        # Exit 0 covers SAFE, REVIEW and CAUTION; the JSON report carries the verdict.
+        VERDICT=ERROR
+        if [ "$EXIT" = 0 ] || [ "$EXIT" = 2 ]; then
+          VERDICT=$(python -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["verdict"]["status"])' "$JSON_REPORT_PATH" 2>/dev/null)
+          case "$VERDICT" in
+            SAFE|REVIEW|CAUTION|DESTRUCTIVE) ;;
+            *) if [ "$EXIT" = 2 ]; then VERDICT=DESTRUCTIVE; else VERDICT=SAFE; fi ;;
+          esac
+        fi
+        echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
 
     - name: Post PR comment
       if: always()
