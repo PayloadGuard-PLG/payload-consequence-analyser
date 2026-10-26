@@ -130,6 +130,7 @@ where a single deletion produces a high ratio.
 | P-02 | `target_velocity >= 0.0` |
 | P-03 | `warning_threshold > 0.0` |
 | P-04 | `critical_threshold > warning_threshold` |
+| P-05 | `math.isfinite(target_velocity)` — added 2026-10-26 (`AUDIT_LOG.md` §V10); `analyze_drift()` raises `ValueError` for non-finite or negative age and velocity |
 
 **Contracts:**
 
@@ -230,7 +231,7 @@ CI runs Dafny automatically on any PR touching `verification/dafny/**` via `.git
 
 ```bash
 pytest tests/proofs/ -v --timeout=60
-# Expected: 274 pass, 7 skip
+# Expected: 16 passed (10 Z3 properties + 5 CrossHair wrappers + 1 temporal contract regression)
 ```
 
 ---

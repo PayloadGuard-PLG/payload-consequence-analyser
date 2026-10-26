@@ -1,6 +1,6 @@
 # PayloadGuard — Technical Whitepaper
 
-**Version:** 1.3.0 — May 2026
+**Version:** 1.5.0 — October 2026
 **Repository:** `PayloadGuard-PLG/payload-consequence-analyser`
 **Status:** Live on main
 
@@ -32,6 +32,8 @@ The system assigns a severity score across independent signal dimensions and pro
 - Layer 5b v2 — PR-MCI three-phase heuristic semantic transparency engine (mci_score ∈ [0,1])
 - Layer 5c — eBPF Runtime Defence Agent: 4 tracepoint probes (execve/connect/ptrace/procmem), audit+block mode, egress IPv4 allowlist, `bpf_send_signal(9)` kernel-side blocking. Verified on WSL2 kernel 6.6 and GitHub Actions Ubuntu runners.
 - GitHub Actions infrastructure hardening (all actions SHA-pinned)
+
+**v1.4.0–v1.5.0** add Layer 2d AI tooling configuration poisoning detection and the Semantic Change Graph consequence engine (`consequence.v1`, detectors D01–D10) with `shadow`, `advisory` and `enforce` policy modes. Fixes on `main` after v1.5.0 read policy files from the target branch, scan pull request heads by commit, and correct packaging, D01 coverage reporting and the Action's verdict and mode handling (`AUDIT_LOG.md` §V1–§V7).
 
 Against a 41-case active test suite covering safe baselines, canonical destructive payloads, boundary conditions, purpose-built evasion techniques, CI pipeline poisoning, and eBPF runtime fixtures, PayloadGuard achieves **≥97%** detection at default thresholds with zero false positives on safe baselines.
 
@@ -675,7 +677,7 @@ crosshair check structural_pure  --analysis_kind PEP316 --per_condition_timeout 
 crosshair check temporal_pure    --analysis_kind PEP316 --per_condition_timeout 30
 crosshair check semantic_pure    --analysis_kind PEP316 --per_condition_timeout 30
 
-# Via pytest (272 pass, 7 skip, ~9s total)
+# Via pytest (16 pass: 10 Z3 properties + 5 CrossHair wrappers + 1 temporal contract regression, ~10 s)
 pytest tests/proofs/ -v --timeout=60
 ```
 
@@ -890,7 +892,7 @@ Out-of-order threshold lists are auto-sorted after load. Deep-merge semantics �
 
 In the legacy additive L3 scoring model, an adversary who tunes every metric to sit just below its individual threshold (`A06`) or distributes single-symbol deletions across many files (`A03` at <20% aggregate AST node ratio) scores 0 points (`SAFE`).
 
-**Mitigation in v1.4.0 (`consequence.v1`):** The SCG Consequence Engine (`consequence_engine/`) resolves both `A03` and `A06` via `D03_COMPOUND_LOSS`, `D04_PUBLIC_API_BREAK`, and `D06_GUARD_REGRESSION` after Stage 1–4 symbol matching filters out benign renames and cross-file moves (`D01_RENAME_MOVE`). In `shadow` mode (default), these findings are emitted in the JSON `consequence` block, CLI output, Markdown PR comment, and SARIF 2.1.0 report while keeping legacy L3 verdicts unchanged; in `enforce` mode (`--consequence-mode enforce`), both `A03` and `A06` escalate to `DESTRUCTIVE` (exit code `2`) with zero false positives on multi-file refactors.
+**Mitigation in v1.4.0 (`consequence.v1`):** The SCG Consequence Engine (`consequence_engine.py`) resolves both `A03` and `A06` via `D03_COMPOUND_LOSS`, `D04_PUBLIC_API_BREAK`, and `D06_GUARD_REGRESSION` after Stage 1–4 symbol matching filters out benign renames and cross-file moves (`D01_RENAME_MOVE`). In `shadow` mode (default), these findings are emitted in the JSON `consequence` block, CLI output, Markdown PR comment, and SARIF 2.1.0 report while keeping legacy L3 verdicts unchanged; in `enforce` mode (`--consequence-mode enforce`), both `A03` and `A06` escalate to `DESTRUCTIVE` (exit code `2`) with zero false positives on multi-file refactors.
 
 ### 8.2 Generated Code Volume
 

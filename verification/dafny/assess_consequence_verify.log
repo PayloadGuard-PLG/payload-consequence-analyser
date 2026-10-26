@@ -1,14 +1,18 @@
 # Dafny verification log
-# Generated: 2026-05-28T19:46:34Z
-# Dafny: 4.9.1+452c307284e1511e5c2d10b9615f4c9c15f010e2
-# Boogie + Z3 4.12.1 (bundled)
-# Platform: ubuntu-20.04 (GitHub Actions runner)
+# Generated: 2026-10-26T12:19:20Z
+# Source: GitHub Actions "Dafny Verification" run #16 (workflow_dispatch)
+#         https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/runs/40321614747
+# Commit: 9e83cce0a32d9573433c2320cbc07a28b2048a31 (main)
+# Dafny: 4.9.1 release zip (dafny-4.9.1-x64-ubuntu-20.04.zip), Boogie + Z3 4.12.1 (bundled)
+# Platform: ubuntu-24.04 (GitHub Actions runner image 20261012.334.1)
+# Previous log: 2026-05-28T19:46:34Z, which predated the 2026-06-11 change to assess_consequence.dfy
 
 ## assess_consequence.dfy
 
-# Verifies: AssessConsequence (main method, 11 postconditions POST-1–11a)
+# Verifies: AssessConsequence (main method, 12 postconditions POST-1–12, incl. POST-11a)
 #           + AgeScore, FilesScore, LinesScore, RatioScore, DeletionDim,
 #             ContentFlagsScore (6 pure helper functions with bounds ensures)
+# Includes the Sprint 1 change (257d1f3): MAX_SCORE 36, POST-12 (AI config poisoning CRITICAL)
 # Total verified units: 7 (6 helpers + 1 method)
 
 Dafny program verifier finished with 7 verified, 0 errors

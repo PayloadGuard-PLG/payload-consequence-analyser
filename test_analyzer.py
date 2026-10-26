@@ -706,6 +706,21 @@ class TestTemporalDriftAnalyzer(unittest.TestCase):
         with self.assertRaises(ValueError):
             TemporalDriftAnalyzer(10, -1.0).analyze_drift()
 
+    # AUDIT_LOG §V10: 0 * inf is NaN, which compares below every threshold and was
+    # classified CURRENT. Non-finite inputs are rejected like negative ones.
+
+    def test_infinite_velocity_raises(self):
+        with self.assertRaises(ValueError):
+            TemporalDriftAnalyzer(0, float("inf")).analyze_drift()
+
+    def test_nan_velocity_raises(self):
+        with self.assertRaises(ValueError):
+            TemporalDriftAnalyzer(10, float("nan")).analyze_drift()
+
+    def test_infinite_age_raises(self):
+        with self.assertRaises(ValueError):
+            TemporalDriftAnalyzer(float("inf"), 1.0).analyze_drift()
+
     def test_drift_score_calculated_correctly(self):
         result = TemporalDriftAnalyzer(30, 4.0).analyze_drift()
         self.assertAlmostEqual(result["metrics"]["calculated_drift_score"], 120.0)

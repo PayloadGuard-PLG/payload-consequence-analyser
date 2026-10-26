@@ -1,7 +1,7 @@
 # PayloadGuard — Test Registry
 
-**Last run:** 2026-05-28 08:48 UTC  
-**Result:** 272 passed · 7 skipped · 0 failed · 279 total
+**Last run:** 2026-10-26 12:41 UTC  
+**Result:** 326 passed · 0 skipped · 0 failed · 326 total
 
 Run with: `python -m pytest test_analyzer.py tests/proofs/ --timeout=30 -v`  
 Regenerate this file: `python tools/gen_test_registry.py`
@@ -132,7 +132,10 @@ Regenerate this file: `python tools/gen_test_registry.py`
 - ✓ `test_below_warning_threshold_is_current`
 - ✓ `test_custom_thresholds`
 - ✓ `test_drift_score_calculated_correctly`
+- ✓ `test_infinite_age_raises`
+- ✓ `test_infinite_velocity_raises`
 - ✓ `test_metrics_block_present`
+- ✓ `test_nan_velocity_raises`
 - ✓ `test_negative_age_raises`
 - ✓ `test_negative_velocity_raises`
 - ✓ `test_recommendation_present`
@@ -211,10 +214,10 @@ Regenerate this file: `python tools/gen_test_registry.py`
 
 ## test_analyzer.py — TestPostCheckRun
 
-- ○ `test_main_skips_without_app_id`
-- ○ `test_malformed_private_key_raises_clear_error`
-- ○ `test_require_env_raises_on_missing_var`
-- ○ `test_require_env_returns_stripped_value`
+- ✓ `test_main_skips_without_app_id`
+- ✓ `test_malformed_private_key_raises_clear_error`
+- ✓ `test_require_env_raises_on_missing_var`
+- ✓ `test_require_env_returns_stripped_value`
 
 ## test_analyzer.py — TestCrossFileAggregation
 
@@ -227,9 +230,9 @@ Regenerate this file: `python tools/gen_test_registry.py`
 
 ## test_analyzer.py — TestStructuralParserJSTS
 
-- ○ `test_js_arrow_function_const_still_detected`
-- ○ `test_js_const_deletion_detected`
-- ○ `test_ts_const_deletion_detected`
+- ✓ `test_js_arrow_function_const_still_detected`
+- ✓ `test_js_const_deletion_detected`
+- ✓ `test_ts_const_deletion_detected`
 
 ## test_analyzer.py — TestMarkdownTruncation
 
@@ -317,6 +320,7 @@ Regenerate this file: `python tools/gen_test_registry.py`
 - ✓ `test_high_signal_scores_caution`
 - ✓ `test_legitimate_oidc_consumer_still_passes`
 - ✓ `test_modified_workflow_also_scanned`
+- ✓ `test_multiline_curl_credential_harvest_detected`
 - ✓ `test_non_workflow_yaml_skipped`
 - ✓ `test_oidc_elevation_with_legitimate_consumer_is_safe`
 - ✓ `test_oidc_elevation_without_consumer`
@@ -381,11 +385,69 @@ Regenerate this file: `python tools/gen_test_registry.py`
 - ✓ `test_third_party_action_not_first_party`
 - ✓ `test_yaml_patch_substitutes_sha`
 
+## test_analyzer.py — TestAIToolingConfigPoisoning
+
+- ✓ `test_ai_config_critical_scores_destructive`
+- ✓ `test_ai_config_disabled_via_config`
+- ✓ `test_ai_config_flag_text_in_verdict`
+- ✓ `test_ai_config_high_scores_caution`
+- ✓ `test_ai_config_key_in_report`
+- ✓ `test_binding_gyp_safe_require_not_flagged`
+- ✓ `test_binding_gyp_shell_chain_critical`
+- ✓ `test_claude_settings_legitimate_hook_is_safe`
+- ✓ `test_claude_settings_session_hook_critical`
+- ✓ `test_cursor_rule_alwaysapply_with_exec_imperative`
+- ✓ `test_cursor_rule_alwaysapply_without_exec_is_safe`
+- ✓ `test_full_scan_detects_claude_session_hook`
+- ✓ `test_gemini_settings_session_hook_critical`
+- ✓ `test_vscode_tasks_folder_open_critical`
+- ✓ `test_vscode_tasks_no_folder_open_is_safe`
+- ✓ `test_zero_ai_config_inputs_still_safe`
+
+## test_analyzer.py — TestOwnWorkflowsNotInjectable
+
+- ✓ `test_no_untrusted_context_in_any_run_body`
+- ✓ `test_run_body_iterator_finds_steps`
+- ✓ `test_scanner_finds_a_planted_offender`
+
+## test_analyzer.py — TestPolicyReadFromTargetBranch
+
+- ✓ `test_cli_flag_takes_precedence_over_env_mode`
+- ✓ `test_control_destructive_change_blocks_under_base_policy`
+- ✓ `test_env_mode_still_overrides_policy_file`
+- ✓ `test_legitimate_change_passes_under_base_policy`
+- ✓ `test_load_config_ref_reads_commit_not_working_tree`
+- ✓ `test_policy_ref_falls_back_to_origin`
+- ✓ `test_policy_ref_missing_file_or_ref_returns_defaults`
+- ✓ `test_pr_cannot_allowlist_its_own_dependency`
+- ✓ `test_pr_cannot_downgrade_its_own_consequence_mode`
+- ✓ `test_pr_cannot_raise_its_own_thresholds`
+
+## test_analyzer.py — TestActionPolicyTrustBoundary
+
+- ✓ `test_consequence_mode_input_reaches_the_analyser`
+- ✓ `test_fork_pr_from_colliding_branch_name_scans_the_pr_head`
+- ✓ `test_fork_pr_from_fork_only_branch_scans_the_pr_head`
+- ✓ `test_head_ref_fallback_without_pull_request_payload`
+- ✓ `test_invalid_consequence_mode_input_is_an_error_not_destructive`
+- ✓ `test_legitimate_fork_pr_passes_through_action`
+- ✓ `test_legitimate_pr_passes_through_action`
+- ✓ `test_pr_policy_downgrade_still_blocks_through_action`
+- ✓ `test_verdict_output_reports_caution`
+- ✓ `test_verdict_output_reports_review`
+
+## test_analyzer.py — TestDistributionPackaging
+
+- ✓ `test_built_distribution_runs_a_scan`
+- ✓ `test_declared_modules_and_packages_exist`
+- ✓ `test_shipped_modules_include_their_first_party_imports`
+
 ## tests/proofs/test_crosshair_contracts.py — test_crosshair_contracts
 
 - ✓ `test_crosshair_deletion_dim_contracts`
 - ✓ `test_crosshair_assess_consequence_contracts`
 - ✓ `test_crosshair_temporal_drift_contracts`
+- ✓ `test_temporal_contract_excludes_non_finite_velocity`
 - ✓ `test_crosshair_structural_drift_contracts`
 - ✓ `test_crosshair_semantic_mci_contracts`
 

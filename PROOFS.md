@@ -1,17 +1,18 @@
 # PayloadGuard — Formal Verification Record
 
-This page is the authoritative proof artifact record for PayloadGuard v1.3.0.
+This page is the authoritative proof artifact record for PayloadGuard v1.5.0 and the fixes on
+`main` after it (proofs last run 2026-10-26 on `main` `9e83cce`, plus the §V10 change `c74f612`).
 Three independent verification methods — Dafny, CrossHair, and Z3 — cover the same
 scoring logic from different angles. A defect would have to produce a consistent
 false result across all three simultaneously to go undetected.
 
-**Quick summary:**
+**Quick summary (2026-10-26):**
 
 | Method | Tool | Scope | Result |
 |---|---|---|---|
-| Machine-checked proofs | Dafny 4.9.1 + Boogie + Z3 | L3, L4, L5a — entire input domain | 9 methods/functions verified, 0 errors |
-| Symbolic execution | CrossHair (PEP316 contracts) | L3, L4, L5a, L5b — active Python source | 35 contracts, 0 counterexamples |
-| SMT proofs | Z3 Theorem Prover | L3, L2c — abstract scoring model | 10 properties, all `unsat` in < 0.1 s |
+| Machine-checked proofs | Dafny 4.9.1 + Boogie + Z3 4.12.1 | L3, L4, L5a — entire input domain | 9 methods/functions verified, 0 errors (GitHub Actions run #16) |
+| Symbolic execution | CrossHair 0.0.112 (PEP316 contracts) | L3, L4, L5a, L5b — pure-Python mirror modules in `verification/` | 36 postconditions, 0 counterexamples after the §V10 fix (one counterexample found and fixed in `temporal_pure`) |
+| SMT proofs | Z3 (z3-solver 5.3.2.0) | L3, L2c — abstract scoring model | 10 properties, all `unsat`; P9 is vacuous as encoded (§V8) |
 
 → Committed proof files: [`verification/dafny/`](verification/dafny/) · [`verification/`](verification/)  
 → CI workflow: [`.github/workflows/verify-dafny.yml`](.github/workflows/verify-dafny.yml)  
@@ -28,13 +29,16 @@ Every `ensures` clause is a machine-checked theorem.
 ### Tool and version
 
 ```
-Dafny 4.9.1+452c307284e1511e5c2d10b9615f4c9c15f010e2
-Boogie (bundled)
-Z3 4.12.1 (bundled)
-Generated: 2026-05-28T19:46:34Z
+Dafny 4.9.1 (release zip), Boogie + Z3 4.12.1 (bundled)
+Generated: 2026-10-26T12:19:20Z — GitHub Actions "Dafny Verification" run #16, ubuntu-24.04
+Commit: 9e83cce (main)
 ```
 
 ### Committed verification output
+
+This run covers the current `assess_consequence.dfy`, including the 2026-06-11 Sprint 1 change
+(`MAX_SCORE` 36, POST-12). The previous committed output (2026-05-28) predated that change
+(`AUDIT_LOG.md` §V9).
 
 ```
 ## assess_consequence.dfy
@@ -56,58 +60,65 @@ Source: [`verification/dafny/assess_consequence.dfy`](verification/dafny/assess_
 "7 verified" = 6 pure helper functions (AgeScore, FilesScore, LinesScore, RatioScore,
 DeletionDim, ContentFlagsScore) + 1 main method (AssessConsequence).
 
-The `AssessConsequence` method carries 11 active postconditions:
+The `AssessConsequence` method carries 12 postconditions (POST-1–12, including POST-11a).
+Excerpt from the current `assess_consequence.dfy` (`MAX_SCORE` = 36):
 
 ```dafny
 method AssessConsequence(
-    files_deleted: nat, lines_deleted: nat, days_old: nat,
-    deletion_ratio: real, structural_severity: string,
-    critical_file_deletions: nat, security_file_deletions: nat,
-    unverified_dependencies: nat, content_flags: nat,
-    actions_poisoning_flags: nat, actions_poisoning_critical: bool
+    files_deleted:             nat,
+    lines_deleted:             nat,
+    days_old:                  nat,
+    deletion_ratio:            real,
+    structural_severity:       string,
+    critical_file_deletions:   nat,
+    security_file_deletions:   nat,
+    unverified_dependencies:   nat,
+    content_flags:             nat,
+    actions_poisoning_flags:   nat,
+    actions_poisoning_critical: bool,
+    ai_config_poisoning_flags:  nat,
+    ai_config_poisoning_critical: bool
 ) returns (status: string, severity_score: int)
 
     requires 0.0 <= deletion_ratio <= 100.0
     requires structural_severity == "LOW" || structural_severity == "MEDIUM" ||
              structural_severity == "HIGH" || structural_severity == "CRITICAL"
 
-    // POST-1: verdict is always one of four valid values
+    // POST-1: status is one of four valid verdicts
     ensures status == "SAFE" || status == "REVIEW" ||
             status == "CAUTION" || status == "DESTRUCTIVE"
 
     // POST-2: score is non-negative
     ensures severity_score >= 0
 
-    // POST-3: score does not exceed 31 (sum of all signal maximums)
-    ensures severity_score <= 31
+    // POST-3: score does not exceed the sum of all signal maximums (36)
+    ensures severity_score <= MAX_SCORE
 
-    // POST-4: SAFE ↔ score < 1
-    ensures (status == "SAFE") <==> (severity_score < 1)
+    // POST-4–7: verdict ↔ score bijection (exhaustive, mutually exclusive)
+    ensures (status == "SAFE")        <==> (severity_score < REVIEW_THRESHOLD)
+    ensures (status == "REVIEW")      <==> (REVIEW_THRESHOLD <= severity_score < CAUTION_THRESHOLD)
+    ensures (status == "CAUTION")     <==> (CAUTION_THRESHOLD <= severity_score < DESTRUCTIVE_THRESHOLD)
+    ensures (status == "DESTRUCTIVE") <==> (severity_score >= DESTRUCTIVE_THRESHOLD)
 
-    // POST-5: REVIEW ↔ score in [1, 3)
-    ensures (status == "REVIEW") <==> (1 <= severity_score < 3)
-
-    // POST-6: CAUTION ↔ score in [3, 5)
-    ensures (status == "CAUTION") <==> (3 <= severity_score < 5)
-
-    // POST-7: DESTRUCTIVE ↔ score ≥ 5
-    ensures (status == "DESTRUCTIVE") <==> (severity_score >= 5)
-
-    // POST-8: any security file deletion forces DESTRUCTIVE (+5 contribution)
+    // POST-8: any security file deletion forces DESTRUCTIVE (contributes +5)
     ensures security_file_deletions > 0 ==> status == "DESTRUCTIVE"
 
-    // POST-9: structural CRITICAL forces DESTRUCTIVE (+5 contribution)
+    // POST-9: structural CRITICAL forces DESTRUCTIVE (contributes +5)
     ensures structural_severity == "CRITICAL" ==> status == "DESTRUCTIVE"
 
-    // POST-10: actions poisoning CRITICAL forces DESTRUCTIVE (+5 contribution)
+    // POST-10: actions poisoning CRITICAL forces DESTRUCTIVE (contributes +5)
     ensures actions_poisoning_critical ==> status == "DESTRUCTIVE"
 
-    // POST-11a: all-zero inputs yield SAFE — no false positives on empty diffs
+    // POST-12: AI tooling config poisoning CRITICAL forces DESTRUCTIVE (contributes +5)
+    ensures ai_config_poisoning_critical ==> status == "DESTRUCTIVE"
+
+    // POST-11a: all-zero inputs yield SAFE (no false positives on empty diffs)
     ensures files_deleted == 0 && lines_deleted == 0 && days_old == 0 &&
             deletion_ratio == 0.0 && structural_severity == "LOW" &&
             critical_file_deletions == 0 && security_file_deletions == 0 &&
             unverified_dependencies == 0 && content_flags == 0 &&
-            actions_poisoning_flags == 0 && !actions_poisoning_critical
+            actions_poisoning_flags == 0 && !actions_poisoning_critical &&
+            ai_config_poisoning_flags == 0 && !ai_config_poisoning_critical
             ==> status == "SAFE"
 ```
 
@@ -188,6 +199,23 @@ crosshair check semantic_pure    --analysis_kind PEP316 --per_condition_timeout 
 **Expected result:** exit code 0, no output. Any counterexample is printed to stdout with
 the specific input values and violated contract name.
 
+**Last run (2026-10-26):** the commands above with `--report_all`, CrossHair 0.0.112, local
+Windows 11 / Python 3.14.3, after the §V10 fix (`c74f612`). "Confirmed over all paths" means
+CrossHair exhausted every execution path; "Not confirmed" means no counterexample was found
+within the 30 s per-condition budget but the path space was not exhausted (typical for float
+arithmetic).
+
+| Module | Exit | Time | Confirmed over all paths | Not confirmed | Counterexamples |
+|---|---|---|---|---|---|
+| `consequence_pure` | 0 | 366 s | 1 (C-12, `deletion_dim`) | 12 (C-01–C-11, POST-12) | 0 |
+| `structural_pure` | 0 | 224 s | 0 | 7 (S-01–S-07) | 0 |
+| `temporal_pure` | 0 | 219 s | 0 | 7 (T-01–T-07) | 0 |
+| `semantic_pure` | 0 | 11 s | 9 (M-01–M-09) | 0 | 0 |
+
+Before the §V10 fix, `temporal_pure` exited 1 with a counterexample
+(`analyze_drift_pure(0, float("inf"), 0.25, 0.5)` → `drift_score` NaN, violating T-02 and T-05).
+The five pytest wrappers in `tests/proofs/` use a 10 s budget and did not reach that input.
+
 ### L3 Contracts (C1–C12)
 
 Source: [`verification/consequence_pure.py`](verification/consequence_pure.py)
@@ -196,7 +224,7 @@ Source: [`verification/consequence_pure.py`](verification/consequence_pure.py)
 |---|---|
 | C-01 | `verdict in {"SAFE", "REVIEW", "CAUTION", "DESTRUCTIVE"}` |
 | C-02 | `severity_score >= 0` |
-| C-03 | `severity_score <= 31` |
+| C-03 | `severity_score <= 36` |
 | C-04 | `verdict == "SAFE" ↔ severity_score < 1` |
 | C-05 | `verdict == "REVIEW" ↔ 1 <= severity_score < 3` |
 | C-06 | `verdict == "CAUTION" ↔ 3 <= severity_score < 5` |
@@ -206,6 +234,7 @@ Source: [`verification/consequence_pure.py`](verification/consequence_pure.py)
 | C-10 | `actions_poisoning_critical → verdict == "DESTRUCTIVE"` |
 | C-11 | `all-zero inputs → verdict == "SAFE"` |
 | C-12 | `deletion_dim ∈ [0, 4]` |
+| POST-12 | `ai_config_poisoning_critical → verdict == "DESTRUCTIVE"` |
 
 ### L4 Contracts (S1–S7)
 
@@ -234,6 +263,13 @@ Source: [`verification/temporal_pure.py`](verification/temporal_pure.py)
 | T-05 | `CURRENT → drift_score < warning_threshold` |
 | T-06 | `branch_age_days == 0 → CURRENT` |
 | T-07 | `target_velocity == 0.0 → CURRENT` |
+
+Preconditions: `branch_age_days >= 0`, `target_velocity >= 0.0`, `math.isfinite(target_velocity)`,
+`warning_threshold > 0.0`, `critical_threshold > warning_threshold`. The finite-velocity
+precondition was added on 2026-10-26 after CrossHair found `analyze_drift_pure(0, inf, …)`
+returning a NaN drift score (`AUDIT_LOG.md` §V10); `TemporalDriftAnalyzer.analyze_drift()` now
+raises `ValueError` for non-finite inputs. Dafny's `real` has no infinity or NaN, so
+`temporal_drift.dfy` was unaffected.
 
 ### L5b Contracts (M1–M9)
 
@@ -270,15 +306,19 @@ pytest tests/proofs/test_z3_properties.py -m proof -v --timeout=30
 | Property | What is proven |
 |---|---|
 | P1 | `oidc_elevation_typosquatted` fires → score contribution ≥ CRITICAL_SCORE (5) |
-| P2 | Typosquat with zero other signals → score ≥ DESTRUCTIVE threshold (5) |
-| P3 | Score monotonicity — adding a signal never decreases the verdict |
-| P4 | SAFE verdict → score < DESTRUCTIVE threshold |
-| P5 | DESTRUCTIVE verdict → score ≥ DESTRUCTIVE threshold |
-| P6 | Both SAFE and DESTRUCTIVE cannot hold simultaneously |
-| P7 | Every score value in [0, 31] maps to exactly one verdict |
-| P8 | Safety-critical floor: `security_file_deletions > 0` forces score ≥ 5 |
-| P9 | Safety-critical floor: `structural_severity == CRITICAL` forces score ≥ 5 |
-| P10 | Empty-input guarantee: all-zero inputs produce score = 0 → SAFE |
+| P2 | Typosquat (CRITICAL +5) with zero other signals → score ≥ DESTRUCTIVE threshold (5) |
+| P3 | No trust-signal subtraction can reduce a typosquat score below the DESTRUCTIVE threshold |
+| P4 | CRITICAL_SCORE > HIGH_SCORE (severity mapping is strictly ordered) |
+| P5 | Adding a CRITICAL signal to any base score never decreases the total |
+| P6 | SAFE verdict ↔ score < REVIEW threshold (both directions) |
+| P7 | Identical scores always produce identical verdicts |
+| P8 | Any score that includes a typosquat contribution cannot be SAFE |
+| P9 | Total score is bounded by `_MAX_OTHER_SCORE + CRITICAL_SCORE` (24 + 5) — vacuous as encoded, see note |
+| P10 | Zero signals → score = 0 → SAFE |
+
+**Last run:** 2026-10-26 — 10 passed (`z3-solver` 5.3.2.0), Windows 11, Python 3.14.3, on `main` `9e83cce`.
+
+**Note on P9:** the test adds `score <= _HARD_UPPER` as a constraint and then checks `score > _HARD_UPPER`, which is unsatisfiable by construction; it does not relate the bound to the scoring model. The code comment also states the bound as 24 rather than 29. The score upper bound is established by CrossHair C-03 and Dafny POST-3. Recorded as `AUDIT_LOG.md` §V8.
 
 ---
 
@@ -287,8 +327,9 @@ pytest tests/proofs/test_z3_properties.py -m proof -v --timeout=30
 ### Dafny
 
 ```bash
-# Install (requires .NET SDK)
-dotnet tool install --global dafny   # installs 4.x with bundled Z3
+# Install Dafny 4.9.1 from the release zip, which bundles Z3 4.12.1
+# (the dotnet tool package does not bundle Z3). CI does the same:
+# .github/workflows/verify-dafny.yml (also runnable via workflow_dispatch).
 
 # Verify
 dafny verify verification/dafny/assess_consequence.dfy
@@ -315,9 +356,9 @@ crosshair check semantic_pure    --analysis_kind PEP316 --per_condition_timeout 
 ### Z3 + full proof suite
 
 ```bash
-pip install z3-solver pytest
+pip install z3-solver crosshair-tool pytest pytest-timeout
 pytest tests/proofs/ -v --timeout=60
-# Expected: 272 pass, 7 skip
+# Expected: 16 passed (10 Z3 properties + 5 CrossHair contract wrappers + 1 temporal contract regression)
 ```
 
 ---

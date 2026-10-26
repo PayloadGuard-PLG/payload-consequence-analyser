@@ -11,6 +11,8 @@ Verification command (run from this directory):
         --per_condition_timeout 30 --max_uninteresting_iterations 10
 """
 
+import math
+
 
 def analyze_drift_pure(
     branch_age_days: int,
@@ -23,9 +25,12 @@ def analyze_drift_pure(
 
     Drift Score = branch_age_days * target_velocity_commits_per_day.
     Two thresholds classify the score into three risk bands.
+    The production method raises ValueError for negative or non-finite age and
+    velocity, so those inputs are outside the contract domain (AUDIT_LOG §V10).
 
     pre: branch_age_days >= 0
     pre: target_velocity >= 0.0
+    pre: math.isfinite(target_velocity)
     pre: warning_threshold > 0.0
     pre: critical_threshold > warning_threshold
     post: __return__["status"] in ("CURRENT", "STALE", "DANGEROUS")

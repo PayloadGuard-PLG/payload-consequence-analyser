@@ -1,17 +1,17 @@
 # PayloadGuard
 
-> PayloadGuard is a static analysis GitHub Action that forensically intercepts pull requests for destructive, deceptive, or malicious code payloads. It performs a 9-layer architectural diff scan and emits a single deterministic verdict: SAFE, REVIEW, CAUTION, or DESTRUCTIVE. The verdict is a mathematically proven bijection of an integer severity score in the range [0, 31].
+> PayloadGuard is a static analysis GitHub Action that forensically intercepts pull requests for destructive, deceptive, or malicious code payloads. It performs a 9-layer architectural diff scan and emits a single deterministic verdict: SAFE, REVIEW, CAUTION, or DESTRUCTIVE. The verdict is a mathematically proven bijection of an integer severity score in the range [0, 36].
 
 ## Tool Identity
 
 - Name: PayloadGuard
-- Version: 1.3.0
+- Version: 1.5.0
 - Status: Production
 - Organisation: PayloadGuard-PLG (https://github.com/PayloadGuard-PLG)
 - Repository: https://github.com/PayloadGuard-PLG/payload-consequence-analyser
 - Action: PayloadGuard-PLG/payload-consequence-analyser@main
 - Language: Python 3.8+
-- Test state: 273 pass, 7 skip
+- Test state: 372 pass, 15 skip without Z3/CrossHair; 387 pass with them
 
 ## Deterministic Outputs
 
