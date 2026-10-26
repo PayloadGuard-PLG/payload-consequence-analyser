@@ -2,7 +2,7 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Active branches (not merged):** `fix/policy-from-target-branch` (from `main` `93f94f9`, v1.5.0) — §V1; `fix/action-pr-head-sha` (stacked on it at `e561ebf`) — §V2. Merge §V1 first.
+- **Branch state:** `main`. §V1 merged via PR #102 (`e67a471`). §V2 PR #103 was merged into its stacked base `fix/policy-from-target-branch` (`88c0cfc`) after #102 landed, so it reached `main` through a follow-up PR from `fix/action-pr-head-sha`. Both branches can be deleted once that PR is merged.
 - **§V2 fork-PR head resolution repair (2026-10-26, branch `fix/action-pr-head-sha`):**
   - §V2 fixed (`0e7e68a`): `action.yml` and `.github/workflows/payloadguard.yml` passed `github.head_ref`, so fork PRs exited 1 ("Branch not found") or, when the fork branch name existed in the base repository (`main`), scanned that branch: base diffed against itself → SAFE. The scan step now passes `github.event.pull_request.head.sha` with `github.head_ref` as the fallback. Reports name the scanned commit SHA in `analysis.branch`.
   - **Tests:** 344 passed, 15 skipped (Z3/CrossHair not installed), 0 xfailed. Harness oracle 41/41; mutation suite 16/16. Live PR harness not run.
