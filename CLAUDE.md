@@ -2,7 +2,7 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch state:** `main` at `6c3df91` = **v1.6.0, released**: tag `v1.6.0` on the PR #110 merge commit (tree identical to the verified tree `f4477970…`; #110 checks passed); "Publish to PyPI" run 40350394223 succeeded; `pip install payloadguard-plg==1.6.0` from PyPI verified in a fresh virtualenv. PR #108 was closed without merging (no-op). The six fix/docs branches of this work are deleted. Active: `fix/z3-p9-score-bound` — §V8 fix and this handover; not merged.
+- **Branch state:** `main` at `6c3df91` = **v1.6.0, released**: tag `v1.6.0` on the PR #110 merge commit (tree identical to the verified tree `f4477970…`; #110 checks passed); "Publish to PyPI" run 40350394223 succeeded; `pip install payloadguard-plg==1.6.0` from PyPI verified in a fresh virtualenv. PR #108 was closed without merging (no-op). The six fix/docs branches of this work are deleted. §V8 merged via PR #111 (`28345bc`); its branch is deleted. Active: `docs/update-all-docs` — documentation pass across README, SYSTEM_BLUEPRINT, WHITEPAPER, VERIFICATION, VERIFICATION_SPEC, HARNESS_BLUEPRINT, llms.txt, TEST_REPORT; not merged.
 - **§V8 Z3 P9 repair (2026-10-26, branch `fix/z3-p9-score-bound`):**
   - §V8 fixed (`4da89c4`): P9 asserted its bound as a constraint and checked the negation, so it passed for any bound (0, −100). It now builds the score from `_assess_consequence()`'s per-signal contributions and proves score ≤ 36; companion tests show 36 is reachable, that dropping the content-flag cap breaks the bound, and that the production scorer with every signal maxed returns 36. A bound of 35 yields a counterexample.
   - **Tests:** 391 passed with Z3/CrossHair (`tests/proofs/` 19); 374 passed, 17 skipped without them.
@@ -59,7 +59,7 @@ everse_sql, empty/missing downgrade() or down() functions, or missing/empty roll
   - `tests/proofs/test_z3_properties.py`: `_MAX_OTHER_SCORE` 19→24.
   - 16 new tests in `TestAIToolingConfigPoisoning` (8 unit, 8 integration; 3 FP-anchor safe cases).
   - Test suite: **274 pass, 0 fail** (`test_analyzer.py` alone; Z3/CrossHair require external install).
-- **Next:** Re-verify the Dafny specs (the committed log predates the Sprint 1 POST-12 / MAX_SCORE 36 change to `assess_consequence.dfy`). Tag a release for the post-v1.5.0 fixes. Update the harness workflow's pinned analyser SHA (`fe68338`, v1.3.0) before the next live regression. Then Sprint 2 (L1-ext: executable magic bytes + compound large-blob detector) and Sprint 3 (harness WS08/WS09/WS10).
+- **Next:** Live regression against the v1.6.0 harness pin (harness PR #78; pin check: identical verdicts to v1.3.0 on all 38 active cases offline). Then Sprint 2 (L1-ext: executable magic bytes + compound large-blob detector) and Sprint 3 (harness WS08/WS09/WS10).
 - **CI:** `trigger-regression.yml` manual-only (`workflow_dispatch`). Harness `regression.yml` also manual-only.
 - **Harness regression — last verified 2026-06-01 (analyser SHA fe68338, v1.3.0) — 34/34 PASS.**
   - Sprint 1 adds a new detection layer; re-regression required after merge to confirm no regressions on existing 34 cases.
@@ -118,7 +118,7 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 |---|---|---|
 | L1 Surface | File/line counts, permission changes, symlinks | `PayloadAnalyzer.analyze()` |
 | L2 Forensic | Critical path regex matching on deleted files + added file content scan | `CRITICAL_PATH_PATTERNS`, `_scan_added_file_content()` |
-| L2b SCA | Manifest diff scanning vs `allowlist.yml` (opt-in) | `_parse_added_packages()`, `_load_allowlist()` |
+| L2b SCA | Manifest diff scanning vs `allowlist.yml` on the target branch (opt-in; keys `python`, `npm`, `go`, `rust`) | `_parse_added_packages()`, `_load_allowlist()` |
 | L2c Actions Poisoning | Added/modified workflow files: base64, credential harvest, OIDC elevation, typosquatted consumers | `_scan_github_actions_poisoning()` |
 | L2d AI Config Poisoning | Added/modified AI tooling config files: SessionStart hooks, folder-open tasks, lifecycle script hijacks, binding.gyp shell chains, Cursor NL imperatives, hidden Unicode, MCP local server commands | `_scan_ai_tooling_configs()` |
 | L3 Consequence | Severity scoring → SAFE/REVIEW/CAUTION/DESTRUCTIVE | `_assess_consequence()` |
@@ -134,7 +134,7 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 
 ```
 analyze.py                  — core analyser, all layers, CLI entry point
-structural_parser.py        — AST & Tree-sitter SymbolFact v1 + legacy node extraction (Python/JS/TS/TSX/Go/Rust/Java)
+structural_parser.py        — AST & Tree-sitter SymbolFact v1 + legacy node extraction (Python/JS/MJS/CJS/TS/TSX/MTS/CTS/Go/Rust/Java)
 consequence_engine.py       — Semantic Change Graph (SCG) 5-stage matcher & D01–D10 consequence detectors
 post_check_run.py           — posts GitHub Check Run via App JWT (RS256)
 remediate.py                — auto-remediation: resolves action tags to SHAs, opens PR
@@ -146,8 +146,8 @@ test_analyzer.py            — legacy, layer, policy, Action and packaging pyte
 test_consequence_engine.py  — SCG & consequence engine pytest suite (61 tests)
 tests/proofs/               — Z3 formal property proofs (P1–P10) + CrossHair pytest wrapper
 verification/        — CrossHair verification targets: consequence_pure (C1-C12), temporal_pure (T1-T7), structural_pure (S1-S7), semantic_pure (M1-M9)
-allowlist.yml        — SCA package allowlist (user-created, not in repo by default)
-payloadguard.yml     — per-repo threshold config (user-created, not in repo by default)
+allowlist.yml        — SCA package allowlist (user-created, read from the target branch, not in repo by default)
+payloadguard.yml     — per-repo threshold and consequence-mode config (user-created, read from the target branch, not in repo by default)
 AUDIT_LOG.md         — architectural review findings + incident reports
 WHITEPAPER.md        — full technical specification
 DEVLOG.md           — chronological session log
@@ -159,7 +159,7 @@ DEVLOG.md           — chronological session log
 - Security file deleted: +5
 - Actions poisoning CRITICAL signal: +5
 - AI config poisoning CRITICAL signal: +5
-- Unverified dependency (SCA): +3 per unique package
+- Unverified dependency (SCA): +3 if any added package is not allowlisted (not per package)
 - Actions poisoning HIGH signal: +3
 - AI config poisoning HIGH signal: +3
 - Critical path deleted: +2
@@ -169,7 +169,7 @@ DEVLOG.md           — chronological session log
 - Thresholds: score >=5 -> DESTRUCTIVE, >=3 -> CAUTION, >=1 -> REVIEW
 - MAX_SCORE: 36
 
-### Config (`payloadguard.yml` in target repo, optional)
+### Config (`payloadguard.yml` on the target branch, optional)
 
 ```yaml
 thresholds:
@@ -182,13 +182,17 @@ thresholds:
     complexity_threshold: 15
 sca:
   fail_on_unknown: true
+consequence:
+  enabled: true
+  mode: shadow          # shadow | advisory | enforce (overridden by --consequence-mode / PAYLOADGUARD_CONSEQUENCE_MODE)
+  max_repo_files: 200
 ```
 
 ---
 
 ## Current Version
 
-`__version__ = "1.6.0"` (`analyze.py` / `pyproject.toml`). Tags: `v1.5.0` → `93f94f9`; `v1.6.0` is created on the merged release commit. PyPI had 1.3.0 as its latest release: the v1.4.0 and v1.5.0 tag builds failed (§V3), so 1.6.0 is the first PyPI release since 1.3.0.
+`__version__ = "1.6.0"` (`analyze.py` / `pyproject.toml`). Tags: `v1.5.0` → `93f94f9`; `v1.6.0` → `6c3df91` (published to PyPI 2026-10-26). PyPI had 1.3.0 as its latest release: the v1.4.0 and v1.5.0 tag builds failed (§V3), so 1.6.0 is the first PyPI release since 1.3.0.
 
 ### v1.6.0 changes (2026-10-26) — v1.5.0 audit fixes
 - §V1 (PR #102): `payloadguard.yml` and `allowlist.yml` are read from the target branch, not the PR merge result (`load_config(repo_path, ref)`, `_load_allowlist(repo_path, ref)`).
@@ -265,7 +269,7 @@ sca:
 | 1 | Z3 SMT | L3 scoring — 10 properties (P1–P10) | Done — `tests/proofs/test_z3_properties.py` |
 | 2 | CrossHair | All 4 layers — C1–C12, T1–T7, S1–S7, M1–M9 | Done — `verification/consequence_pure.py`, `temporal_pure.py`, `structural_pure.py`, `semantic_pure.py` |
 | 3 | Nagini | `_assess_consequence()` — heap/null safety | **SKIPPED** — pure integer scorer; no heap or concurrency; toolchain cost (Java, Viper JAR, Python ≤3.12) adds no theorem beyond CrossHair |
-| 4 | Dafny | L3/L4/L5a reference implementation vs spec | Done — `verification/dafny/assess_consequence.dfy`, `structural_drift.dfy`, `temporal_drift.dfy`; CI: `verify-dafny.yml`; run log pending |
+| 4 | Dafny | L3/L4/L5a reference implementation vs spec | Done — `verification/dafny/assess_consequence.dfy`, `structural_drift.dfy`, `temporal_drift.dfy`; CI: `verify-dafny.yml`; last run #16 (2026-10-26): 9 verified, 0 errors |
 | 5 | Publication | `VERIFICATION.md` public summary | Done — three-method summary, Dafny row added |
 
 **Constraint:** Verification is always external. Claude writes specs and implementation modules; external parties run the tools and commit logs.
@@ -342,9 +346,9 @@ broad checks and belong in CI.
 
 ## Environment
 
-- Python 3.11+
-- Dependencies: `gitpython`, `pyyaml`, `tree-sitter` (optional)
-- Test: `pip install pytest` then `python -m pytest test_analyzer.py -v`
+- Python 3.11+ (`requires-python >=3.11`; 3.11 in CI and the Action, 3.14 verified locally)
+- Dependencies: `pip install -r requirements.txt` — GitPython, PyYAML, PyJWT, requests, tree-sitter + 6 grammar packages; z3-solver and crosshair-tool for the proof tests
+- Test: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` (391 passed with the proof tools; 374 passed, 17 skipped without)
 - CI: GitHub Actions via `action.yml` -- runs on every PR in consumer repos
 
 ---
@@ -412,7 +416,7 @@ The following invariants are machine-verified and must not be violated by any co
 - **Score non-negativity:** `severity_score >= 0` at all times (POST-2 / C: severity_score >= 0)
 - **Score upper bound:** `severity_score <= 36` (MAX_SCORE = 36; POST-3)
 - **Verdict bijection:** Every score maps to exactly one verdict; every verdict maps to exactly one score range (POST-4–7)
-- **Safety-critical floor:** `security_file_deletions > 0` → DESTRUCTIVE; `structural_severity == CRITICAL` → DESTRUCTIVE; `actions_poisoning_critical` → DESTRUCTIVE (POST-8/9/10)
+- **Safety-critical floor:** `security_file_deletions > 0` → DESTRUCTIVE; `structural_severity == CRITICAL` → DESTRUCTIVE; `actions_poisoning_critical` → DESTRUCTIVE; `ai_config_poisoning_critical` → DESTRUCTIVE (POST-8/9/10/12)
 - **Empty-input guarantee:** All-zero inputs → SAFE; no false positives on empty diffs (POST-11a)
 - **Deletion dimension cap:** Three correlated deletion sub-scores (files/ratio/lines) are collapsed to `min(4, max + 1 if ≥2 active)` — prevents triple-counting
 

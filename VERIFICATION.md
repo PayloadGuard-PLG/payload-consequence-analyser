@@ -2,6 +2,8 @@
 
 Three orthogonal verification methods cover the pure scoring logic across four analysis layers.
 
+**Last runs (2026-10-26):** Dafny 9 verified, 0 errors (GitHub Actions run #16); CrossHair 36 postconditions, 0 counterexamples; Z3 13 tests passed. Results and environments: [`PROOFS.md`](PROOFS.md).
+
 ### CrossHair Symbolic Execution (Phase 2)
 
 | Layer | Function | Module | Contracts |
@@ -290,5 +292,8 @@ When scoring logic changes in `analyze.py`:
 - **Concurrent access:** CrossHair does not model threads.
 - **Actions config overrides:** `critical_signal_score`/`high_signal_score` from
   `self.config.actions`; verification modules use hardcoded defaults (5 and 3).
+- **SCG consequence engine (`consequence.v1`, D01–D10):** symbol matching and detector logic are covered
+  by unit, integration and mutation tests, not by formal proofs. In `enforce` mode its findings can change
+  the verdict outside the formally verified L3 score.
 
 Full scope boundaries are documented in `VERIFICATION_SPEC.md`, Section 6.

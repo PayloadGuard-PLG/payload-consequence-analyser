@@ -1,9 +1,12 @@
 # PayloadGuard — Test Run Report
 
-**Date:** 2026-05-28 UTC  
-**Environment:** Python 3.11, pytest 9.0.3  
-**Platform:** Linux (WSL2 / GitHub Actions)  
-**Result:** 272 passed · 7 skipped · 0 failed
+**Date:** 2026-10-26 16:00 UTC  
+**Environment:** Python 3.14.3, pytest 9.1.1, z3-solver 5.3.2.0, crosshair-tool 0.0.112, tree-sitter 0.26.0  
+**Platform:** Windows 11 (local)  
+**Commit:** `28345bc`  
+**Result:** 391 passed · 0 skipped · 0 failed
+
+Run with: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -v`
 
 ---
 
@@ -133,7 +136,10 @@
 - ✓ `test_below_warning_threshold_is_current`
 - ✓ `test_custom_thresholds`
 - ✓ `test_drift_score_calculated_correctly`
+- ✓ `test_infinite_age_raises`
+- ✓ `test_infinite_velocity_raises`
 - ✓ `test_metrics_block_present`
+- ✓ `test_nan_velocity_raises`
 - ✓ `test_negative_age_raises`
 - ✓ `test_negative_velocity_raises`
 - ✓ `test_recommendation_present`
@@ -212,10 +218,10 @@
 
 ## test_analyzer.py::TestPostCheckRun
 
-- ○ `test_main_skips_without_app_id`
-- ○ `test_malformed_private_key_raises_clear_error`
-- ○ `test_require_env_raises_on_missing_var`
-- ○ `test_require_env_returns_stripped_value`
+- ✓ `test_main_skips_without_app_id`
+- ✓ `test_malformed_private_key_raises_clear_error`
+- ✓ `test_require_env_raises_on_missing_var`
+- ✓ `test_require_env_returns_stripped_value`
 
 ## test_analyzer.py::TestCrossFileAggregation
 
@@ -228,9 +234,9 @@
 
 ## test_analyzer.py::TestStructuralParserJSTS
 
-- ○ `test_js_arrow_function_const_still_detected`
-- ○ `test_js_const_deletion_detected`
-- ○ `test_ts_const_deletion_detected`
+- ✓ `test_js_arrow_function_const_still_detected`
+- ✓ `test_js_const_deletion_detected`
+- ✓ `test_ts_const_deletion_detected`
 
 ## test_analyzer.py::TestMarkdownTruncation
 
@@ -318,6 +324,7 @@
 - ✓ `test_high_signal_scores_caution`
 - ✓ `test_legitimate_oidc_consumer_still_passes`
 - ✓ `test_modified_workflow_also_scanned`
+- ✓ `test_multiline_curl_credential_harvest_detected`
 - ✓ `test_non_workflow_yaml_skipped`
 - ✓ `test_oidc_elevation_with_legitimate_consumer_is_safe`
 - ✓ `test_oidc_elevation_without_consumer`
@@ -382,6 +389,155 @@
 - ✓ `test_third_party_action_not_first_party`
 - ✓ `test_yaml_patch_substitutes_sha`
 
+## test_analyzer.py::TestAIToolingConfigPoisoning
+
+- ✓ `test_ai_config_critical_scores_destructive`
+- ✓ `test_ai_config_disabled_via_config`
+- ✓ `test_ai_config_flag_text_in_verdict`
+- ✓ `test_ai_config_high_scores_caution`
+- ✓ `test_ai_config_key_in_report`
+- ✓ `test_binding_gyp_safe_require_not_flagged`
+- ✓ `test_binding_gyp_shell_chain_critical`
+- ✓ `test_claude_settings_legitimate_hook_is_safe`
+- ✓ `test_claude_settings_session_hook_critical`
+- ✓ `test_cursor_rule_alwaysapply_with_exec_imperative`
+- ✓ `test_cursor_rule_alwaysapply_without_exec_is_safe`
+- ✓ `test_full_scan_detects_claude_session_hook`
+- ✓ `test_gemini_settings_session_hook_critical`
+- ✓ `test_vscode_tasks_folder_open_critical`
+- ✓ `test_vscode_tasks_no_folder_open_is_safe`
+- ✓ `test_zero_ai_config_inputs_still_safe`
+
+## test_analyzer.py::TestOwnWorkflowsNotInjectable
+
+- ✓ `test_no_untrusted_context_in_any_run_body`
+- ✓ `test_run_body_iterator_finds_steps`
+- ✓ `test_scanner_finds_a_planted_offender`
+
+## test_analyzer.py::TestPolicyReadFromTargetBranch
+
+- ✓ `test_cli_flag_takes_precedence_over_env_mode`
+- ✓ `test_control_destructive_change_blocks_under_base_policy`
+- ✓ `test_env_mode_still_overrides_policy_file`
+- ✓ `test_legitimate_change_passes_under_base_policy`
+- ✓ `test_load_config_ref_reads_commit_not_working_tree`
+- ✓ `test_policy_ref_falls_back_to_origin`
+- ✓ `test_policy_ref_missing_file_or_ref_returns_defaults`
+- ✓ `test_pr_cannot_allowlist_its_own_dependency`
+- ✓ `test_pr_cannot_downgrade_its_own_consequence_mode`
+- ✓ `test_pr_cannot_raise_its_own_thresholds`
+- ✓ `test_verdict_exit_code_survives_non_utf8_stdout`
+
+## test_analyzer.py::TestActionPolicyTrustBoundary
+
+- ✓ `test_consequence_mode_input_reaches_the_analyser`
+- ✓ `test_fork_pr_from_colliding_branch_name_scans_the_pr_head`
+- ✓ `test_fork_pr_from_fork_only_branch_scans_the_pr_head`
+- ✓ `test_head_ref_fallback_without_pull_request_payload`
+- ✓ `test_invalid_consequence_mode_input_is_an_error_not_destructive`
+- ✓ `test_legitimate_fork_pr_passes_through_action`
+- ✓ `test_legitimate_pr_passes_through_action`
+- ✓ `test_pr_policy_downgrade_still_blocks_through_action`
+- ✓ `test_verdict_output_reports_caution`
+- ✓ `test_verdict_output_reports_review`
+
+## test_analyzer.py::TestDistributionPackaging
+
+- ✓ `test_built_distribution_runs_a_scan`
+- ✓ `test_declared_modules_and_packages_exist`
+- ✓ `test_shipped_modules_include_their_first_party_imports`
+
+## test_consequence_engine.py::TestParserCompletenessD01
+
+- ✓ `test_x01_missing_grammar_never_silently_returns_complete`
+- ✓ `test_x02_python_syntax_error_reports_parse_error`
+- ✓ `test_x02_treesitter_syntax_error_reports_parse_error`
+- ✓ `test_x05_unsupported_extension_explicit_status`
+- ✓ `test_x06_unsupported_source_change_reports_incomplete_coverage[ruby]`
+- ✓ `test_x06_unsupported_source_change_reports_incomplete_coverage[csharp]`
+- ✓ `test_x06_unsupported_source_change_reports_incomplete_coverage[kotlin]`
+- ✓ `test_x06_added_and_deleted_unsupported_source_reported`
+- ✓ `test_x06_non_code_files_stay_out_of_parser_coverage`
+- ✓ `test_x06_supported_analysis_unchanged_alongside_unsupported_file`
+- ✓ `test_x07_module_extension_parses_like_base_extension[mjs]`
+- ✓ `test_x07_module_extension_parses_like_base_extension[cjs]`
+- ✓ `test_x07_module_extension_parses_like_base_extension[mts]`
+- ✓ `test_x07_module_extension_parses_like_base_extension[cts]`
+- ✓ `test_x07_gutting_in_module_extension_matches_base_extension[mjs]`
+- ✓ `test_x07_gutting_in_module_extension_matches_base_extension[cjs]`
+- ✓ `test_x07_gutting_in_module_extension_matches_base_extension[mts]`
+- ✓ `test_x07_gutting_in_module_extension_matches_base_extension[cts]`
+- ✓ `test_parser_capabilities_probe`
+
+## test_consequence_engine.py::TestSymbolFactMultiLanguage
+
+- ✓ `test_python_qualified_methods_fix_flat_set_collision`
+- ✓ `test_body_hash_invariant_to_comments_and_docstrings`
+- ✓ `test_javascript_commonjs_exports_and_no_local_var_leak`
+- ✓ `test_typescript_classes_interfaces_and_methods`
+- ✓ `test_go_structs_methods_and_export_casing`
+- ✓ `test_rust_structs_traits_and_impl_methods`
+- ✓ `test_java_classes_annotations_and_visibility`
+
+## test_consequence_engine.py::TestSymbolMatchingD02
+
+- ✓ `test_s01_pure_class_and_method_rename_is_safe`
+- ✓ `test_s02_cross_file_move_is_safe`
+- ✓ `test_s03_rename_with_body_weakening_blocks`
+- ✓ `test_s04_ambiguous_refactor_emits_incomplete_warning`
+
+## test_consequence_engine.py::TestCompoundAndAdversarialDetectors
+
+- ✓ `test_c01_distributed_cross_file_loss_blocks`
+- ✓ `test_c02_five_file_pure_move_refactor_is_safe`
+- ✓ `test_c03_threshold_gaming_dilution_blocks`
+- ✓ `test_c04_benign_private_dead_code_cleanup_is_safe`
+- ✓ `test_d04_signature_tightening_breaks_callers_vs_optional_param_safe`
+- ✓ `test_d05_manifest_lockfile_and_lifecycle_scripts`
+- ✓ `test_d06_guard_decorator_and_rollback_call_removal`
+
+## test_consequence_engine.py::TestPayloadAnalyzerIntegration
+
+- ✓ `test_enforce_mode_suppresses_legacy_l4_false_positive_on_massive_rename`
+- ✓ `test_unsupported_source_change_reported_without_changing_verdict`
+- ✓ `test_shadow_advisory_and_enforce_modes_on_threshold_gaming_repo`
+
+## test_consequence_engine.py::TestDetectorAccuracyV2AndUsability
+
+- ✓ `test_d06_v2_guard_polarity_inversion_python_and_typescript`
+- ✓ `test_d06_v2_guard_enforcement_neutralized_and_early_return_bypass`
+- ✓ `test_d06_v2_exception_handler_swallowed`
+- ✓ `test_d04_v2_import_alias_and_cross_module_disambiguation`
+- ✓ `test_d04_v2_container_consolidation_reduces_finding_noise`
+- ✓ `test_usability_cli_print_and_sarif_report`
+- ✓ `test_d06_compound_boolop_guard_and_polyglot_state_guards`
+- ✓ `test_d06_boolean_short_circuit_and_python_go_state_guards`
+- ✓ `test_d08_workflow_expression_injection_and_safe_env_binding`
+- ✓ `test_d08_prt_untrusted_checkout_and_action_pin_downgrade_and_ci_gate`
+- ✓ `test_d09_test_assertion_erosion_and_skip_addition`
+
+## test_consequence_engine.py::TestDetectorD10AndExtendedIntegrity
+
+- ✓ `test_d10_sql_destructive_table_and_column_drop_and_truncate`
+- ✓ `test_d10_alembic_irreversible_drop_without_downgrade`
+- ✓ `test_d10_django_and_knex_destructive_migrations`
+- ✓ `test_d10_safe_additive_migration_and_temp_table_drops`
+- ✓ `test_d05_build_wrapper_script_tampering`
+- ✓ `test_d08_unpinned_action_addition_and_workflow_run_artifact`
+- ✓ `test_d10_multiline_sql_and_goose_rollback_exclusions`
+- ✓ `test_d10_rails_and_django_runsql_irreversibility`
+- ✓ `test_d08_first_party_actions_not_flagged_as_unpinned`
+- ✓ `test_d06_nonlocal_inner_function_mutation_not_flagged_as_short_circuit`
+
+## tests/proofs/test_crosshair_contracts.py
+
+- ✓ `test_crosshair_deletion_dim_contracts`
+- ✓ `test_crosshair_assess_consequence_contracts`
+- ✓ `test_crosshair_temporal_drift_contracts`
+- ✓ `test_temporal_contract_excludes_non_finite_velocity`
+- ✓ `test_crosshair_structural_drift_contracts`
+- ✓ `test_crosshair_semantic_mci_contracts`
+
 ## tests/proofs/test_z3_properties.py
 
 - ✓ `test_p1_typosquat_implies_score_gte_critical_threshold`
@@ -392,13 +548,8 @@
 - ✓ `test_p6_safe_verdict_iff_score_below_review_threshold`
 - ✓ `test_p7_verdict_deterministic_given_identical_scores`
 - ✓ `test_p8_typosquat_cannot_yield_safe_verdict`
-- ✓ `test_p9_score_upper_bound_finite`
+- ✓ `test_p9_score_upper_bound_is_sum_of_signal_maxima`
+- ✓ `test_p9_bound_is_attained`
+- ✓ `test_p9_bound_depends_on_signal_caps`
+- ✓ `test_p9_model_matches_assess_consequence`
 - ✓ `test_p10_empty_signal_set_always_safe`
-
-## tests/proofs/test_crosshair_contracts.py
-
-- ✓ `test_crosshair_deletion_dim_contracts`
-- ✓ `test_crosshair_assess_consequence_contracts`
-- ✓ `test_crosshair_temporal_drift_contracts`
-- ✓ `test_crosshair_structural_drift_contracts`
-- ✓ `test_crosshair_semantic_mci_contracts`

@@ -1,6 +1,6 @@
 # PayloadGuard — Harness Integration Blueprint
 
-**Version:** 1.3.0 | **Updated:** 2026-06-01
+**Version:** 1.6.0 (live harness pin) | **Updated:** 2026-10-26 — the harness workflow pins analyser v1.6.0 (`6c3df91`; harness PR #78, previously `fe68338`, v1.3.0)
 
 This document describes the complete interaction between the test harness and PayloadGuard: how
 test cases are structured, how scans are triggered, how results flow through the system, and how
@@ -552,6 +552,21 @@ Merging them would apply the scenario changes to `main` and corrupt the baseline
 
 ---
 
+## Offline Verification (no live PRs)
+
+Two harness tools run the analyser directly against the fixture branches, without reopening PRs or using
+GitHub credentials. They verify the analyser at any commit, independent of the live workflow pin.
+
+| Tool | What it does | Last result (analyser v1.6.0) |
+|---|---|---|
+| `tools/validate_manifest.py --verify-consequence <analyser_dir>` | Validates `tools/test_cases.json` (Schema v1 + v2), checks every active branch exists, then runs `PayloadAnalyzer` in `enforce` mode on each branch and asserts `expected_findings`, `forbidden_findings` and `security_desired_outcome` | 41/41 |
+| `tools/run_mutation_suite.py --analyser-dir <analyser_dir>` | Clones the harness into a temporary directory, applies 10 adversarial and 6 benign mutations, scans each in `shadow` and `enforce` mode, and appends results to `mutation-reports/` | 16/16, 0 false positives, 0 false negatives |
+
+The mutation suite writes `mutation-reports/mutation_runs.jsonl` and `latest_mutation_summary.md` in the harness
+checkout. Its default `--analyser-dir` is a machine-specific path, so pass it explicitly.
+
+---
+
 ## Branch Protection and Self-Scanning
 
 The analyser scans its own PRs via `.github/workflows/payloadguard.yml` in the analyser repo. This
@@ -620,4 +635,4 @@ All `uses:` references in harness workflows are pinned to exact SHAs. This is de
   the actions it depends on.
 
 The analyser SHA in `payloadguard.yml` must be updated manually when a new version is deployed to
-`main`. The current pin (`fe68338`) points to analyser main at v1.3.0.
+`main`. The current pin is `6c3df91` (v1.6.0, harness PR #78; previously `fe68338`, v1.3.0). Pin check: before the change, the analyser CLI run as the harness workflow runs it (PR head SHA, base `main`, live PR bodies, default `shadow` mode) gave identical verdicts, exit codes and scores under v1.3.0 and v1.6.0 on all 38 active cases, both matching `expected_exit_code` 38/38. The consequence engine runs in its default `shadow` mode there, so live verdicts come from the legacy layers.
