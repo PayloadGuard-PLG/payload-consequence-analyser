@@ -76,7 +76,7 @@ payload-consequence-analyser/
 ├── action.yml                        # GitHub Action composite wrapper (inputs, outputs, steps)
 ├── pyproject.toml                    # package: payloadguard-plg v1.5.0 (py-modules incl. consequence_engine); entry payloadguard=analyze:main
 ├── requirements.txt                  # Python runtime + test dependencies
-├── test_analyzer.py                  # pytest suite: 307 pass (policy, Action-path and packaging tests included)
+├── test_analyzer.py                  # pytest suite: 310 pass (policy, Action-path and packaging tests included)
 ├── test_consequence_engine.py        # pytest suite: 61 pass (SymbolFact v1, SCG matching, D01–D10, SARIF)
 ├── part1.txt                         # stale scratch artifact — candidate for removal
 │
@@ -520,7 +520,7 @@ PayloadAnalyzer.analyze()
        ↓
   Fix in: analyze.py (the relevant layer or signal)
        ↓
-  Verify: python -m pytest test_analyzer.py test_consequence_engine.py tests/proofs/ -q  (368 pass, 15 skip without Z3/CrossHair; 383 pass with them)
+  Verify: python -m pytest test_analyzer.py test_consequence_engine.py tests/proofs/ -q  (372 pass, 15 skip without Z3/CrossHair; 387 pass with them)
        ↓
   Update: AUDIT_LOG.md (RESOLVED), CLAUDE.md (remove from Open Findings), DEVLOG.md (session entry)
 ```

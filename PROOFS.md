@@ -1,17 +1,18 @@
 # PayloadGuard — Formal Verification Record
 
-This page is the authoritative proof artifact record for PayloadGuard v1.3.0.
+This page is the authoritative proof artifact record for PayloadGuard v1.5.0 and the fixes on
+`main` after it (proofs last run 2026-10-26 on `main` `9e83cce`, plus the §V10 change `c74f612`).
 Three independent verification methods — Dafny, CrossHair, and Z3 — cover the same
 scoring logic from different angles. A defect would have to produce a consistent
 false result across all three simultaneously to go undetected.
 
-**Quick summary:**
+**Quick summary (2026-10-26):**
 
 | Method | Tool | Scope | Result |
 |---|---|---|---|
-| Machine-checked proofs | Dafny 4.9.1 + Boogie + Z3 | L3, L4, L5a — entire input domain | 9 methods/functions verified, 0 errors |
-| Symbolic execution | CrossHair (PEP316 contracts) | L3, L4, L5a, L5b — active Python source | 35 contracts, 0 counterexamples |
-| SMT proofs | Z3 Theorem Prover | L3, L2c — abstract scoring model | 10 properties, all `unsat` in < 0.1 s |
+| Machine-checked proofs | Dafny 4.9.1 + Boogie + Z3 4.12.1 | L3, L4, L5a — entire input domain | 9 methods/functions verified, 0 errors (GitHub Actions run #16) |
+| Symbolic execution | CrossHair 0.0.112 (PEP316 contracts) | L3, L4, L5a, L5b — pure-Python mirror modules in `verification/` | 36 postconditions, 0 counterexamples after the §V10 fix (one counterexample found and fixed in `temporal_pure`) |
+| SMT proofs | Z3 (z3-solver 5.3.2.0) | L3, L2c — abstract scoring model | 10 properties, all `unsat`; P9 is vacuous as encoded (§V8) |
 
 → Committed proof files: [`verification/dafny/`](verification/dafny/) · [`verification/`](verification/)  
 → CI workflow: [`.github/workflows/verify-dafny.yml`](.github/workflows/verify-dafny.yml)  
@@ -246,6 +247,13 @@ Source: [`verification/temporal_pure.py`](verification/temporal_pure.py)
 | T-06 | `branch_age_days == 0 → CURRENT` |
 | T-07 | `target_velocity == 0.0 → CURRENT` |
 
+Preconditions: `branch_age_days >= 0`, `target_velocity >= 0.0`, `math.isfinite(target_velocity)`,
+`warning_threshold > 0.0`, `critical_threshold > warning_threshold`. The finite-velocity
+precondition was added on 2026-10-26 after CrossHair found `analyze_drift_pure(0, inf, …)`
+returning a NaN drift score (`AUDIT_LOG.md` §V10); `TemporalDriftAnalyzer.analyze_drift()` now
+raises `ValueError` for non-finite inputs. Dafny's `real` has no infinity or NaN, so
+`temporal_drift.dfy` was unaffected.
+
 ### L5b Contracts (M1–M9)
 
 Source: [`verification/semantic_pure.py`](verification/semantic_pure.py)
@@ -333,7 +341,7 @@ crosshair check semantic_pure    --analysis_kind PEP316 --per_condition_timeout 
 ```bash
 pip install z3-solver crosshair-tool pytest pytest-timeout
 pytest tests/proofs/ -v --timeout=60
-# Expected: 15 passed (10 Z3 properties + 5 CrossHair contract wrappers)
+# Expected: 16 passed (10 Z3 properties + 5 CrossHair contract wrappers + 1 temporal contract regression)
 ```
 
 ---

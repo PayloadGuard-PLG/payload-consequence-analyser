@@ -2,6 +2,21 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-26 — Version history to v1.5.0; proof runs; temporal drift hardening (AUDIT_LOG §V8–§V10)
+
+**Version history:** CLAUDE.md, SYSTEM_BLUEPRINT.md, WHITEPAPER.md, llms.txt, PROOFS.md and VERIFICATION.md updated to v1.5.0 (tag `v1.5.0` → `93f94f9`), with an "Unreleased" entry for the §V1–§V7 fixes now on `main`. Corrected stale facts: the v1.4.0 entry's package layout and detector IDs, the score range (36, not 31), the Z3 property table, and proof-suite counts.
+
+**Proof runs:**
+- Z3 P1–P10: 10 passed. CrossHair contract wrappers: 5 passed (z3-solver 5.3.2.0, crosshair-tool 0.0.112; local, Windows 11, Python 3.14.3).
+- CrossHair CLI, `--per_condition_timeout 30`: no counterexamples in `consequence_pure`, `structural_pure` or `semantic_pure` (`semantic_pure` confirmed over all paths); counterexample in `temporal_pure` (§V10).
+- Dafny run #16 (GitHub Actions `workflow_dispatch`, `main` `9e83cce`, Dafny 4.9.1 + Z3 4.12.1): 7 + 1 + 1 verified, 0 errors. The committed log had predated the 2026-06-11 change to `assess_consequence.dfy` (§V9).
+
+**§V10:** CrossHair found `analyze_drift_pure(0, inf, …)` returning a NaN drift score classified CURRENT. `TemporalDriftAnalyzer.analyze_drift()` now raises `ValueError` for non-finite age or velocity, and `temporal_pure.py` adds `pre: math.isfinite(target_velocity)`. Four regression tests fail before and pass after; the CrossHair retest exits 0.
+
+**§V8 (open):** Z3 P9 constrains the score to the bound it then checks, so it is vacuous as encoded.
+
+**Tests:** 387 passed with Z3/CrossHair installed.
+
 ## 2026-10-26 — Action verdict output, consequence-mode input, JS/TS module extensions (AUDIT_LOG §V5–§V7)
 
 **§V5:** the action's `verdict` output mapped exit 0 to `SAFE`, so `REVIEW` and `CAUTION` were never emitted. The scan step now reads the verdict from the JSON report and falls back to the exit-code mapping when the report cannot be read.

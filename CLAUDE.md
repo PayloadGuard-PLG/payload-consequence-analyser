@@ -2,7 +2,13 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch state:** §V1 (PR #102, `e67a471`), §V2 (PR #104, `a388f05`) and §V3 (PR #105, `e77edf3`) are on `main`; `fix/policy-from-target-branch`, `fix/action-pr-head-sha` and `fix/pyproject-packaging` are merged and can be deleted. PR #105 CI on GitHub's Ubuntu runner: `test_analyzer.py` 301 passed; the self-scan resolved the PR head by SHA. §V4 is in PR #106 (`fix/d01-unsupported-extension`, head `2af1d09`, into `main`, 2 checks passing, not merged at time of writing). Active: `fix/v5-v7` (stacked on `2af1d09`) — §V5–§V7; open its PR into `main` after #106 merges so it shows only §V5–§V7.
+- **Branch state:** §V1–§V7 are on `main` (PRs #102, #104, #105, #106, #107; `main` at `9e83cce`). Branches `fix/policy-from-target-branch`, `fix/action-pr-head-sha`, `fix/pyproject-packaging`, `fix/d01-unsupported-extension` and `fix/v5-v7` are merged and can be deleted. Open PR #108 (`fix/policy-from-target-branch` → `main`, head `88c0cfc`, the #103 merge commit) changes no files and can be closed. Active: `docs/v1.5.0-version-history-and-proofs` (from `9e83cce`) — version history, proof runs, §V10 fix; not merged.
+- **Version history + proof runs + §V10 (2026-10-26, branch `docs/v1.5.0-version-history-and-proofs`):**
+  - Docs brought to v1.5.0 (CLAUDE.md current version and changelog incl. "Unreleased" §V1–§V7; SYSTEM_BLUEPRINT, WHITEPAPER, llms.txt, VERIFICATION, PROOFS). Stale proof records corrected (Z3 table vs actual P1–P10; C-03 bound 36; proof-suite counts).
+  - Proof runs: Z3 P1–P10 10/10 and CrossHair wrappers 5/5 (`tests/proofs/`, z3-solver 5.3.2.0, crosshair-tool 0.0.112, local Windows/Python 3.14). Full CrossHair CLI (`--per_condition_timeout 30`): `consequence_pure`, `structural_pure`, `semantic_pure` 0 counterexamples; `temporal_pure` counterexample → §V10. Dafny run #16 (GitHub Actions, `9e83cce`): 7 + 1 + 1 verified, 0 errors — first recorded verification of the Sprint 1 `assess_consequence.dfy` (§V9 fixed).
+  - §V10 fixed (`c74f612`): `TemporalDriftAnalyzer.analyze_drift()` accepted ∞/NaN velocity (0 × ∞ = NaN → CURRENT); now raises `ValueError` for non-finite age or velocity, and `temporal_pure.py` adds `pre: math.isfinite(target_velocity)`. CrossHair retest exits 0.
+  - Open: §V8 (LOW) — Z3 P9 is vacuous as encoded.
+  - **Tests:** 387 passed with Z3/CrossHair installed (368 + 15 proof + 4 §V10); 372 passed, 15 skipped without them.
 - **§V5–§V7 Action outputs, consequence-mode input, JS/TS module extensions (2026-10-26, branch `fix/v5-v7`):**
   - §V5 fixed (`3780691`): the action's `verdict` output mapped exit 0 to SAFE; it is now read from the JSON report (exit-code mapping as fallback), so REVIEW and CAUTION are emitted.
   - §V6 fixed (`3780691`): new `consequence-mode` input (validated in the step; invalid values exit 1 rather than argparse's 2, which would read as DESTRUCTIVE). `PAYLOADGUARD_CONSEQUENCE_MODE` moved from `analyze()` to `main()`: `--consequence-mode` > environment > `payloadguard.yml`. README enforce example corrected.
@@ -83,7 +89,7 @@ everse_sql, empty/missing downgrade() or down() functions, or missing/empty roll
   - `scripts/pc-smoke-test.sh`: one-command build+run+verify. Run with `sudo bash scripts/pc-smoke-test.sh`.
 - **Phase 2 Stage 2 (Z3 proofs):** `tests/proofs/test_z3_properties.py`: P1–P10. `_MAX_OTHER_SCORE` updated 19→24 (Sprint 1).
 - **Phase 2 Stage 1 (auto-remediation):** `remediate.py` `WorkflowRemediator` operational.
-- **Test suite:** `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` → **368 passed, 15 skipped** without Z3/CrossHair; `tests/proofs/` → **15 passed** with them installed (2026-10-26).
+- **Test suite:** `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` → **372 passed, 15 skipped** without Z3/CrossHair; **387 passed** with them installed (`tests/proofs/` 16 tests) (2026-10-26).
 - **Open findings:** INC-3 (direct push to main).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
@@ -133,7 +139,7 @@ action.yml                  — GitHub Action composite wrapper
 agent/                      — eBPF runtime defence agent (Go + cilium/ebpf)
 agent/bpf/probe.c           — 4 tracepoint probes + pg_config/egress_allow_ipv4 BPF maps
 scripts/pc-smoke-test.sh    — one-command build+verify on real kernel
-test_analyzer.py            — legacy, layer, policy, Action and packaging pytest suite (307 tests)
+test_analyzer.py            — legacy, layer, policy, Action and packaging pytest suite (310 tests)
 test_consequence_engine.py  — SCG & consequence engine pytest suite (61 tests)
 tests/proofs/               — Z3 formal property proofs (P1–P10) + CrossHair pytest wrapper
 verification/        — CrossHair verification targets: consequence_pure (C1-C12), temporal_pure (T1-T7), structural_pure (S1-S7), semantic_pure (M1-M9)

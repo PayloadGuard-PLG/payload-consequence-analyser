@@ -11,7 +11,7 @@
 - Repository: https://github.com/PayloadGuard-PLG/payload-consequence-analyser
 - Action: PayloadGuard-PLG/payload-consequence-analyser@main
 - Language: Python 3.8+
-- Test state: 368 pass, 15 skip (proof tests skip without Z3/CrossHair; 15/15 pass with them)
+- Test state: 372 pass, 15 skip without Z3/CrossHair; 387 pass with them
 
 ## Deterministic Outputs
 
