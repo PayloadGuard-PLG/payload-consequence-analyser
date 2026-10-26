@@ -2,6 +2,14 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-26 — Action scans the PR head commit (AUDIT_LOG §V2)
+
+**Defect:** `action.yml` passed `github.head_ref` to `analyze.py`. Fork PR head branches do not exist in the base repository: a fork branch `patch-1` exited 1, and a fork branch named `main` resolved to the base repository's `main`, so base was diffed against itself and a PR gutting `Auth.verify` scanned SAFE with exit 0.
+
+**Repair:** the scan step passes `github.event.pull_request.head.sha` (present locally as a parent of the `pull_request` merge commit under `fetch-depth: 0`), with `github.head_ref` as the fallback for events without a `pull_request` payload. The repository's own `payloadguard.yml` workflow is changed the same way. `analysis.branch` in reports now carries the scanned commit SHA.
+
+**Tests:** the §V2 expected failure is replaced by three fork regression tests and a fallback test in `TestActionPolicyTrustBoundary`. Against the previous `action.yml`: 3 failed, 3 passed; after: all pass. Suite: 344 passed, 15 skipped. Harness oracle 41/41; mutation suite 16/16.
+
 ## 2026-10-26 — Policy files read from the target branch (AUDIT_LOG §V1)
 
 Audit of v1.5.0 (`93f94f9`) across the SCG/D01–D10 work and the Action-to-verdict path. The Action path was exercised by running the `action.yml` scan steps in bash against a local reproduction of a `pull_request` merge checkout.
