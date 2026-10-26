@@ -28,18 +28,16 @@ Every `ensures` clause is a machine-checked theorem.
 ### Tool and version
 
 ```
-Dafny 4.9.1+452c307284e1511e5c2d10b9615f4c9c15f010e2
-Boogie (bundled)
-Z3 4.12.1 (bundled)
-Generated: 2026-05-28T19:46:34Z
+Dafny 4.9.1 (release zip), Boogie + Z3 4.12.1 (bundled)
+Generated: 2026-10-26T12:19:20Z — GitHub Actions "Dafny Verification" run #16, ubuntu-24.04
+Commit: 9e83cce (main)
 ```
 
 ### Committed verification output
 
-**Status (2026-10-26):** the output below was generated on 2026-05-28. `structural_drift.dfy` and
-`temporal_drift.dfy` are unchanged since then. `assess_consequence.dfy` was changed on 2026-06-11
-(`257d1f3`, Sprint 1: `MAX_SCORE` 31 → 36, POST-12 added), and no verification output for the
-current file is committed. Re-verification is pending (`AUDIT_LOG.md` §V9).
+This run covers the current `assess_consequence.dfy`, including the 2026-06-11 Sprint 1 change
+(`MAX_SCORE` 36, POST-12). The previous committed output (2026-05-28) predated that change
+(`AUDIT_LOG.md` §V9).
 
 ```
 ## assess_consequence.dfy
@@ -61,58 +59,65 @@ Source: [`verification/dafny/assess_consequence.dfy`](verification/dafny/assess_
 "7 verified" = 6 pure helper functions (AgeScore, FilesScore, LinesScore, RatioScore,
 DeletionDim, ContentFlagsScore) + 1 main method (AssessConsequence).
 
-The `AssessConsequence` method carries 11 active postconditions:
+The `AssessConsequence` method carries 12 postconditions (POST-1–12, including POST-11a).
+Excerpt from the current `assess_consequence.dfy` (`MAX_SCORE` = 36):
 
 ```dafny
 method AssessConsequence(
-    files_deleted: nat, lines_deleted: nat, days_old: nat,
-    deletion_ratio: real, structural_severity: string,
-    critical_file_deletions: nat, security_file_deletions: nat,
-    unverified_dependencies: nat, content_flags: nat,
-    actions_poisoning_flags: nat, actions_poisoning_critical: bool
+    files_deleted:             nat,
+    lines_deleted:             nat,
+    days_old:                  nat,
+    deletion_ratio:            real,
+    structural_severity:       string,
+    critical_file_deletions:   nat,
+    security_file_deletions:   nat,
+    unverified_dependencies:   nat,
+    content_flags:             nat,
+    actions_poisoning_flags:   nat,
+    actions_poisoning_critical: bool,
+    ai_config_poisoning_flags:  nat,
+    ai_config_poisoning_critical: bool
 ) returns (status: string, severity_score: int)
 
     requires 0.0 <= deletion_ratio <= 100.0
     requires structural_severity == "LOW" || structural_severity == "MEDIUM" ||
              structural_severity == "HIGH" || structural_severity == "CRITICAL"
 
-    // POST-1: verdict is always one of four valid values
+    // POST-1: status is one of four valid verdicts
     ensures status == "SAFE" || status == "REVIEW" ||
             status == "CAUTION" || status == "DESTRUCTIVE"
 
     // POST-2: score is non-negative
     ensures severity_score >= 0
 
-    // POST-3: score does not exceed 31 (sum of all signal maximums)
-    ensures severity_score <= 31
+    // POST-3: score does not exceed the sum of all signal maximums (36)
+    ensures severity_score <= MAX_SCORE
 
-    // POST-4: SAFE ↔ score < 1
-    ensures (status == "SAFE") <==> (severity_score < 1)
+    // POST-4–7: verdict ↔ score bijection (exhaustive, mutually exclusive)
+    ensures (status == "SAFE")        <==> (severity_score < REVIEW_THRESHOLD)
+    ensures (status == "REVIEW")      <==> (REVIEW_THRESHOLD <= severity_score < CAUTION_THRESHOLD)
+    ensures (status == "CAUTION")     <==> (CAUTION_THRESHOLD <= severity_score < DESTRUCTIVE_THRESHOLD)
+    ensures (status == "DESTRUCTIVE") <==> (severity_score >= DESTRUCTIVE_THRESHOLD)
 
-    // POST-5: REVIEW ↔ score in [1, 3)
-    ensures (status == "REVIEW") <==> (1 <= severity_score < 3)
-
-    // POST-6: CAUTION ↔ score in [3, 5)
-    ensures (status == "CAUTION") <==> (3 <= severity_score < 5)
-
-    // POST-7: DESTRUCTIVE ↔ score ≥ 5
-    ensures (status == "DESTRUCTIVE") <==> (severity_score >= 5)
-
-    // POST-8: any security file deletion forces DESTRUCTIVE (+5 contribution)
+    // POST-8: any security file deletion forces DESTRUCTIVE (contributes +5)
     ensures security_file_deletions > 0 ==> status == "DESTRUCTIVE"
 
-    // POST-9: structural CRITICAL forces DESTRUCTIVE (+5 contribution)
+    // POST-9: structural CRITICAL forces DESTRUCTIVE (contributes +5)
     ensures structural_severity == "CRITICAL" ==> status == "DESTRUCTIVE"
 
-    // POST-10: actions poisoning CRITICAL forces DESTRUCTIVE (+5 contribution)
+    // POST-10: actions poisoning CRITICAL forces DESTRUCTIVE (contributes +5)
     ensures actions_poisoning_critical ==> status == "DESTRUCTIVE"
 
-    // POST-11a: all-zero inputs yield SAFE — no false positives on empty diffs
+    // POST-12: AI tooling config poisoning CRITICAL forces DESTRUCTIVE (contributes +5)
+    ensures ai_config_poisoning_critical ==> status == "DESTRUCTIVE"
+
+    // POST-11a: all-zero inputs yield SAFE (no false positives on empty diffs)
     ensures files_deleted == 0 && lines_deleted == 0 && days_old == 0 &&
             deletion_ratio == 0.0 && structural_severity == "LOW" &&
             critical_file_deletions == 0 && security_file_deletions == 0 &&
             unverified_dependencies == 0 && content_flags == 0 &&
-            actions_poisoning_flags == 0 && !actions_poisoning_critical
+            actions_poisoning_flags == 0 && !actions_poisoning_critical &&
+            ai_config_poisoning_flags == 0 && !ai_config_poisoning_critical
             ==> status == "SAFE"
 ```
 

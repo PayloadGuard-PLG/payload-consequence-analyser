@@ -382,7 +382,7 @@ Tracking table: every verified layer must have an entry in `VERIFICATION.md` and
 
 | Layer | CrossHair | Z3 | Dafny |
 |---|---|---|---|
-| L3 Consequence | C1–C12 (`consequence_pure.py`) | P1–P10 (`test_z3_properties.py`) | POST-1–11a (`assess_consequence.dfy`) |
+| L3 Consequence | C1–C12 + POST-12 (`consequence_pure.py`) | P1–P10 (`test_z3_properties.py`) | POST-1–12 (`assess_consequence.dfy`) |
 | L4 Structural | S1–S7 (`structural_pure.py`) | — | S1–S7 (`structural_drift.dfy`) |
 | L5a Temporal | T1–T7 (`temporal_pure.py`) | — | T1–T8 (`temporal_drift.dfy`) |
 | L5b Semantic | M1–M9 (`semantic_pure.py`) | — | — |
