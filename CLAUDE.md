@@ -5,7 +5,7 @@
 - **Branch state:** `main` at `6c3df91` = **v1.6.0, released**: tag `v1.6.0` on the PR #110 merge commit (tree identical to the verified tree `f4477970…`; #110 checks passed); "Publish to PyPI" run 40350394223 succeeded; `pip install payloadguard-plg==1.6.0` from PyPI verified in a fresh virtualenv. PR #108 was closed without merging (no-op). The six fix/docs branches of this work are deleted. §V8 merged via PR #111 (`28345bc`); its branch is deleted. Documentation pass merged via PR #112 (`19215fd`). Active: `docs/harness-history-aging` (this handover entry and AUDIT_LOG §H1–§H3); not merged.
 - **Harness scan history + live regression attempt (2026-10-26, branch `docs/harness-history-aging`; harness branch `data/scan-history`):**
   - Harness `tools/collect_history.py` records every `PayloadGuard` check run on the fixture PRs' head commits in harness `regression-reports/scan_history.jsonl`; artifacts expire after 90 days, check runs do not. Collected 423 scans (2026-04-24 to 2026-05-31, 17 sweeps). The last sweep (2026-05-31, `fe68338`) matches 34/34 exit codes and 33/34 verdicts against the current manifest.
-  - Live regression run #27 failed before reopening any PR: `REGRESSION_PAT` returns 401 (§H3).
+  - Live regression run #27 failed before reopening any PR: `REGRESSION_PAT` returns 401 (§H3). The sweep was run instead by reopening and closing the 34 fixture PRs from the browser (no merges): v1.6.0 live 34/34 exit codes, 27/34 verdicts (the seven mismatches are age-only SAFE→REVIEW). History: 457 scans, 18 sweeps.
   - Offline preflight against harness `main` `defb060` with v1.6.0: 38/38 exit codes match; 14 verdicts are raised by branch age alone. §H1: the six CAUTION-expected stable cases become DESTRUCTIVE for age once harness `main` has a commit dated from 2026-11-22. §H2: RTA01's REVIEW expectation relies on a content-scan signal removed in v1.2.0.
   - No analyser code changed. Tests: `test_analyzer.py` 311 passed.
 - **§V8 Z3 P9 repair (2026-10-26, branch `fix/z3-p9-score-bound`):**
@@ -64,7 +64,7 @@ everse_sql, empty/missing downgrade() or down() functions, or missing/empty roll
   - `tests/proofs/test_z3_properties.py`: `_MAX_OTHER_SCORE` 19→24.
   - 16 new tests in `TestAIToolingConfigPoisoning` (8 unit, 8 integration; 3 FP-anchor safe cases).
   - Test suite: **274 pass, 0 fail** (`test_analyzer.py` alone; Z3/CrossHair require external install).
-- **Next:** Replace the harness `REGRESSION_PAT` (§H3), run the live regression on the v1.6.0 pin, then `collect_history.py` and commit `regression-reports/`. Decide §H1 before 2026-11-22 and §H2. Then Sprint 2 (L1-ext: executable magic bytes + compound large-blob detector) and Sprint 3 (harness WS08/WS09/WS10).
+- **Next:** Replace the harness `REGRESSION_PAT` (§H3) so `regression.yml` can run again; after each live sweep run `collect_history.py` and commit `regression-reports/`. Decide whether D08 on AW04 (SAFE-expected) should block in enforce mode. Decide §H1 before 2026-11-22 and §H2. Then Sprint 2 (L1-ext: executable magic bytes + compound large-blob detector) and Sprint 3 (harness WS08/WS09/WS10).
 - **CI:** `trigger-regression.yml` manual-only (`workflow_dispatch`). Harness `regression.yml` also manual-only.
 - **Harness regression — last verified 2026-06-01 (analyser SHA fe68338, v1.3.0) — 34/34 PASS.**
   - Sprint 1 adds a new detection layer; re-regression required after merge to confirm no regressions on existing 34 cases.
