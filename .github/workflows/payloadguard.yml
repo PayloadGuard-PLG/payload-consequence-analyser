@@ -37,15 +37,17 @@ jobs:
 
       - name: Run PayloadGuard
         id: payloadguard
+        # Scan the PR head by commit; fork head branches do not exist here.
         env:
           PYTHONUTF8: "1"
           PR_BODY: ${{ github.event.pull_request.body }}
+          PG_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PG_HEAD_REF: ${{ github.head_ref }}
           PG_BASE_REF: ${{ github.base_ref }}
           REPORT_PATH: ${{ github.workspace }}/payloadguard-report.md
         run: |
           set +e
-          python analyze.py . "$PG_HEAD_REF" "$PG_BASE_REF" \
+          python analyze.py . "${PG_HEAD_SHA:-$PG_HEAD_REF}" "$PG_BASE_REF" \
             --pr-description "$PR_BODY" \
             --save-markdown "$REPORT_PATH"
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"

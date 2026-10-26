@@ -107,9 +107,13 @@ runs:
     - name: Run PayloadGuard
       id: scan
       shell: bash
+      # The PR head is scanned by commit. A fork PR's head branch does not exist
+      # in this repository, and a same-named branch here (e.g. main) is not the
+      # PR. github.head_ref remains the fallback for non pull_request events.
       env:
         PYTHONUTF8: "1"
         PG_PR_DESCRIPTION: ${{ inputs.pr-description }}
+        PG_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         PG_HEAD_REF: ${{ github.head_ref }}
         PG_BASE_REF: ${{ github.base_ref }}
         REPORT_PATH: ${{ github.workspace }}/${{ inputs.save-markdown }}
@@ -117,7 +121,7 @@ runs:
       run: |
         set +e
         python "$GITHUB_ACTION_PATH/analyze.py" . \
-          "$PG_HEAD_REF" "$PG_BASE_REF" \
+          "${PG_HEAD_SHA:-$PG_HEAD_REF}" "$PG_BASE_REF" \
           --pr-description "$PG_PR_DESCRIPTION" \
           --save-markdown "$REPORT_PATH" \
           --save-json "$JSON_REPORT_PATH"
