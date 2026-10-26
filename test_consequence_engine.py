@@ -134,10 +134,10 @@ class TestParserCompletenessD01:
         ("src/Auth.cs",
          "class A { bool V(string t) { if (t == null) return false; return C(t); } }",
          "class A { bool V(string t) { return true; } }"),
-        ("api/auth.mjs",
-         "export function verify(t) { if (!t) return false; return check(t); }",
-         "export function verify(t) { return true; }"),
-    ], ids=["ruby", "csharp", "js-mjs"])
+        ("src/Auth.kt",
+         "fun verify(t: String?): Boolean {\n  if (t == null) return false\n  return check(t)\n}\n",
+         "fun verify(t: String?): Boolean {\n  return true\n}\n"),
+    ], ids=["ruby", "csharp", "kotlin"])
     def test_x06_unsupported_source_change_reports_incomplete_coverage(self, path, base, head):
         rep = ConsequenceEngine(mode="enforce").analyze_deltas([
             FileDeltaInput(file_path=path, change_type="M", base_source=base, head_source=head)
@@ -209,6 +209,68 @@ class TestParserCompletenessD01:
         assert mixed.capabilities["syntax"]["state"] == "partial"
         assert alone.parser_completeness["complete"] is True
         assert mixed.parser_completeness["complete"] is False
+
+    # X07 (AUDIT_LOG §V7): JS/TS module extensions use the installed JS/TS grammars
+    # and produce exactly what the base extension produces.
+
+    _V7_ESM = (
+        "export function verify(token) {\n  if (!token) { return false; }\n  return checkSig(token);\n}\n"
+        "export class Session {\n  open(user) { return start(user); }\n}\n"
+    )
+    _V7_CJS = (
+        "function verify(token) {\n  if (!token) { return false; }\n  return checkSig(token);\n}\n"
+        "module.exports = { verify };\n"
+    )
+    _V7_TS = (
+        "export interface Claims { sub: string }\n"
+        "export function verify(token: string): boolean {\n  if (!token) { return false; }\n  return checkSig(token);\n}\n"
+    )
+
+    @pytest.mark.parametrize("ext, ref_ext, src", [
+        (".mjs", ".js", _V7_ESM),
+        (".cjs", ".js", _V7_CJS),
+        (".mts", ".ts", _V7_TS),
+        (".cts", ".ts", _V7_TS),
+    ], ids=["mjs", "cjs", "mts", "cts"])
+    def test_x07_module_extension_parses_like_base_extension(self, ext, ref_ext, src):
+        ref = extract_symbols(src, "lib/auth" + ref_ext)
+        got = extract_symbols(src, "lib/auth" + ext)
+        assert got.status == PARSER_STATUS_AVAILABLE and got.complete is True
+        assert got.language == ref.language
+
+        def facts(pr):
+            return sorted((s.kind, s.qualified_name, s.body_hash, s.normalized_signature, s.is_exported)
+                          for s in pr.symbols)
+
+        assert facts(ref)
+        assert facts(got) == facts(ref)
+        assert extract_named_nodes(src, "lib/auth" + ext) == extract_named_nodes(src, "lib/auth" + ref_ext)
+
+    @pytest.mark.parametrize("ext, ref_ext", [(".mjs", ".js"), (".cjs", ".js"), (".mts", ".ts"), (".cts", ".ts")],
+                             ids=["mjs", "cjs", "mts", "cts"])
+    def test_x07_gutting_in_module_extension_matches_base_extension(self, ext, ref_ext):
+        base = (
+            "export function verify(token) {\n"
+            "  if (!token) { throw new Error('missing'); }\n"
+            "  const ok = verifySignature(token);\n"
+            "  if (!ok) { return false; }\n"
+            "  return true;\n"
+            "}\n"
+        )
+        head = "export function verify(token) {\n  return true;\n}\n"
+
+        def run(path):
+            rep = ConsequenceEngine(mode="enforce").analyze_deltas([
+                FileDeltaInput(file_path=path, change_type="M", base_source=base, head_source=head)
+            ])
+            return rep, sorted((f.detector_id, f.consequence_class, f.policy_recommendation) for f in rep.findings)
+
+        ref_rep, ref_findings = run("api/auth" + ref_ext)
+        got_rep, got_findings = run("api/auth" + ext)
+        assert got_findings == ref_findings
+        assert any(pol == POLICY_BLOCK for _d, _c, pol in got_findings)
+        assert all(d != DETECTOR_D01_PARSER for d, _c, _p in got_findings)
+        assert got_rep.recommended_verdict == ref_rep.recommended_verdict == "DESTRUCTIVE"
 
     def test_parser_capabilities_probe(self):
         """Verify runtime capability probe reports all 7 language keys."""

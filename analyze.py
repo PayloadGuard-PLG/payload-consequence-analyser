@@ -1269,10 +1269,7 @@ class PayloadAnalyzer:
 
             # SEMANTIC CHANGE GRAPH & DIFFERENTIAL CONSEQUENCE ENGINE (consequence.v1)
             consequence_cfg = getattr(self.config, "consequence", DEFAULT_CONFIG["consequence"])
-            consequence_mode = (
-                os.environ.get("PAYLOADGUARD_CONSEQUENCE_MODE")
-                or consequence_cfg.get("mode", "shadow")
-            ).lower()
+            consequence_mode = (consequence_cfg.get("mode") or "shadow").lower()
             max_repo_files = int(consequence_cfg.get("max_repo_files", 200))
             consequence_report_dict: dict = {}
 
@@ -2767,8 +2764,10 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.repo_path, ref=args.target)
-    if args.consequence_mode:
-        config.consequence["mode"] = args.consequence_mode
+    # Precedence: --consequence-mode, then PAYLOADGUARD_CONSEQUENCE_MODE, then payloadguard.yml.
+    mode_override = args.consequence_mode or os.environ.get("PAYLOADGUARD_CONSEQUENCE_MODE")
+    if mode_override:
+        config.consequence["mode"] = mode_override
     analyzer = PayloadAnalyzer(args.repo_path, args.branch, args.target, config=config)
     report   = analyzer.analyze(pr_description=args.pr_description)
     print_report(report)

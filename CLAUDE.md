@@ -2,7 +2,12 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch state:** §V1 (PR #102, `e67a471`), §V2 (PR #104, `a388f05`) and §V3 (PR #105, `e77edf3`) are on `main`; `fix/policy-from-target-branch`, `fix/action-pr-head-sha` and `fix/pyproject-packaging` are merged and can be deleted. PR #105 CI on GitHub's Ubuntu runner: `test_analyzer.py` 301 passed; the self-scan resolved the PR head by SHA. Active: `fix/d01-unsupported-extension` (from `main` `e77edf3`) — §V4, not merged.
+- **Branch state:** §V1 (PR #102, `e67a471`), §V2 (PR #104, `a388f05`) and §V3 (PR #105, `e77edf3`) are on `main`; `fix/policy-from-target-branch`, `fix/action-pr-head-sha` and `fix/pyproject-packaging` are merged and can be deleted. PR #105 CI on GitHub's Ubuntu runner: `test_analyzer.py` 301 passed; the self-scan resolved the PR head by SHA. §V4 is in PR #106 (`fix/d01-unsupported-extension`, head `2af1d09`, into `main`, 2 checks passing, not merged at time of writing). Active: `fix/v5-v7` (stacked on `2af1d09`) — §V5–§V7; open its PR into `main` after #106 merges so it shows only §V5–§V7.
+- **§V5–§V7 Action outputs, consequence-mode input, JS/TS module extensions (2026-10-26, branch `fix/v5-v7`):**
+  - §V5 fixed (`3780691`): the action's `verdict` output mapped exit 0 to SAFE; it is now read from the JSON report (exit-code mapping as fallback), so REVIEW and CAUTION are emitted.
+  - §V6 fixed (`3780691`): new `consequence-mode` input (validated in the step; invalid values exit 1 rather than argparse's 2, which would read as DESTRUCTIVE). `PAYLOADGUARD_CONSEQUENCE_MODE` moved from `analyze()` to `main()`: `--consequence-mode` > environment > `payloadguard.yml`. README enforce example corrected.
+  - §V7 fixed (`81d9481`): `.mjs`/`.cjs` → `javascript`, `.mts`/`.cts` → `typescript` in `_EXT_TO_LANG`, removed from `_UNPARSED_SOURCE_EXTS`. Legacy L4 now covers these files as it covers `.js`/`.ts`; calibrated by parity tests. No harness fixture contains these extensions.
+  - **Tests:** 368 passed, 15 skipped (Z3/CrossHair not installed). Harness oracle 41/41; mutation suite 16/16; six-scenario Action simulation unchanged. All AUDIT_LOG 2026-10-26 findings (§V1–§V7) are fixed.
 - **§V4 D01 unsupported-language coverage (2026-10-26, branch `fix/d01-unsupported-extension`):**
   - §V4 fixed (`cdb8395`): `ConsequenceEngine.analyze_deltas()` skipped files without a registered parser, so D01 never emitted `UNSUPPORTED_EXTENSION` and a Ruby/C#/`.mjs` change reported `parser_completeness.complete: true`. Source files listed in `_UNPARSED_SOURCE_EXTS` now reach `extract_symbols()`; D01 reports them as LOW / WARN with a manual-review remediation; syntax capability is `unavailable` when no changed file had a parser. Data/config/markup files remain excluded; SQL migrations remain with D10. Verdicts and exit codes are unchanged.
   - New open finding §V7 (LOW): `.mjs`/`.cjs`/`.mts`/`.cts` are not mapped to the installed JS/TS grammars.
@@ -17,7 +22,7 @@
 - **v1.5.0 audit + §V1 policy trust-boundary repair (2026-10-26, branch `fix/policy-from-target-branch`):**
   - Findings §V1–§V6 recorded in `AUDIT_LOG.md` (Findings Register — Audit Run: 2026-10-26).
   - §V1 fixed (`6d1477e`): `payloadguard.yml` and `allowlist.yml` were read from the working tree, which in CI is the PR merge result, so a PR could set `consequence.mode: shadow`, raise thresholds or allowlist its own dependency and pass its own scan. `load_config(repo_path, ref=None)` and `_load_allowlist(repo_path, ref=None)` now read from `ref` via `_read_file_at_ref()` (origin/<ref> fallback); `main()` passes the target branch and `analyze()` the resolved target. Without `ref` the working-tree behaviour is unchanged.
-  - Open: §V5/§V6 (LOW) Action `verdict` output and consequence-mode wiring.
+  - §V5/§V6 fixed on `fix/v5-v7` (see above).
   - **Tests:** 340 passed, 15 skipped (Z3/CrossHair not installed), 1 xfailed (§V2 evidence) across `test_analyzer.py`, `test_consequence_engine.py`, `tests/`. Harness `validate_manifest.py --verify-consequence` 41/41; mutation suite 16/16 (0 FP / 0 FN). Live PR harness not run.
 - **D10 Migration/Persistence Loss + D05/D08 Extensions (Robust Real-Diff Hardening) — COMPLETE (2026-10-25, branch eat/d08-d09-d10-consequence-detectors):**
   - consequence_engine.py: Hardened D10_MIGRATION_PERSISTENCE_LOSS with multi-statement SQL AST/tokenizer parser, forward-vs-rollback boundary isolation, and framework-aware irreversibility:
@@ -222,8 +227,6 @@ sca:
 |---|---|---|---|
 | INC-3 | Direct push to main -> L5b returns UNVERIFIED but raises no flag | MEDIUM | Backlog |
 | §2.3 | Single-branch clone / detached HEAD raises BadName exception | MEDIUM | Backlog |
-| §V5/§V6 | Action `verdict` output omits REVIEW/CAUTION; no consequence-mode input | LOW | Open |
-| §V7 | `.mjs`/`.cjs`/`.mts`/`.cts` not mapped to the installed JS/TS grammars (reported via D01 since §V4) | LOW | Open |
 | WS03 | workflow-security/dormant-trigger: expected DESTRUCTIVE, getting CAUTION (score=3) | MEDIUM | **RESOLVED** — test expectation corrected (see DEVLOG 2026-05-31) |
 
 ## Vericoding Plan (from `payloadguard-vericoding-plan.md` on main)
