@@ -1,6 +1,9 @@
 import json
 import os
 import re
+import shutil
+import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -29,6 +32,7 @@ from analyze import (
     _is_oidc_consumer_typosquatted,
     _load_allowlist,
     _parse_added_packages,
+    _read_file_at_ref,
     load_config,
     print_report,
     save_json_report,
@@ -3103,6 +3107,367 @@ class TestOwnWorkflowsNotInjectable(unittest.TestCase):
         bodies = list(_iter_run_bodies())
         self.assertGreater(len(bodies), 5)
         self.assertIn("action.yml", {path for path, _, _ in bodies})
+
+
+# ==============================================================================
+# POLICY TRUST BOUNDARY (AUDIT_LOG §V1)
+# ==============================================================================
+# payloadguard.yml and allowlist.yml must come from the target branch. In CI the
+# working tree is the PR merge result, so a working-tree read lets the PR under
+# scan set the policy that judges it.
+
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_ANALYZE_PY = os.path.join(_REPO_ROOT, "analyze.py")
+_ACTION_YML = os.path.join(_REPO_ROOT, "action.yml")
+
+_POLICY_AUTH = '''class Auth:
+    def verify(self, password, hashed):
+        digest = hash_pw(password)
+        if not compare(digest, hashed):
+            return False
+        log_access(password)
+        return True
+
+
+def hash_pw(p):
+    return p[::-1]
+
+
+def compare(a, b):
+    return a == b
+
+
+def log_access(p):
+    print("access", len(p))
+'''
+_POLICY_AUTH_GUTTED = _POLICY_AUTH.replace(
+    "        digest = hash_pw(password)\n"
+    "        if not compare(digest, hashed):\n"
+    "            return False\n"
+    "        log_access(password)\n",
+    "",
+)
+_POLICY_ENFORCE = "consequence:\n  mode: enforce\n"
+_POLICY_SHADOW = "consequence:\n  mode: shadow\n"
+_POLICY_README_EDIT = {"README.md": "Fixture\n\nUsage notes for the login helper.\n"}
+
+
+def _policy_base_files():
+    files = {
+        "auth.py": _POLICY_AUTH,
+        "app.py": "from auth import Auth\n\n\ndef login(p, h):\n    return Auth().verify(p, h)\n",
+        "requirements.txt": "requests\n",
+        "allowlist.yml": "python:\n  - requests\n",
+        "payloadguard.yml": _POLICY_ENFORCE,
+        "README.md": "Fixture\n",
+    }
+    for i in range(1, 12):
+        files[f"data/record_{i:02d}.txt"] = f"record {i}\n"
+    return files
+
+
+def _fixture_env():
+    env = dict(os.environ)
+    env.update({
+        "GIT_AUTHOR_NAME": "PayloadGuard Test",
+        "GIT_AUTHOR_EMAIL": "test@payloadguard.local",
+        "GIT_COMMITTER_NAME": "PayloadGuard Test",
+        "GIT_COMMITTER_EMAIL": "test@payloadguard.local",
+        "PYTHONUTF8": "1",
+    })
+    return env
+
+
+def _run_git(cwd, *args):
+    return subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", *args],
+        cwd=cwd, env=_fixture_env(), check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def _commit_files(repo, files, message):
+    """Write {relpath: text} into repo (None deletes) and commit everything."""
+    for rel, text in files.items():
+        path = os.path.join(repo, rel)
+        if text is None:
+            os.remove(path)
+            continue
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+    _run_git(repo, "add", "-A")
+    _run_git(repo, "commit", "-q", "-m", message)
+
+
+def _force_rmtree(path):
+    """rmtree that also clears git's read-only object files on Windows."""
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                os.chmod(os.path.join(root, name), stat.S_IREAD | stat.S_IWRITE)
+            except OSError:
+                pass
+    shutil.rmtree(path, ignore_errors=True)
+
+
+class TestPolicyReadFromTargetBranch(unittest.TestCase):
+    """CLI end to end (analyze.py main → verdict → exit code) on a real git fixture.
+
+    Each scan runs with the PR branch checked out, as CI does, while the base
+    branch carries `consequence.mode: enforce` and an allowlist.
+    """
+
+    PR_BRANCHES = {
+        # Control: destructive change under the base policy.
+        "pr/gut-verify": ("Tidy auth module", {"auth.py": _POLICY_AUTH_GUTTED}),
+        # Same change, plus the PR downgrading its own consequence mode.
+        "pr/gut-verify-shadow": ("Tidy auth module", {
+            "auth.py": _POLICY_AUTH_GUTTED,
+            "payloadguard.yml": _POLICY_SHADOW,
+        }),
+        # 11 file deletions, plus the PR raising the deletion thresholds out of reach.
+        "pr/delete-raise-thresholds": ("Remove stale records", dict(
+            {f"data/record_{i:02d}.txt": None for i in range(1, 12)},
+            **{"payloadguard.yml": _POLICY_ENFORCE + "thresholds:\n  files_deleted: [100000, 200000, 300000]\n"},
+        )),
+        # Unvetted dependency, plus the PR allowlisting it.
+        "pr/allowlist-self-approve": ("Add HTTP helper dependency", {
+            "requirements.txt": "requests\nevilpkg\n",
+            "allowlist.yml": "python:\n  - requests\n  - evilpkg\n",
+        }),
+        # Legitimate change under the base policy.
+        "pr/docs": ("Document login helper usage", _POLICY_README_EDIT),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="pg_policy_")
+        cls.repo = os.path.join(cls.tmp, "repo")
+        os.makedirs(cls.repo)
+        _run_git(cls.repo, "init", "-q")
+        _commit_files(cls.repo, _policy_base_files(), "base")
+        for branch, (_desc, files) in cls.PR_BRANCHES.items():
+            _run_git(cls.repo, "checkout", "-q", "-b", branch, "main")
+            _commit_files(cls.repo, files, f"change on {branch}")
+        cls.results = {branch: cls._scan(branch, desc) for branch, (desc, _f) in cls.PR_BRANCHES.items()}
+
+    @classmethod
+    def tearDownClass(cls):
+        _force_rmtree(cls.tmp)
+
+    @classmethod
+    def _scan(cls, branch, description):
+        _run_git(cls.repo, "checkout", "-q", "--detach", branch)
+        report_path = os.path.join(cls.tmp, branch.replace("/", "_") + ".json")
+        proc = subprocess.run(
+            [sys.executable, _ANALYZE_PY, cls.repo, branch, "main",
+             "--pr-description", description, "--save-json", report_path],
+            env=_fixture_env(), capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        if not os.path.exists(report_path):
+            raise AssertionError(f"no report for {branch}:\n{proc.stdout}\n{proc.stderr}")
+        with open(report_path, encoding="utf-8") as fh:
+            return proc.returncode, json.load(fh)
+
+    def test_control_destructive_change_blocks_under_base_policy(self):
+        code, rep = self.results["pr/gut-verify"]
+        self.assertEqual(rep["consequence_analysis"]["mode"], "enforce")
+        self.assertEqual(rep["verdict"]["status"], "DESTRUCTIVE")
+        self.assertEqual(code, 2)
+
+    def test_pr_cannot_downgrade_its_own_consequence_mode(self):
+        code, rep = self.results["pr/gut-verify-shadow"]
+        self.assertEqual(rep["consequence_analysis"]["mode"], "enforce")
+        self.assertEqual(rep["verdict"]["status"], "DESTRUCTIVE")
+        self.assertEqual(code, 2)
+
+    def test_pr_cannot_raise_its_own_thresholds(self):
+        _code, rep = self.results["pr/delete-raise-thresholds"]
+        self.assertIn("11 files would be deleted", rep["verdict"]["flags"])
+        self.assertGreaterEqual(rep["verdict"]["severity_score"], 1)
+
+    def test_pr_cannot_allowlist_its_own_dependency(self):
+        _code, rep = self.results["pr/allowlist-self-approve"]
+        flagged = [p["package"] for p in rep["sca"]["unverified_packages"]]
+        self.assertEqual(flagged, ["evilpkg"])
+
+    def test_legitimate_change_passes_under_base_policy(self):
+        code, rep = self.results["pr/docs"]
+        self.assertEqual(rep["consequence_analysis"]["mode"], "enforce")
+        self.assertEqual(rep["consequence_analysis"]["findings"], [])
+        self.assertTrue(rep["sca"]["allowlist_active"])
+        self.assertEqual(rep["verdict"]["status"], "SAFE")
+        self.assertEqual(code, 0)
+
+    def test_load_config_ref_reads_commit_not_working_tree(self):
+        _run_git(self.repo, "checkout", "-q", "--detach", "pr/gut-verify-shadow")
+        # Without a ref the legacy working-tree contract is unchanged.
+        self.assertEqual(load_config(self.repo).consequence["mode"], "shadow")
+        self.assertEqual(load_config(self.repo, ref="main").consequence["mode"], "enforce")
+
+    def test_policy_ref_falls_back_to_origin(self):
+        """CI checkouts can carry the target only as origin/<ref> on a detached HEAD."""
+        clone = os.path.join(self.tmp, "clone")
+        _run_git(self.repo, "checkout", "-q", "main")
+        _run_git(self.tmp, "clone", "-q", self.repo, clone)
+        _run_git(clone, "checkout", "-q", "--detach", "origin/pr/allowlist-self-approve")
+        _run_git(clone, "branch", "-q", "-D", "main")
+        self.assertEqual(load_config(clone, ref="main").consequence["mode"], "enforce")
+        self.assertEqual(_load_allowlist(clone, ref="main"), {"python": {"requests"}})
+
+    def test_policy_ref_missing_file_or_ref_returns_defaults(self):
+        self.assertIsNone(_read_file_at_ref(self.repo, "main", "absent.yml"))
+        self.assertIsNone(_load_allowlist(self.repo, ref="no-such-branch"))
+        self.assertEqual(load_config(self.repo, ref="no-such-branch").consequence["mode"], "shadow")
+        self.assertEqual(load_config(os.path.join(self.tmp, "missing"), ref="main").consequence["mode"], "shadow")
+
+
+def _find_bash():
+    """Locate bash for running action.yml steps; on Windows use Git for Windows, not the WSL launcher."""
+    if os.name != "nt":
+        return shutil.which("bash")
+    git_exe = shutil.which("git")
+    if not git_exe:
+        return None
+    parent = os.path.dirname(git_exe)
+    for _ in range(3):
+        candidate = os.path.join(parent, "bin", "bash.exe")
+        if os.path.exists(candidate):
+            return candidate
+        parent = os.path.dirname(parent)
+    return None
+
+
+class TestActionPolicyTrustBoundary(unittest.TestCase):
+    """action.yml end to end on a local reproduction of a pull_request checkout.
+
+    Recreates what actions/checkout (fetch-depth: 0) leaves for a pull_request
+    event: origin/* branches, a refs/remotes/pull/1/merge merge commit and a
+    detached HEAD. Then runs the `run:` bodies of the "Fetch base branch" and
+    "Run PayloadGuard" steps verbatim in bash and reads $GITHUB_OUTPUT.
+    """
+
+    STEPS = ("Fetch base branch", "Run PayloadGuard")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bash = _find_bash()
+        if cls.bash is None:
+            raise unittest.SkipTest("bash is required to execute action.yml run steps")
+        cls.tmp = tempfile.mkdtemp(prefix="pg_action_")
+        cls.upstream = os.path.join(cls.tmp, "upstream.git")
+        _run_git(cls.tmp, "init", "-q", "--bare", cls.upstream)
+        cls.seed = os.path.join(cls.tmp, "seed")
+        _run_git(cls.tmp, "clone", "-q", cls.upstream, cls.seed)
+        _run_git(cls.seed, "checkout", "-q", "-B", "main")
+        _commit_files(cls.seed, _policy_base_files(), "base")
+        _run_git(cls.seed, "push", "-q", "origin", "main")
+        # The run body invokes `python`; point it at this interpreter.
+        shim_dir = os.path.join(cls.tmp, "bin")
+        os.makedirs(shim_dir)
+        shim = os.path.join(shim_dir, "python")
+        with open(shim, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write('#!/usr/bin/env bash\nexec "%s" "$@"\n' % sys.executable.replace("\\", "/"))
+        os.chmod(shim, 0o755)
+        cls.shim_dir = shim_dir
+
+    @classmethod
+    def tearDownClass(cls):
+        _force_rmtree(cls.tmp)
+
+    def _pr_scan(self, name, head_repo, head_branch, files, description):
+        """Commit files on head_branch in head_repo, check the PR out as CI does, run the scan steps."""
+        import yaml
+
+        _run_git(head_repo, "checkout", "-q", "-B", head_branch, "origin/main")
+        _commit_files(head_repo, files, description)
+        if head_repo == self.seed:
+            _run_git(head_repo, "push", "-q", "origin", head_branch)
+
+        ci = os.path.join(self.tmp, name)
+        os.makedirs(ci)
+        _run_git(ci, "init", "-q")
+        _run_git(ci, "remote", "add", "origin", self.upstream)
+        _run_git(ci, "fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*")
+        _run_git(ci, "fetch", "-q", head_repo, f"+refs/heads/{head_branch}:refs/remotes/pull/1/head")
+        head_sha = _run_git(ci, "rev-parse", "refs/remotes/pull/1/head")
+        _run_git(ci, "checkout", "-q", "--detach", "origin/main")
+        _run_git(ci, "merge", "-q", "--no-ff", "-m", "Merge pull request #1", head_sha)
+        _run_git(ci, "update-ref", "refs/remotes/pull/1/merge", "HEAD")
+        _run_git(ci, "update-ref", "-d", "refs/remotes/pull/1/head")
+        _run_git(ci, "checkout", "-q", "--detach", "refs/remotes/pull/1/merge")
+
+        workspace = ci.replace("\\", "/")
+        context = {
+            "github.base_ref": "main",
+            "github.head_ref": head_branch,
+            "github.workspace": workspace,
+            "github.event.pull_request.head.sha": head_sha,
+            "inputs.pr-description": description,
+            "inputs.save-markdown": "payloadguard-report.md",
+        }
+
+        def expand(value):
+            return re.sub(r"\$\{\{\s*(.+?)\s*\}\}", lambda m: context[m.group(1)], str(value))
+
+        output = os.path.join(ci, "github_output")
+        open(output, "w").close()
+        env = _fixture_env()
+        env.update({
+            "GITHUB_ACTION_PATH": _REPO_ROOT.replace("\\", "/"),
+            "GITHUB_OUTPUT": output.replace("\\", "/"),
+            "GITHUB_WORKSPACE": workspace,
+            "PATH": self.shim_dir + os.pathsep + env.get("PATH", ""),
+        })
+        with open(_ACTION_YML, encoding="utf-8") as fh:
+            steps = yaml.safe_load(fh)["runs"]["steps"]
+        ran = []
+        for step in steps:
+            if step.get("name") not in self.STEPS:
+                continue
+            step_env = dict(env, **{k: expand(v) for k, v in (step.get("env") or {}).items()})
+            proc = subprocess.run(
+                [self.bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+                cwd=ci, env=step_env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            self.assertEqual(proc.returncode, 0, f"{step['name']} failed:\n{proc.stdout}\n{proc.stderr}")
+            ran.append(step["name"])
+        self.assertEqual(tuple(ran), self.STEPS)
+
+        with open(output, encoding="utf-8") as fh:
+            outputs = dict(line.split("=", 1) for line in fh.read().splitlines() if "=" in line)
+        with open(os.path.join(ci, "payloadguard-report.json"), encoding="utf-8") as fh:
+            report = json.load(fh)
+        return outputs, report, head_sha
+
+    def test_pr_policy_downgrade_still_blocks_through_action(self):
+        outputs, report, _ = self._pr_scan(
+            "self-disable", self.seed, "feature/quiet",
+            {"auth.py": _POLICY_AUTH_GUTTED, "payloadguard.yml": _POLICY_SHADOW}, "Tidy auth module",
+        )
+        self.assertEqual(report["consequence_analysis"]["mode"], "enforce")
+        self.assertEqual(outputs["exit_code"], "2")
+        self.assertEqual(outputs["verdict"], "DESTRUCTIVE")
+
+    def test_legitimate_pr_passes_through_action(self):
+        outputs, report, _ = self._pr_scan(
+            "benign", self.seed, "feature/docs", _POLICY_README_EDIT, "Document login helper usage",
+        )
+        self.assertEqual(report["consequence_analysis"]["mode"], "enforce")
+        self.assertEqual(outputs["exit_code"], "0")
+        self.assertEqual(outputs["verdict"], "SAFE")
+
+    @unittest.expectedFailure
+    def test_fork_pr_scans_the_pr_head_commit(self):
+        """AUDIT_LOG §V2 (open): the head is resolved by branch name, so a fork PR
+        from its own `main` scans the base repository's `main` against itself."""
+        fork = os.path.join(self.tmp, "fork")
+        _run_git(self.tmp, "clone", "-q", self.upstream, fork)
+        outputs, report, head_sha = self._pr_scan(
+            "fork-main", fork, "main", {"auth.py": _POLICY_AUTH_GUTTED}, "Tidy auth module",
+        )
+        self.assertEqual(report["temporal"]["branch_commit_hash"], head_sha[:7])
+        self.assertEqual(outputs["exit_code"], "2")
 
 
 if __name__ == "__main__":

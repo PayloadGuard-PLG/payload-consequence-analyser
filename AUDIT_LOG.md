@@ -484,6 +484,24 @@ Test: `test_multiline_curl_credential_harvest_detected`. Suite: **273 pass, 7 sk
 
 ---
 
+## Findings Register — Audit Run: 2026-10-26 (v1.5.0, `93f94f9`)
+
+Scope: PRs #97, #100, #101 (SCG and D01–D10), parser completeness, and the Action-to-analyser-to-verdict path.
+Baseline at `93f94f9`: `test_analyzer.py` + `test_consequence_engine.py` 330 passed; harness `validate_manifest.py --verify-consequence` 41/41; harness mutation suite 16/16 (0 FP, 0 FN). The defects below are not covered by those suites.
+
+Action-path evidence was produced by executing the `run:` bodies of `action.yml` ("Fetch base branch", "Run PayloadGuard") in bash against a local reproduction of the `pull_request` checkout that `actions/checkout` (`fetch-depth: 0`) produces: `origin/*` remote-tracking branches, a `refs/remotes/pull/1/merge` merge commit, detached HEAD. Base branch `main` carries `payloadguard.yml` with `consequence.mode: enforce`; the destructive change replaces the body of `Auth.verify` with `return True` (D02 `BODY_GUTTED`, BLOCK).
+
+| ID | Finding | Severity | Status | Commit |
+|---|---|---|---|---|
+| §V1 | Policy files are read from the scanned working tree. In CI that tree is the PR merge result, so the PR under scan sets its own policy. Reproduced: (a) PR sets `consequence.mode: shadow` alongside the gutted `Auth.verify` → exit 0 / SAFE (control without the config edit: exit 2 / DESTRUCTIVE); (b) PR deletes 11 files and adds `payloadguard.yml` raising `files_deleted`/`lines_deleted` → score 0 / SAFE (control: score 1 / REVIEW); (c) PR adds an unvetted package to `requirements.txt` and to `allowlist.yml` → SAFE, no SCA flag (control: score 3 / CAUTION). The change is not flagged anywhere in the report. | HIGH | **Fixed** | `6d1477e` — `load_config()` / `_load_allowlist()` take a `ref` and read via `_read_file_at_ref()`; `main()` passes the target branch, `analyze()` the resolved target. Tests: `TestPolicyReadFromTargetBranch`, `TestActionPolicyTrustBoundary` (7 fail on `93f94f9`, 10 pass after) |
+| §V2 | `action.yml` passes the PR head as a branch name (`github.head_ref`) rather than a commit. For fork PRs the head branch does not exist in the base repository: a fork branch `patch-1` → exit 1 "Branch 'patch-1' not found" for benign and destructive PRs alike; a fork branch whose name exists in the base repository (`main` is the common case) resolves to the base repository's branch, so base is diffed against itself → exit 0 / SAFE while the PR head guts `Auth.verify`. The README workflow fails closed only incidentally, because the comment step receives a read-only token on fork PRs; workflows with `continue-on-error: true` on the scan step (as in the harness) merge-gate on the SAFE result. Fix direction: pass `github.event.pull_request.head.sha`. Executable evidence: `TestActionPolicyTrustBoundary.test_fork_pr_scans_the_pr_head_commit` (expected failure until fixed). | HIGH | Open | — |
+| §V3 | `pyproject.toml` declares `packages = ["consequence_engine"]`, but `consequence_engine` is a single module. `pip install .` and `python -m build` fail with `package directory 'consequence_engine' does not exist`, so the `publish.yml` tag build cannot produce v1.4.0/v1.5.0. Fix direction: list it under `py-modules`. | MEDIUM | Open | — |
+| §V4 | D01 cannot emit `UNSUPPORTED_EXTENSION`. `ConsequenceEngine.analyze_deltas()` only calls `extract_symbols()` for paths with a registered language, so changes to code in other languages (e.g. `.rb`, `.php`) produce no D01 finding and `parser_completeness.complete: true`. Contradicts the D01 description in README and the AGENTS.md rule to emit incomplete coverage. | MEDIUM | Open | — |
+| §V5 | The `verdict` output of `action.yml` maps exit 0 to `SAFE`, so `REVIEW` and `CAUTION` are never emitted, contrary to the output's documented values. | LOW | Open | — |
+| §V6 | `action.yml` has no input for the consequence mode, and the README "enforce via your workflow" snippet sets only `PYTHONUTF8`, so it does not enable enforce mode. `PAYLOADGUARD_CONSEQUENCE_MODE` (undocumented) also takes precedence over `--consequence-mode`. | LOW | Open | — |
+
+---
+
 ## Next Audit Checklist
 
 Copy this section into the next audit issue or branch PR description.

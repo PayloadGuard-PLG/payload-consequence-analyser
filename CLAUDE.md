@@ -2,7 +2,12 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Active branch:** `main` (merged PR #97 `cb74a6e` in analyser / PR #75 `dcc5522` in harness)
+- **Active branch:** `fix/policy-from-target-branch` (from `main` `93f94f9`, v1.5.0). Not merged.
+- **v1.5.0 audit + §V1 policy trust-boundary repair (2026-10-26, branch `fix/policy-from-target-branch`):**
+  - Findings §V1–§V6 recorded in `AUDIT_LOG.md` (Findings Register — Audit Run: 2026-10-26).
+  - §V1 fixed (`6d1477e`): `payloadguard.yml` and `allowlist.yml` were read from the working tree, which in CI is the PR merge result, so a PR could set `consequence.mode: shadow`, raise thresholds or allowlist its own dependency and pass its own scan. `load_config(repo_path, ref=None)` and `_load_allowlist(repo_path, ref=None)` now read from `ref` via `_read_file_at_ref()` (origin/<ref> fallback); `main()` passes the target branch and `analyze()` the resolved target. Without `ref` the working-tree behaviour is unchanged.
+  - Open: §V2 (HIGH) `action.yml` resolves the PR head by `github.head_ref`, so fork PRs fail with exit 1 or scan the base repository's same-named branch; §V3 (MEDIUM) `pyproject.toml` `packages = ["consequence_engine"]` breaks `pip install .` / `python -m build`; §V4 (MEDIUM) D01 never emits `UNSUPPORTED_EXTENSION`; §V5/§V6 (LOW) Action `verdict` output and consequence-mode wiring.
+  - **Tests:** 340 passed, 15 skipped (Z3/CrossHair not installed), 1 xfailed (§V2 evidence) across `test_analyzer.py`, `test_consequence_engine.py`, `tests/`. Harness `validate_manifest.py --verify-consequence` 41/41; mutation suite 16/16 (0 FP / 0 FN). Live PR harness not run.
 - **D10 Migration/Persistence Loss + D05/D08 Extensions (Robust Real-Diff Hardening) — COMPLETE (2026-10-25, branch eat/d08-d09-d10-consequence-detectors):**
   - consequence_engine.py: Hardened D10_MIGRATION_PERSISTENCE_LOSS with multi-statement SQL AST/tokenizer parser, forward-vs-rollback boundary isolation, and framework-aware irreversibility:
     - Multi-line statement parsing for SQL migrations (handling comments, quoted identifiers, and ALTER TABLE ... DROP [COLUMN]).
@@ -206,6 +211,10 @@ sca:
 |---|---|---|---|
 | INC-3 | Direct push to main -> L5b returns UNVERIFIED but raises no flag | MEDIUM | Backlog |
 | §2.3 | Single-branch clone / detached HEAD raises BadName exception | MEDIUM | Backlog |
+| §V2 | Action resolves PR head by branch name — fork PRs error or scan the base repo's same-named branch | HIGH | Open |
+| §V3 | `pyproject.toml` lists `consequence_engine` as a package — distribution cannot be built | MEDIUM | Open |
+| §V4 | D01 never reports `UNSUPPORTED_EXTENSION` for code in unsupported languages | MEDIUM | Open |
+| §V5/§V6 | Action `verdict` output omits REVIEW/CAUTION; no consequence-mode input | LOW | Open |
 | WS03 | workflow-security/dormant-trigger: expected DESTRUCTIVE, getting CAUTION (score=3) | MEDIUM | **RESOLVED** — test expectation corrected (see DEVLOG 2026-05-31) |
 
 ## Vericoding Plan (from `payloadguard-vericoding-plan.md` on main)
