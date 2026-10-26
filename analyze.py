@@ -461,14 +461,50 @@ def _normalize_yaml_content(content: str) -> str:
     return " ".join(content.split())
 
 
-def _load_allowlist(repo_path: str):
-    """Load allowlist.yml from repo root. Returns None if absent (SCA opt-out)."""
-    p = Path(repo_path) / "allowlist.yml"
-    if not p.exists():
-        return None
+def _read_file_at_ref(repo_path: str, ref: str, filename: str):
+    """Return the text of repo-root `filename` at `ref` (or origin/<ref>), or None if absent.
+
+    Policy files (payloadguard.yml, allowlist.yml) are read through this rather
+    than from the working tree. In CI the working tree is the PR merge result,
+    so a working-tree read lets the PR under scan rewrite the policy that
+    judges it. The origin/ fallback mirrors PayloadAnalyzer._resolve_ref.
+    """
     try:
-        with open(p) as f:
-            data = yaml.safe_load(f) or {}
+        with git.Repo(repo_path) as repo:
+            for candidate in (ref, f"origin/{ref}"):
+                try:
+                    tree = repo.commit(candidate).tree
+                except (git.exc.BadName, git.exc.BadObject, ValueError):
+                    continue
+                try:
+                    blob = tree / filename
+                except KeyError:
+                    return None
+                if blob.type != "blob":
+                    return None
+                return blob.data_stream.read().decode("utf-8", errors="replace")
+    except (git.exc.InvalidGitRepositoryError, git.exc.NoSuchPathError):
+        pass
+    return None
+
+
+def _load_allowlist(repo_path: str, ref: str = None):
+    """Load allowlist.yml from repo root. Returns None if absent (SCA opt-out).
+
+    With `ref`, the file is read from that commit instead of the working tree.
+    """
+    try:
+        if ref is not None:
+            source = _read_file_at_ref(repo_path, ref, "allowlist.yml")
+            if source is None:
+                return None
+            data = yaml.safe_load(source) or {}
+        else:
+            p = Path(repo_path) / "allowlist.yml"
+            if not p.exists():
+                return None
+            with open(p) as f:
+                data = yaml.safe_load(f) or {}
         return {k: set(str(v).lower() for v in lst) for k, lst in data.items() if isinstance(lst, list)}
     except Exception:
         return None
@@ -923,17 +959,27 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-def load_config(repo_path: str) -> PayloadGuardConfig:
+def load_config(repo_path: str, ref: str = None) -> PayloadGuardConfig:
     """
     Loads payloadguard.yml from the repo root if present, deep-merging it over
     DEFAULT_CONFIG. Falls back to defaults silently if the file is absent.
+
+    With `ref`, the file is read from that commit instead of the working tree
+    (see _read_file_at_ref). main() passes the target branch, so a PR cannot
+    change the policy its own scan runs under; policy edits apply once merged.
     """
-    config_path = Path(repo_path) / "payloadguard.yml"
-    if not config_path.exists():
-        return PayloadGuardConfig()
-    try:
+    if ref is not None:
+        source = _read_file_at_ref(repo_path, ref, "payloadguard.yml")
+        if source is None:
+            return PayloadGuardConfig()
+    else:
+        config_path = Path(repo_path) / "payloadguard.yml"
+        if not config_path.exists():
+            return PayloadGuardConfig()
         with open(config_path) as f:
-            user_cfg = yaml.safe_load(f) or {}
+            source = f.read()
+    try:
+        user_cfg = yaml.safe_load(source) or {}
     except yaml.YAMLError as e:
         print(f"WARNING: payloadguard.yml is invalid and has been ignored: {e}", file=sys.stderr)
         return PayloadGuardConfig()
@@ -1170,7 +1216,7 @@ class PayloadAnalyzer:
             ]
 
             # LAYER 2b: SCA — dependency manifest scanning (opt-in via allowlist.yml)
-            allowlist = _load_allowlist(self.repo_path)
+            allowlist = _load_allowlist(self.repo_path, ref=target_ref)
             sca_flags: list = []
             sca_manifests_scanned: list = []
             if allowlist is not None:
@@ -2720,7 +2766,7 @@ def main():
                         help="Consequence engine policy mode (default: shadow or payloadguard.yml setting)")
     args = parser.parse_args()
 
-    config = load_config(args.repo_path)
+    config = load_config(args.repo_path, ref=args.target)
     if args.consequence_mode:
         config.consequence["mode"] = args.consequence_mode
     analyzer = PayloadAnalyzer(args.repo_path, args.branch, args.target, config=config)
