@@ -3505,5 +3505,168 @@ class TestActionPolicyTrustBoundary(unittest.TestCase):
         self.assertEqual(outputs["verdict"], "SAFE")
 
 
+# ==============================================================================
+# DISTRIBUTION PACKAGING (AUDIT_LOG §V3)
+# ==============================================================================
+# publish.yml builds with `python -m build`. pyproject.toml must name modules that
+# exist and must ship every first-party module the console-script entry point imports.
+
+def _pyproject():
+    try:
+        import tomllib
+    except ImportError:  # Python < 3.11
+        raise unittest.SkipTest("tomllib requires Python 3.11+")
+    with open(os.path.join(_REPO_ROOT, "pyproject.toml"), "rb") as fh:
+        return tomllib.load(fh)
+
+
+def _first_party_imports(module):
+    """Top-level names imported anywhere in `module` that are root modules or packages of this repository."""
+    import ast
+
+    with open(os.path.join(_REPO_ROOT, module + ".py"), encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+    return {
+        n for n in names
+        if os.path.isfile(os.path.join(_REPO_ROOT, n + ".py"))
+        or os.path.isfile(os.path.join(_REPO_ROOT, n, "__init__.py"))
+    }
+
+
+def _import_closure(module):
+    """`module` plus every root module it imports, transitively."""
+    seen, todo = set(), [module]
+    while todo:
+        current = todo.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        if os.path.isfile(os.path.join(_REPO_ROOT, current + ".py")):
+            todo.extend(_first_party_imports(current))
+    return seen
+
+
+class TestDistributionPackaging(unittest.TestCase):
+
+    def test_declared_modules_and_packages_exist(self):
+        cfg = _pyproject()["tool"]["setuptools"]
+        for module in cfg.get("py-modules", []):
+            self.assertTrue(
+                os.path.isfile(os.path.join(_REPO_ROOT, module + ".py")),
+                f"py-modules entry '{module}' has no {module}.py",
+            )
+        for package in cfg.get("packages", []):
+            self.assertTrue(
+                os.path.isfile(os.path.join(_REPO_ROOT, *package.split("."), "__init__.py")),
+                f"packages entry '{package}' is not a package directory",
+            )
+
+    def test_shipped_modules_include_their_first_party_imports(self):
+        data = _pyproject()
+        cfg = data["tool"]["setuptools"]
+        shipped = set(cfg.get("py-modules", [])) | {p.split(".")[0] for p in cfg.get("packages", [])}
+        for target in data["project"]["scripts"].values():
+            self.assertIn(target.split(":")[0], shipped)
+        missing = {
+            module: sorted(_first_party_imports(module) - shipped)
+            for module in sorted(shipped)
+            if os.path.isfile(os.path.join(_REPO_ROOT, module + ".py"))
+            and _first_party_imports(module) - shipped
+        }
+        self.assertEqual(missing, {}, "first-party imports not shipped in the distribution")
+
+    def test_built_distribution_runs_a_scan(self):
+        """Build as publish.yml does (sdist, then a wheel from the sdist), install the
+        wheel's files into an empty directory and run the console-script target there."""
+        import importlib.metadata
+        import importlib.util
+        import tarfile
+        import zipfile
+
+        if importlib.util.find_spec("setuptools") is None:
+            self.skipTest("setuptools is required to build the distribution")
+        try:
+            st_version = tuple(int(p) for p in importlib.metadata.version("setuptools").split(".")[:2])
+        except ValueError:
+            st_version = (0, 0)
+        if st_version < (68, 0):
+            self.skipTest("pyproject.toml requires setuptools>=68")
+        if st_version < (70, 1) and importlib.util.find_spec("wheel") is None:
+            self.skipTest("setuptools<70.1 needs the wheel package to build wheels")
+
+        tmp = tempfile.mkdtemp(prefix="pg_dist_")
+        self.addCleanup(_force_rmtree, tmp)
+        env = _fixture_env()
+        env.pop("PYTHONPATH", None)
+
+        def backend(cwd, hook, out_dir):
+            proc = subprocess.run(
+                [sys.executable, "-c",
+                 "import sys, setuptools.build_meta as b; print(getattr(b, sys.argv[1])(sys.argv[2]))",
+                 hook, out_dir],
+                cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            self.assertEqual(proc.returncode, 0, f"{hook} failed:\n{proc.stdout[-3000:]}\n{proc.stderr[-3000:]}")
+            return proc.stdout.strip().splitlines()[-1]
+
+        src = os.path.join(tmp, "src")
+        shutil.copytree(_REPO_ROOT, src, ignore=shutil.ignore_patterns(
+            ".git", "build", "dist", "*.egg-info", "__pycache__", ".pytest_cache"))
+        dist = os.path.join(tmp, "dist")
+        os.makedirs(dist)
+
+        sdist_name = backend(src, "build_sdist", dist)
+        unpacked = os.path.join(tmp, "sdist")
+        with tarfile.open(os.path.join(dist, sdist_name)) as tf:
+            extract_kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+            tf.extractall(unpacked, **extract_kwargs)
+        (sdist_root,) = os.listdir(unpacked)
+        wheel_name = backend(os.path.join(unpacked, sdist_root), "build_wheel", dist)
+
+        site = os.path.join(tmp, "site")
+        with zipfile.ZipFile(os.path.join(dist, wheel_name)) as zf:
+            names = set(zf.namelist())
+            entry_points = "".join(
+                zf.read(n).decode("utf-8") for n in names if n.endswith(".dist-info/entry_points.txt")
+            )
+            zf.extractall(site)
+        entry_module = "analyze"
+        self.assertIn(f"payloadguard = {entry_module}:main", entry_points)
+        for module in sorted(_import_closure(entry_module)):
+            self.assertIn(f"{module}.py", names)
+
+        repo = os.path.join(tmp, "repo")
+        os.makedirs(repo)
+        _run_git(repo, "init", "-q")
+        _commit_files(repo, _policy_base_files(), "base")
+        _run_git(repo, "checkout", "-q", "-b", "feature")
+        _commit_files(repo, {"auth.py": _POLICY_AUTH_GUTTED}, "Tidy auth module")
+
+        # cwd=site puts the installed copy first on sys.path; this checkout is not on it.
+        proc = subprocess.run(
+            [sys.executable, "-c",
+             "import sys, analyze, consequence_engine, structural_parser\n"
+             "for m in (analyze, consequence_engine, structural_parser): print('MODULE', m.__file__)\n"
+             "sys.argv = ['payloadguard'] + sys.argv[1:]\n"
+             "analyze.main()\n",
+             repo, "feature", "main", "--pr-description", "Tidy auth module"],
+            cwd=site, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        loaded = [line.split(" ", 1)[1] for line in proc.stdout.splitlines() if line.startswith("MODULE ")]
+        self.assertEqual(len(loaded), 3, proc.stdout[-3000:] + proc.stderr[-3000:])
+        for path in loaded:
+            self.assertTrue(
+                os.path.normcase(os.path.realpath(path)).startswith(os.path.normcase(os.path.realpath(site))),
+                f"{path} was not loaded from the installed distribution",
+            )
+        self.assertEqual(proc.returncode, 2, proc.stdout[-3000:] + proc.stderr[-3000:])
+
+
 if __name__ == "__main__":
     unittest.main()
