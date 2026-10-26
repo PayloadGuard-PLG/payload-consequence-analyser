@@ -124,6 +124,92 @@ class TestParserCompletenessD01:
         assert pr.complete is False
         assert pr.language is None
 
+    # X06 (AUDIT_LOG §V4): changed source code with no structural parser must be
+    # reported as incomplete coverage, never silently treated as fully analysed.
+
+    @pytest.mark.parametrize("path, base, head", [
+        ("lib/auth.rb",
+         "def verify(t)\n  return false if t.nil?\n  check(t)\nend\n",
+         "def verify(t)\n  true\nend\n"),
+        ("src/Auth.cs",
+         "class A { bool V(string t) { if (t == null) return false; return C(t); } }",
+         "class A { bool V(string t) { return true; } }"),
+        ("api/auth.mjs",
+         "export function verify(t) { if (!t) return false; return check(t); }",
+         "export function verify(t) { return true; }"),
+    ], ids=["ruby", "csharp", "js-mjs"])
+    def test_x06_unsupported_source_change_reports_incomplete_coverage(self, path, base, head):
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas([
+            FileDeltaInput(file_path=path, change_type="M", base_source=base, head_source=head)
+        ])
+        d01 = [f for f in rep.findings if f.detector_id == DETECTOR_D01_PARSER]
+        assert len(d01) == 1
+        finding = d01[0]
+        assert finding.affected_files == (path,)
+        assert finding.evidence[0].kind == PARSER_STATUS_UNSUPPORTED_EXTENSION
+        assert finding.tier == TIER_INCOMPLETE
+        assert finding.policy_recommendation == POLICY_WARN
+        assert "'None'" not in finding.remediation
+        assert "manually" in finding.remediation
+        assert rep.parser_completeness["complete"] is False
+        assert [s["file_path"] for s in rep.parser_completeness["incomplete_snapshots"]] == [path, path]
+        assert rep.capabilities["syntax"]["state"] == "unavailable"
+        # Advisory only: a WARN finding does not change the recommended verdict.
+        assert rep.recommended_verdict == "SAFE"
+
+    def test_x06_added_and_deleted_unsupported_source_reported(self):
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas([
+            FileDeltaInput(file_path="lib/new_auth.rb", change_type="A", head_source="def verify(t)\n  true\nend\n"),
+            FileDeltaInput(file_path="lib/old_auth.php", change_type="D",
+                           base_source="<?php function verify($t) { return check($t); }"),
+        ])
+        d01 = sorted(f.affected_files[0] for f in rep.findings if f.detector_id == DETECTOR_D01_PARSER)
+        assert d01 == ["lib/new_auth.rb", "lib/old_auth.php"]
+        assert rep.parser_completeness["complete"] is False
+
+    def test_x06_non_code_files_stay_out_of_parser_coverage(self):
+        deltas = [
+            FileDeltaInput(file_path=p, change_type="M", base_source="a\n", head_source="b\n")
+            for p in ("README.md", "config/settings.yml", "data/users.json", "db/schema.sql", "Dockerfile", "notes.txt")
+        ]
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(deltas)
+        assert [f for f in rep.findings if f.detector_id == DETECTOR_D01_PARSER] == []
+        assert rep.parser_completeness["complete"] is True
+        assert rep.parser_completeness["total_snapshots_parsed"] == 0
+        assert rep.capabilities["syntax"]["state"] == "available"
+
+    def test_x06_supported_analysis_unchanged_alongside_unsupported_file(self):
+        py_delta = FileDeltaInput(
+            file_path="auth.py",
+            change_type="M",
+            base_source=(
+                "class Auth:\n"
+                "    def verify(self, password, hashed):\n"
+                "        digest = hash_pw(password)\n"
+                "        if not compare(digest, hashed):\n"
+                "            return False\n"
+                "        return True\n"
+            ),
+            head_source="class Auth:\n    def verify(self, password, hashed):\n        pass\n",
+        )
+        rb_delta = FileDeltaInput(file_path="lib/util.rb", change_type="M",
+                                  base_source="def a\n  1\nend\n", head_source="def a\n  2\nend\n")
+        alone = ConsequenceEngine(mode="enforce").analyze_deltas([py_delta])
+        mixed = ConsequenceEngine(mode="enforce").analyze_deltas([py_delta, rb_delta])
+
+        def non_d01(rep):
+            return sorted((f.detector_id, f.consequence_class, f.policy_recommendation)
+                          for f in rep.findings if f.detector_id != DETECTOR_D01_PARSER)
+
+        assert non_d01(mixed) == non_d01(alone)
+        assert (DETECTOR_D02_WEAKENING, "BODY_GUTTED", POLICY_BLOCK) in non_d01(mixed)
+        assert mixed.graph_summary["transition_counts"] == alone.graph_summary["transition_counts"]
+        assert mixed.recommended_verdict == alone.recommended_verdict == "DESTRUCTIVE"
+        assert [f.affected_files for f in mixed.findings if f.detector_id == DETECTOR_D01_PARSER] == [("lib/util.rb",)]
+        assert mixed.capabilities["syntax"]["state"] == "partial"
+        assert alone.parser_completeness["complete"] is True
+        assert mixed.parser_completeness["complete"] is False
+
     def test_parser_capabilities_probe(self):
         """Verify runtime capability probe reports all 7 language keys."""
         caps = get_parser_capabilities()
@@ -755,6 +841,40 @@ class TestPayloadAnalyzerIntegration:
             pr_description="Refactor class names to V2 across service.py"
         )
         assert rep_enforce["verdict"]["status"] == "SAFE"
+
+    def test_unsupported_source_change_reported_without_changing_verdict(self, tmp_path):
+        """AUDIT_LOG §V4: analyze() surfaces D01 UNSUPPORTED_EXTENSION in the report and the
+        PR comment, and the WARN finding leaves the enforce-mode verdict at SAFE."""
+        import git
+        from analyze import PayloadAnalyzer, PayloadGuardConfig, format_markdown_report
+
+        repo = git.Repo.init(tmp_path)
+        repo.config_writer().set_value("user", "name", "Test").release()
+        repo.config_writer().set_value("user", "email", "test@example.com").release()
+        rb = tmp_path / "lib" / "auth.rb"
+        rb.parent.mkdir()
+        rb.write_text("def verify(t)\n  return false if t.nil?\n  check(t)\nend\n", encoding="utf-8")
+        repo.index.add(["lib/auth.rb"])
+        repo.index.commit("initial base")
+        repo.create_head("main")
+
+        repo.create_head("feature-rb").checkout()
+        rb.write_text("def verify(t)\n  true\nend\n", encoding="utf-8")
+        repo.index.add(["lib/auth.rb"])
+        repo.index.commit("Simplify verify helper")
+
+        cfg = PayloadGuardConfig()
+        cfg.consequence["mode"] = "enforce"
+        rep = PayloadAnalyzer(str(tmp_path), "feature-rb", "main", config=cfg).analyze(
+            pr_description="Simplify verify helper in lib/auth.rb"
+        )
+        ca = rep["consequence_analysis"]
+        d01 = [f for f in ca["findings"] if f["detector_id"] == DETECTOR_D01_PARSER]
+        assert [f["affected_files"] for f in d01] == [["lib/auth.rb"]]
+        assert d01[0]["policy_recommendation"] == POLICY_WARN
+        assert ca["parser_completeness"]["complete"] is False
+        assert rep["verdict"]["status"] == "SAFE"
+        assert "UNSUPPORTED_EXTENSION" in format_markdown_report(rep)
 
     def test_shadow_advisory_and_enforce_modes_on_threshold_gaming_repo(self, tmp_path):
         """
