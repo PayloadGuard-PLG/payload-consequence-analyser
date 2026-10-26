@@ -145,6 +145,27 @@ _BUILD_WRAPPER_BASENAMES = frozenset({
     "mvnw", "mvnw.cmd", "gradlew", "gradlew.bat", "makefile", "gnumakefile", "build.sh", "make.bat",
 })
 
+# Source-code extensions with no registered structural parser. Changes to these
+# files reach D01 as UNSUPPORTED_EXTENSION instead of being skipped, so they are
+# never reported as fully analysed. Data, configuration and markup formats are
+# excluded; SQL migrations are covered by D10.
+_UNPARSED_SOURCE_EXTS = frozenset({
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx",
+    ".cs", ".vb", ".fs", ".fsx",
+    ".kt", ".kts", ".scala", ".groovy", ".clj", ".cljs",
+    ".swift", ".m", ".mm", ".dart",
+    ".rb", ".php", ".pl", ".pm", ".lua", ".r", ".jl",
+    ".ex", ".exs", ".erl", ".hs", ".ml", ".nim", ".zig", ".sol",
+    ".mjs", ".cjs", ".mts", ".cts", ".vue", ".svelte",
+    ".pyi", ".pyx",
+    ".sh", ".bash", ".zsh", ".ps1",
+})
+
+
+def _needs_structural_parse(file_path: str) -> bool:
+    """True for files with a structural parser and for source code that lacks one."""
+    return language_for_path(file_path) is not None or Path(file_path).suffix.lower() in _UNPARSED_SOURCE_EXTS
+
 # Workflow / Action Integrity Patterns for D08
 _WORKFLOW_OR_ACTION_PATH_RE = re.compile(
     r"(?:^|/)(?:\.github/workflows/[^/]+\.ya?ml|(?:\.github/actions/[^/]+/)?action\.ya?ml)$",
@@ -1527,13 +1548,13 @@ class ConsequenceEngine:
             elif fd.change_type == "A" and lang:
                 added_files_by_lang.setdefault(lang, []).append(fd.file_path)
 
-            if fd.base_source is not None and language_for_path(fd.old_path or fd.file_path) is not None:
+            if fd.base_source is not None and _needs_structural_parse(fd.old_path or fd.file_path):
                 b_path = fd.old_path or fd.file_path
                 pr_base = extract_symbols(fd.base_source, b_path)
                 base_parse_results[b_path] = pr_base
                 base_symbols.extend(pr_base.symbols)
 
-            if fd.head_source is not None and language_for_path(fd.file_path) is not None:
+            if fd.head_source is not None and _needs_structural_parse(fd.file_path):
                 pr_head = extract_symbols(fd.head_source, fd.file_path)
                 head_parse_results[fd.file_path] = pr_head
                 head_symbols.extend(pr_head.symbols)
@@ -1639,6 +1660,9 @@ class ConsequenceEngine:
         elif len(incomplete_prs) < len(all_prs):
             syntax_state = CAPABILITY_PARTIAL
             syntax_reason = f"{len(incomplete_prs)} of {len(all_prs)} file snapshot(s) had incomplete parsing"
+        elif all(pr.status == PARSER_STATUS_UNSUPPORTED_EXTENSION for pr in incomplete_prs):
+            syntax_state = CAPABILITY_UNAVAILABLE
+            syntax_reason = f"No structural parser for any of the {len(all_prs)} changed file snapshot(s)"
         else:
             syntax_state = CAPABILITY_FAILED
             syntax_reason = f"All {len(incomplete_prs)} file snapshot(s) failed structural parsing"
@@ -1726,6 +1750,16 @@ class ConsequenceEngine:
                 is_head_error = side == "head" and pr.status == PARSER_STATUS_PARSE_ERROR
                 sev = SEVERITY_MEDIUM if is_head_error else SEVERITY_LOW
                 pol = POLICY_REVIEW if is_head_error else POLICY_WARN
+                if pr.status == PARSER_STATUS_UNSUPPORTED_EXTENSION:
+                    remediation = (
+                        f"No structural parser is registered for '{Path(fpath).suffix}' files, so the "
+                        f"symbol-level detectors did not analyse '{fpath}'. Review its changes manually."
+                    )
+                else:
+                    remediation = (
+                        f"Fix syntax errors in '{fpath}' or ensure the '{pr.language}' Tree-sitter grammar "
+                        "is installed before relying on structural safety guarantees."
+                    )
 
                 findings.append(
                     ConsequenceFinding(
@@ -1751,10 +1785,7 @@ class ConsequenceEngine:
                                 detail=f"{pr.incomplete_reason} ({pr.error_detail or 'no detail'})",
                             ),
                         ),
-                        remediation=(
-                            f"Fix syntax errors in '{fpath}' or ensure the '{pr.language}' Tree-sitter grammar "
-                            "is installed before relying on structural safety guarantees."
-                        ),
+                        remediation=remediation,
                     )
                 )
         return findings
