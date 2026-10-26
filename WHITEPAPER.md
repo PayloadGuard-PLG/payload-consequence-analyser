@@ -738,7 +738,7 @@ Dafny/Z3 restatement intended for external formal verification platforms.
 
 ## 7. Regression Validation
 
-**Status (2026-10-26):** the results below come from live regression runs of the harness. The harness workflow pins the analyser at `fe68338` (v1.3.0), and the last live regression (2026-06-01) passed 34/34 stable cases. v1.6.0 has been verified offline against the same fixtures (`validate_manifest.py --verify-consequence` 41/41, mutation suite 16/16 with 0 false positives and 0 false negatives); a live regression against v1.6.0 has not been run.
+**Status (2026-10-26):** the results below come from live regression runs of the harness. The last live regression (2026-06-01, analyser `fe68338`, v1.3.0) passed 34/34 stable cases. The harness workflow now pins v1.6.0 (`6c3df91`, harness PR #78); before the change, the analyser CLI run as the harness workflow runs it (PR head SHA, base `main`, live PR bodies, default `shadow` mode) gave identical verdicts, exit codes and scores under v1.3.0 and v1.6.0 on all 38 active cases, both matching `expected_exit_code` 38/38. v1.6.0 has been verified offline against the same fixtures (`validate_manifest.py --verify-consequence` 41/41, mutation suite 16/16 with 0 false positives and 0 false negatives); a live regression against v1.6.0 has not been run.
 
 ### 7.1 Test Harness Architecture
 
@@ -751,7 +751,7 @@ The test harness (`payloadguard-plg/payloadguard-test-harness`) maintains 35 act
 5. `ingest.py` pulls the `payloadguard-results` artifact from each workflow run and writes to SQLite
 6. `dashboard.py` visualises results with a threshold simulator; the **Last Run** summary card shows a full `YYYY-MM-DD HH:MM` timestamp linked directly to the GitHub Actions workflow run that produced the data
 
-The harness CI pins the analyser by commit SHA (currently `fe6833887f34e77e53cf7e1dcf73c37297f5fea3`, v1.3.0). Temporal grouping controls which cases run: `--mode stable` (default, excludes aging/temporal cases), `--mode temporal` (aging cases only), `--mode full` (all cases).
+The harness CI pins the analyser by commit SHA (currently `6c3df91389be550457d502318bec481a87f6dbc8`, v1.6.0). Temporal grouping controls which cases run: `--mode stable` (default, excludes aging/temporal cases), `--mode temporal` (aging cases only), `--mode full` (all cases).
 
 ### 7.2 Test Case Matrix
 
