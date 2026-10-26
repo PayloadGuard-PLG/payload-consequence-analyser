@@ -2,6 +2,14 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-26 — v1.6.0 released; Z3 P9 made meaningful (AUDIT_LOG §V8)
+
+**Release:** tag `v1.6.0` on `6c3df91` (PR #110 merge commit, tree identical to the verified tree; #110 checks passed). "Publish to PyPI" run 40350394223 succeeded; `payloadguard-plg==1.6.0` installed from PyPI into a fresh virtualenv returns exit 2 on a destructive PR and 0 on a benign one. PR #108 was closed without merging; the six merged branches were deleted.
+
+**§V8:** Z3 P9 asserted its bound as a constraint and checked the negation, so it passed for any bound (verified with 0 and −100). P9 now models the score as the sum of `_assess_consequence()`'s per-signal contributions and proves it cannot exceed MAX_SCORE (36). Companion tests: 36 is reachable; without the content-flag cap the bound fails; the production scorer with every signal at maximum returns 36. A bound of 35 now yields a counterexample.
+
+**Tests:** 391 passed with Z3/CrossHair (`tests/proofs/` 19); 374 passed, 17 skipped without them.
+
 ## 2026-10-26 — v1.6.0 release preparation
 
 Version 1.6.0 (`analyze.py`, `pyproject.toml`) packages the v1.5.0 audit fixes (§V1–§V7, §V10, §V11) and the re-run proofs. PyPI's latest release was 1.3.0: the v1.4.0 and v1.5.0 tag builds failed on the `packages = ["consequence_engine"]` error (§V3), so 1.6.0 is the first PyPI release since 1.3.0. Semantic versioning: the `consequence-mode` input and the new D01 and `.mjs`/`.cjs`/`.mts`/`.cts` coverage are backward-compatible features, hence a minor bump.

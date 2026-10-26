@@ -1,7 +1,7 @@
 # PayloadGuard — Test Registry
 
-**Last run:** 2026-10-26 12:58 UTC  
-**Result:** 327 passed · 0 skipped · 0 failed · 327 total
+**Last run:** 2026-10-26 15:46 UTC  
+**Result:** 330 passed · 0 skipped · 0 failed · 330 total
 
 Run with: `python -m pytest test_analyzer.py tests/proofs/ --timeout=30 -v`  
 Regenerate this file: `python tools/gen_test_registry.py`
@@ -462,5 +462,8 @@ Regenerate this file: `python tools/gen_test_registry.py`
 - ✓ `test_p6_safe_verdict_iff_score_below_review_threshold`
 - ✓ `test_p7_verdict_deterministic_given_identical_scores`
 - ✓ `test_p8_typosquat_cannot_yield_safe_verdict`
-- ✓ `test_p9_score_upper_bound_finite`
+- ✓ `test_p9_score_upper_bound_is_sum_of_signal_maxima`
+- ✓ `test_p9_bound_is_attained`
+- ✓ `test_p9_bound_depends_on_signal_caps`
+- ✓ `test_p9_model_matches_assess_consequence`
 - ✓ `test_p10_empty_signal_set_always_safe`

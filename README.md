@@ -3,7 +3,7 @@
 **Version:** 1.6.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Updated:** October 2026
 
 [![Dafny Verification](https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml/badge.svg)](https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml)
-[![Pytest Suite](https://img.shields.io/badge/pytest-388%20passed-brightgreen.svg)](#test-suite--formal-verification)
+[![Pytest Suite](https://img.shields.io/badge/pytest-391%20passed-brightgreen.svg)](#test-suite--formal-verification)
 [![Formal Proofs](https://img.shields.io/badge/formal%20proofs-36%20contracts%20%7C%2010%20Z3%20%7C%2012%20Dafny-blue.svg)](PROOFS.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 

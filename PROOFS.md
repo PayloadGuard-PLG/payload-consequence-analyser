@@ -12,7 +12,7 @@ false result across all three simultaneously to go undetected.
 |---|---|---|---|
 | Machine-checked proofs | Dafny 4.9.1 + Boogie + Z3 4.12.1 | L3, L4, L5a — entire input domain | 9 methods/functions verified, 0 errors (GitHub Actions run #16) |
 | Symbolic execution | CrossHair 0.0.112 (PEP316 contracts) | L3, L4, L5a, L5b — pure-Python mirror modules in `verification/` | 36 postconditions, 0 counterexamples after the §V10 fix (one counterexample found and fixed in `temporal_pure`) |
-| SMT proofs | Z3 (z3-solver 5.3.2.0) | L3, L2c — abstract scoring model | 10 properties, all `unsat`; P9 is vacuous as encoded (§V8) |
+| SMT proofs | Z3 (z3-solver 5.3.2.0) | L3, L2c — abstract scoring model | 10 properties, all `unsat`; P9 is model-based with tightness and sensitivity checks (§V8 fixed) |
 
 → Committed proof files: [`verification/dafny/`](verification/dafny/) · [`verification/`](verification/)  
 → CI workflow: [`.github/workflows/verify-dafny.yml`](.github/workflows/verify-dafny.yml)  
@@ -313,12 +313,12 @@ pytest tests/proofs/test_z3_properties.py -m proof -v --timeout=30
 | P6 | SAFE verdict ↔ score < REVIEW threshold (both directions) |
 | P7 | Identical scores always produce identical verdicts |
 | P8 | Any score that includes a typosquat contribution cannot be SAFE |
-| P9 | Total score is bounded by `_MAX_OTHER_SCORE + CRITICAL_SCORE` (24 + 5) — vacuous as encoded, see note |
+| P9 | No combination of signals makes the score built from `_assess_consequence()`'s per-signal contributions exceed MAX_SCORE (36); 36 is reachable; removing the content-flag cap breaks the bound; the production scorer with every signal at maximum returns 36 |
 | P10 | Zero signals → score = 0 → SAFE |
 
-**Last run:** 2026-10-26 — 10 passed (`z3-solver` 5.3.2.0), Windows 11, Python 3.14.3, on `main` `9e83cce`.
+**Last run:** 2026-10-26 — 13 passed (P1–P10, with P9 as four tests; `z3-solver` 5.3.2.0), Windows 11, Python 3.14.3.
 
-**Note on P9:** the test adds `score <= _HARD_UPPER` as a constraint and then checks `score > _HARD_UPPER`, which is unsatisfiable by construction; it does not relate the bound to the scoring model. The code comment also states the bound as 24 rather than 29. The score upper bound is established by CrossHair C-03 and Dafny POST-3. Recorded as `AUDIT_LOG.md` §V8.
+**Note on P9 (§V8, fixed 2026-10-26):** the previous P9 added `score <= bound` as a constraint and then checked `score > bound`, which is unsatisfiable for any bound (it passed with a bound of 0 or −100). P9 now derives the score from the signal model; with a bound of 35 the solver returns a counterexample.
 
 ---
 
@@ -358,7 +358,7 @@ crosshair check semantic_pure    --analysis_kind PEP316 --per_condition_timeout 
 ```bash
 pip install z3-solver crosshair-tool pytest pytest-timeout
 pytest tests/proofs/ -v --timeout=60
-# Expected: 16 passed (10 Z3 properties + 5 CrossHair contract wrappers + 1 temporal contract regression)
+# Expected: 19 passed (13 Z3 tests + 5 CrossHair contract wrappers + 1 temporal contract regression)
 ```
 
 ---
