@@ -2,6 +2,18 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-26 — Policy files read from the target branch (AUDIT_LOG §V1)
+
+Audit of v1.5.0 (`93f94f9`) across the SCG/D01–D10 work and the Action-to-verdict path. The Action path was exercised by running the `action.yml` scan steps in bash against a local reproduction of a `pull_request` merge checkout.
+
+**Defect:** `payloadguard.yml` and `allowlist.yml` were read from the working tree, which in CI is the PR merge result. A PR could set `consequence.mode: shadow`, raise thresholds or allowlist its own dependency, and pass its own scan (enforce-mode exit 2 became exit 0).
+
+**Repair:** `load_config()` and `_load_allowlist()` take an optional `ref` and read the file from that commit (`_read_file_at_ref()`, with the `origin/<ref>` fallback used by `_resolve_ref()`). `main()` passes the target branch; `analyze()` passes the resolved target. Calls without `ref` keep the working-tree behaviour.
+
+**Tests:** `TestPolicyReadFromTargetBranch` (CLI end to end on a git fixture) and `TestActionPolicyTrustBoundary` (`action.yml` steps in bash). 7 fail on `93f94f9`; 10 pass after. Suite: 340 passed, 15 skipped, 1 xfailed. Harness oracle 41/41; mutation suite 16/16.
+
+**Open:** §V2–§V6 in `AUDIT_LOG.md`.
+
 ## 2026-10-25 — v1.5.0: Workflow Integrity (D08), Test Erosion (D09), Migration Loss (D10) & Build Wrapper Security
 
 ### What was built
