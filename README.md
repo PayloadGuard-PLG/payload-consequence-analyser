@@ -20,7 +20,7 @@ Wire PayloadGuard to your branch protection rules, and catastrophic pull request
 ## Key Benefits
 
 - **Deterministic & Instant CI Integration:** Runs in seconds directly inside GitHub Actions with **zero LLM dependency**, **zero external API latency**, and **zero non-determinism**.
-- **Semantic Change Graph (SCG) Consequence Engine (`consequence.v1`):** Understands high-level program structure across Python, JavaScript, TypeScript, Go, Rust, and Java. Distinguishes benign symbol renames and cross-file moves from hollow stubs, broken callers, and deleted capabilities.
+- **Semantic Change Graph (SCG) Consequence Engine (`consequence.v1`):** Understands high-level program structure across Python, JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`), Go, Rust, and Java. Changes to source code in other languages are reported as incomplete coverage (`D01`). Distinguishes benign symbol renames and cross-file moves from hollow stubs, broken callers, and deleted capabilities.
 - **Catches What Test Suites and Linters Miss:**
   - **Test Erosion (`D09`):** Flags tests gutted into tautologies (`assert True`, `expect(true).toBe(true)`) or newly skipped (`@pytest.mark.skip`, `t.Skip()`).
   - **CI Workflow Integrity (`D08`):** Blocks untrusted expression injection in `run:` shell blocks, `pull_request_target` untrusted checkout ("Pwn Request"), action SHA pin downgrades, and `continue-on-error: true` gate weakening.
@@ -178,7 +178,7 @@ To prevent pull requests with destructive payloads from merging:
 
 ### 3. Consequence Modes
 
-PayloadGuard supports three policy enforcement modes configured via `payloadguard.yml` or `--consequence-mode`:
+PayloadGuard supports three policy enforcement modes. The mode is taken from the action's `consequence-mode` input (the CLI's `--consequence-mode`), then the `PAYLOADGUARD_CONSEQUENCE_MODE` environment variable, then `payloadguard.yml`:
 
 | Mode | Behavior | Use Case |
 |---|---|---|
@@ -193,14 +193,16 @@ To enforce blocking mode via your workflow:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           pr-description: ${{ github.event.pull_request.body }}
-        env:
-          PYTHONUTF8: "1"
+          consequence-mode: enforce
 ```
 Or place a `payloadguard.yml` in your repository root:
 ```yaml
 consequence:
   mode: enforce
 ```
+`payloadguard.yml` is read from the target branch, so a pull request cannot change it for its own scan. The `consequence-mode` input is only as trusted as the workflow file; on `pull_request` events that file comes from the pull request, so protect it with required workflows or CODEOWNERS.
+
+The action's `verdict` output is `SAFE`, `REVIEW`, `CAUTION` or `DESTRUCTIVE`, or `ERROR` when the analysis failed (including an invalid `consequence-mode`, which exits `1`).
 
 ---
 

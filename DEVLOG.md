@@ -2,6 +2,16 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-26 — Action verdict output, consequence-mode input, JS/TS module extensions (AUDIT_LOG §V5–§V7)
+
+**§V5:** the action's `verdict` output mapped exit 0 to `SAFE`, so `REVIEW` and `CAUTION` were never emitted. The scan step now reads the verdict from the JSON report and falls back to the exit-code mapping when the report cannot be read.
+
+**§V6:** `action.yml` had no consequence-mode input and the README enforce example did not enable enforce mode. The new `consequence-mode` input is validated in the step (invalid values exit 1; an argparse usage error would exit 2 and read as DESTRUCTIVE) and passed as `--consequence-mode`. `PAYLOADGUARD_CONSEQUENCE_MODE` is applied in `main()` below the CLI flag.
+
+**§V7:** `.mjs`/`.cjs` map to `javascript` and `.mts`/`.cts` to `typescript`. Legacy L4 now analyses them as it does `.js`/`.ts`; parity tests pin SymbolFacts, legacy node names and findings to the base extension.
+
+**Tests:** 14 new tests (5 of 6 §V5/§V6 tests and all 8 §V7 tests fail on the previous code). Suite: 368 passed, 15 skipped. Harness oracle 41/41; mutation suite 16/16; Action simulation unchanged. All 2026-10-26 findings are fixed.
+
 ## 2026-10-26 — D01 reports source in unparsed languages (AUDIT_LOG §V4)
 
 **Defect:** `ConsequenceEngine.analyze_deltas()` only parsed paths with a registered structural parser, so D01 could not emit `UNSUPPORTED_EXTENSION`. A PR gutting a `verify` function in Ruby, C# or a `.mjs` module produced no findings, `parser_completeness.complete: true` and syntax capability `available`, with zero files parsed.
