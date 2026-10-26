@@ -2,7 +2,7 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch state:** §V1–§V7 are on `main` (PRs #102, #104, #105, #106, #107; `main` at `9e83cce`). Branches `fix/policy-from-target-branch`, `fix/action-pr-head-sha`, `fix/pyproject-packaging`, `fix/d01-unsupported-extension` and `fix/v5-v7` are merged and can be deleted. Open PR #108 (`fix/policy-from-target-branch` → `main`, head `88c0cfc`, the #103 merge commit) changes no files and can be closed. Active: `docs/v1.5.0-version-history-and-proofs` (from `9e83cce`) — version history, proof runs, §V10 fix; not merged.
+- **Branch state:** §V1–§V7 are on `main` (PRs #102, #104, #105, #106, #107; `main` at `9e83cce`). Branches `fix/policy-from-target-branch`, `fix/action-pr-head-sha`, `fix/pyproject-packaging`, `fix/d01-unsupported-extension` and `fix/v5-v7` are merged and can be deleted. Open PR #108 (`fix/policy-from-target-branch` → `main`, head `88c0cfc`, the #103 merge commit) changes no files and can be closed. Active: `docs/v1.5.0-version-history-and-proofs` (from `9e83cce`) — version history, proof runs, §V10 fix and the v1.6.0 release bump; not merged. Release procedure: after merge, confirm the merge commit's tree equals the verified branch tree and CI is green, then tag it `v1.6.0` and push the tag (`publish.yml` builds and uploads to PyPI).
 - **Version history + proof runs + §V10 (2026-10-26, branch `docs/v1.5.0-version-history-and-proofs`):**
   - Docs brought to v1.5.0 (CLAUDE.md current version and changelog incl. "Unreleased" §V1–§V7; SYSTEM_BLUEPRINT, WHITEPAPER, llms.txt, VERIFICATION, PROOFS). Stale proof records corrected (Z3 table vs actual P1–P10; C-03 bound 36; proof-suite counts).
   - Proof runs: Z3 P1–P10 10/10 and CrossHair wrappers 5/5 (`tests/proofs/`, z3-solver 5.3.2.0, crosshair-tool 0.0.112, local Windows/Python 3.14). Full CrossHair CLI (`--per_condition_timeout 30`): `consequence_pure`, `structural_pure`, `semantic_pure` 0 counterexamples; `temporal_pure` counterexample → §V10. Dafny run #16 (GitHub Actions, `9e83cce`): 7 + 1 + 1 verified, 0 errors — first recorded verification of the Sprint 1 `assess_consequence.dfy` (§V9 fixed).
@@ -89,7 +89,7 @@ everse_sql, empty/missing downgrade() or down() functions, or missing/empty roll
   - `scripts/pc-smoke-test.sh`: one-command build+run+verify. Run with `sudo bash scripts/pc-smoke-test.sh`.
 - **Phase 2 Stage 2 (Z3 proofs):** `tests/proofs/test_z3_properties.py`: P1–P10. `_MAX_OTHER_SCORE` updated 19→24 (Sprint 1).
 - **Phase 2 Stage 1 (auto-remediation):** `remediate.py` `WorkflowRemediator` operational.
-- **Test suite:** `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` → **372 passed, 15 skipped** without Z3/CrossHair; **387 passed** with them installed (`tests/proofs/` 16 tests) (2026-10-26).
+- **Test suite:** `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` → **373 passed, 15 skipped** without Z3/CrossHair; **388 passed** with them installed (`tests/proofs/` 16 tests) (2026-10-26).
 - **Open findings:** INC-3 (direct push to main).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
@@ -139,7 +139,7 @@ action.yml                  — GitHub Action composite wrapper
 agent/                      — eBPF runtime defence agent (Go + cilium/ebpf)
 agent/bpf/probe.c           — 4 tracepoint probes + pg_config/egress_allow_ipv4 BPF maps
 scripts/pc-smoke-test.sh    — one-command build+verify on real kernel
-test_analyzer.py            — legacy, layer, policy, Action and packaging pytest suite (310 tests)
+test_analyzer.py            — legacy, layer, policy, Action and packaging pytest suite (311 tests)
 test_consequence_engine.py  — SCG & consequence engine pytest suite (61 tests)
 tests/proofs/               — Z3 formal property proofs (P1–P10) + CrossHair pytest wrapper
 verification/        — CrossHair verification targets: consequence_pure (C1-C12), temporal_pure (T1-T7), structural_pure (S1-S7), semantic_pure (M1-M9)
@@ -185,16 +185,19 @@ sca:
 
 ## Current Version
 
-`__version__ = "1.5.0"` (`analyze.py` / `pyproject.toml`); latest tag `v1.5.0` → `93f94f9`.
+`__version__ = "1.6.0"` (`analyze.py` / `pyproject.toml`). Tags: `v1.5.0` → `93f94f9`; `v1.6.0` is created on the merged release commit. PyPI had 1.3.0 as its latest release: the v1.4.0 and v1.5.0 tag builds failed (§V3), so 1.6.0 is the first PyPI release since 1.3.0.
 
-### Unreleased (on `main` after v1.5.0) — v1.5.0 audit fixes (2026-10-26)
+### v1.6.0 changes (2026-10-26) — v1.5.0 audit fixes
 - §V1 (PR #102): `payloadguard.yml` and `allowlist.yml` are read from the target branch, not the PR merge result (`load_config(repo_path, ref)`, `_load_allowlist(repo_path, ref)`).
 - §V2 (PR #103/#104): `action.yml` and the repository workflow scan the PR head commit (`github.event.pull_request.head.sha`) instead of the head branch name.
 - §V3 (PR #105): `consequence_engine` listed under `py-modules`; `pip install .` and `python -m build` work again.
 - §V4 (PR #106): D01 reports changed source in languages without a structural parser as `UNSUPPORTED_EXTENSION` (WARN).
 - §V5/§V6/§V7 (PR #107): action `verdict` output reports REVIEW/CAUTION; `consequence-mode` action input and `--consequence-mode` > `PAYLOADGUARD_CONSEQUENCE_MODE` > `payloadguard.yml` precedence; `.mjs`/`.cjs`/`.mts`/`.cts` parsed with the JS/TS grammars.
-- Tests: 368 passed, 15 skipped without Z3/CrossHair (307 `test_analyzer.py`, 61 `test_consequence_engine.py`); proof suite 15/15 with them installed.
-- Not yet released: a version tag is required for `publish.yml` to ship these to PyPI.
+- §V10: `TemporalDriftAnalyzer.analyze_drift()` raises `ValueError` for non-finite age or velocity; `temporal_pure.py` precondition `math.isfinite(target_velocity)`.
+- §V11: `main()` reconfigures stdout/stderr with `errors="replace"`; a non-UTF-8 stdout (redirected output on Windows) no longer turns the verdict's exit code into 1.
+- Packaging: `requires-python = ">=3.11"` (was `>=3.8`; Python 3.8 cannot import `structural_parser.py`, whose module-level `dict[str, str]` annotation is evaluated at import; 3.9 and 3.10 are untested). Classifiers 3.11–3.14.
+- Verification: Dafny run #16 (9 verified, 0 errors), CrossHair 36 postconditions with 0 counterexamples, Z3 P1–P10 (P9 vacuous, §V8 open). Docs brought to v1.6.0.
+- Tests: 388 passed with Z3/CrossHair installed (311 `test_analyzer.py`, 61 `test_consequence_engine.py`, 16 `tests/proofs/`); 373 passed, 15 skipped without them.
 
 ### v1.5.0 changes (2026-10-25, PR #101, tag `v1.5.0`)
 - `D08_WORKFLOW_INTEGRITY`: untrusted expression injection in `run:`, `pull_request_target` untrusted checkout, SHA pin downgrade, `continue-on-error`/`write-all` gate weakening, `workflow_run` artifact poisoning, unpinned third-party actions (first-party `actions/*`, `github/*` excluded).
