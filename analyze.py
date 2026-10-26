@@ -29,7 +29,7 @@ import os
 import structural_parser
 import consequence_engine
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 
 # ==============================================================================
@@ -2768,6 +2768,13 @@ def main():
                         default=None,
                         help="Consequence engine policy mode (default: shadow or payloadguard.yml setting)")
     args = parser.parse_args()
+
+    # The console report uses symbols outside legacy code pages (cp1252 for
+    # redirected output on Windows). An encoding error must not replace the
+    # verdict's exit code, so unencodable characters are replaced instead.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
 
     config = load_config(args.repo_path, ref=args.target)
     # Precedence: --consequence-mode, then PAYLOADGUARD_CONSEQUENCE_MODE, then payloadguard.yml.

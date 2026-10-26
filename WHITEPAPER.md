@@ -1,6 +1,6 @@
 # PayloadGuard — Technical Whitepaper
 
-**Version:** 1.5.0 — October 2026
+**Version:** 1.6.0 — October 2026
 **Repository:** `PayloadGuard-PLG/payload-consequence-analyser`
 **Status:** Live on main
 
@@ -33,7 +33,7 @@ The system assigns a severity score across independent signal dimensions and pro
 - Layer 5c — eBPF Runtime Defence Agent: 4 tracepoint probes (execve/connect/ptrace/procmem), audit+block mode, egress IPv4 allowlist, `bpf_send_signal(9)` kernel-side blocking. Verified on WSL2 kernel 6.6 and GitHub Actions Ubuntu runners.
 - GitHub Actions infrastructure hardening (all actions SHA-pinned)
 
-**v1.4.0–v1.5.0** add Layer 2d AI tooling configuration poisoning detection and the Semantic Change Graph consequence engine (`consequence.v1`, detectors D01–D10) with `shadow`, `advisory` and `enforce` policy modes. Fixes on `main` after v1.5.0 read policy files from the target branch, scan pull request heads by commit, and correct packaging, D01 coverage reporting and the Action's verdict and mode handling (`AUDIT_LOG.md` §V1–§V7).
+**v1.4.0–v1.5.0** add Layer 2d AI tooling configuration poisoning detection and the Semantic Change Graph consequence engine (`consequence.v1`, detectors D01–D10) with `shadow`, `advisory` and `enforce` policy modes. **v1.6.0** reads policy files from the target branch, scans pull request heads by commit, and corrects packaging, D01 coverage reporting, the Action's verdict and mode handling, and temporal drift input validation (`AUDIT_LOG.md` §V1–§V10).
 
 Against a 41-case active test suite covering safe baselines, canonical destructive payloads, boundary conditions, purpose-built evasion techniques, CI pipeline poisoning, and eBPF runtime fixtures, PayloadGuard achieves **≥97%** detection at default thresholds with zero false positives on safe baselines.
 

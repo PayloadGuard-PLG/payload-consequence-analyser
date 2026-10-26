@@ -3317,6 +3317,24 @@ class TestPolicyReadFromTargetBranch(unittest.TestCase):
         self.assertEqual(rep["verdict"]["status"], "SAFE")
         self.assertEqual(code, 0)
 
+    def test_verdict_exit_code_survives_non_utf8_stdout(self):
+        """AUDIT_LOG §V11: the console report contains symbols outside cp1252 (the
+        stdout encoding of redirected output on Windows). The encoding error used to
+        replace the verdict's exit code with 1 before any report was written."""
+        _run_git(self.repo, "checkout", "-q", "--detach", "pr/gut-verify")
+        report_path = os.path.join(self.tmp, "gut-verify_cp1252.json")
+        env = _fixture_env()
+        env.pop("PYTHONUTF8", None)
+        env["PYTHONIOENCODING"] = "cp1252"
+        proc = subprocess.run(
+            [sys.executable, _ANALYZE_PY, self.repo, "pr/gut-verify", "main",
+             "--pr-description", "Tidy auth module", "--save-json", report_path],
+            env=env, capture_output=True,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stderr.decode("cp1252", errors="replace")[-2000:])
+        self.assertIn(b"VERDICT: DESTRUCTIVE", proc.stdout)
+        self.assertTrue(os.path.exists(report_path))
+
     # AUDIT_LOG §V6: --consequence-mode > PAYLOADGUARD_CONSEQUENCE_MODE > payloadguard.yml.
 
     def test_cli_flag_takes_precedence_over_env_mode(self):

@@ -2,6 +2,16 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-26 — v1.6.0 release preparation
+
+Version 1.6.0 (`analyze.py`, `pyproject.toml`) packages the v1.5.0 audit fixes (§V1–§V7, §V10, §V11) and the re-run proofs. PyPI's latest release was 1.3.0: the v1.4.0 and v1.5.0 tag builds failed on the `packages = ["consequence_engine"]` error (§V3), so 1.6.0 is the first PyPI release since 1.3.0. Semantic versioning: the `consequence-mode` input and the new D01 and `.mjs`/`.cjs`/`.mts`/`.cts` coverage are backward-compatible features, hence a minor bump.
+
+`requires-python` changed from `>=3.8` to `>=3.11`. Python 3.8 cannot import `structural_parser.py` (its module-level `dict[str, str]` annotation is evaluated at import); 3.9 and 3.10 are untested; 3.11 (CI and the Action) and 3.14 (local) are verified. Classifiers list 3.11–3.14.
+
+Release verification found §V11: installed from the built wheel, the `payloadguard` console script exited 1 with `UnicodeEncodeError` when stdout was redirected on Windows (cp1252), before writing any report; the Action and all CLI tests set `PYTHONUTF8=1`, which masked it. Fixed in `50d6723` with a regression test that forces `PYTHONIOENCODING=cp1252`.
+
+Release procedure: tag `v1.6.0` on the merged release commit after confirming its tree equals the verified branch tree and the pull request checks passed; the tag push runs `publish.yml` (`python -m build`, `twine upload`).
+
 ## 2026-10-26 — Version history to v1.5.0; proof runs; temporal drift hardening (AUDIT_LOG §V8–§V10)
 
 **Version history:** CLAUDE.md, SYSTEM_BLUEPRINT.md, WHITEPAPER.md, llms.txt, PROOFS.md and VERIFICATION.md updated to v1.5.0 (tag `v1.5.0` → `93f94f9`), with an "Unreleased" entry for the §V1–§V7 fixes now on `main`. Corrected stale facts: the v1.4.0 entry's package layout and detector IDs, the score range (36, not 31), the Z3 property table, and proof-suite counts.

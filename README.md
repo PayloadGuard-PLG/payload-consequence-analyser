@@ -1,9 +1,9 @@
 # PayloadGuard
 
-**Version:** 1.5.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Updated:** October 2026
+**Version:** 1.6.0 &nbsp;|&nbsp; **Status:** Production &nbsp;|&nbsp; **Updated:** October 2026
 
 [![Dafny Verification](https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml/badge.svg)](https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml)
-[![Pytest Suite](https://img.shields.io/badge/pytest-330%20passed-brightgreen.svg)](#test-suite--formal-verification)
+[![Pytest Suite](https://img.shields.io/badge/pytest-388%20passed-brightgreen.svg)](#test-suite--formal-verification)
 [![Formal Proofs](https://img.shields.io/badge/formal%20proofs-36%20contracts%20%7C%2010%20Z3%20%7C%2012%20Dafny-blue.svg)](PROOFS.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -331,6 +331,19 @@ python -m pytest test_analyzer.py test_consequence_engine.py -q
 Detailed specifications and mathematical proofs are documented in [`VERIFICATION.md`](VERIFICATION.md) and [`PROOFS.md`](PROOFS.md).
 
 ---
+
+## What's New in v1.6.0
+
+PayloadGuard **v1.6.0** fixes the defects found in an audit of v1.5.0 (`AUDIT_LOG.md` §V1–§V10) and is the first release published to PyPI since 1.3.0:
+
+1. **Policy cannot be changed by the pull request it judges:** `payloadguard.yml` and `allowlist.yml` are read from the target branch, not the scanned branch.
+2. **Fork pull requests are scanned correctly:** the Action scans the pull request head commit instead of resolving the head branch name, which failed for fork branches or matched the base repository's same-named branch.
+3. **`consequence-mode` Action input:** `shadow` | `advisory` | `enforce`; the `verdict` output now reports `REVIEW` and `CAUTION`.
+4. **Coverage reporting:** changed source in languages without a structural parser is reported by `D01` as incomplete coverage; `.mjs`, `.cjs`, `.mts` and `.cts` are parsed with the JavaScript/TypeScript grammars.
+5. **Packaging:** the distribution builds again (`consequence_engine` is shipped); `requires-python` is now `>=3.11`.
+6. **Temporal drift:** non-finite branch age or target velocity raises `ValueError` instead of producing a NaN score classified `CURRENT`.
+7. **CLI exit codes on Windows:** a console that cannot encode the report's symbols (redirected output on Windows) no longer turns the verdict into exit code 1.
+8. **Verification:** Dafny, CrossHair and Z3 re-run against the current specifications; results in [`PROOFS.md`](PROOFS.md).
 
 ## What's New in v1.5.0
 

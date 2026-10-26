@@ -1,7 +1,7 @@
 # PayloadGuard — Formal Verification Record
 
-This page is the authoritative proof artifact record for PayloadGuard v1.5.0 and the fixes on
-`main` after it (proofs last run 2026-10-26 on `main` `9e83cce`, plus the §V10 change `c74f612`).
+This page is the authoritative proof artifact record for PayloadGuard v1.6.0
+(proofs last run 2026-10-26 on `main` `9e83cce`, plus the §V10 change `c74f612`).
 Three independent verification methods — Dafny, CrossHair, and Z3 — cover the same
 scoring logic from different angles. A defect would have to produce a consistent
 false result across all three simultaneously to go undetected.
