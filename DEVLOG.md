@@ -2,6 +2,16 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-26 — D01 reports source in unparsed languages (AUDIT_LOG §V4)
+
+**Defect:** `ConsequenceEngine.analyze_deltas()` only parsed paths with a registered structural parser, so D01 could not emit `UNSUPPORTED_EXTENSION`. A PR gutting a `verify` function in Ruby, C# or a `.mjs` module produced no findings, `parser_completeness.complete: true` and syntax capability `available`, with zero files parsed.
+
+**Repair:** source files in languages without a parser (`_UNPARSED_SOURCE_EXTS` in `consequence_engine.py`) now reach `extract_symbols()`, which returns `UNSUPPORTED_EXTENSION`; D01 reports them as LOW / WARN with a manual-review remediation, and the syntax capability is `unavailable` when no changed file had a parser. Data, configuration and markup formats are excluded; SQL migrations remain with D10. WARN findings do not change verdicts or exit codes.
+
+**Tests:** X06 cases in `TestParserCompletenessD01` (Ruby, C#, `.mjs`; added and deleted files; non-code control; mixed PR with unchanged non-D01 findings) and an `analyze()` integration test. 6 fail on `main` (`e77edf3`); 7 pass after. Suite: 354 passed, 15 skipped. Harness oracle 41/41; mutation suite 16/16.
+
+**New finding:** §V7 — `.mjs`/`.cjs`/`.mts`/`.cts` are not mapped to the installed JS/TS grammars.
+
 ## 2026-10-26 — Distribution builds again (AUDIT_LOG §V3)
 
 **Defect:** `pyproject.toml` listed `consequence_engine` under `packages`, but it is the single-file module `consequence_engine.py`. setuptools stopped with "package directory 'consequence_engine' does not exist", so `pip install .` and the `python -m build` step in `publish.yml` failed for v1.4.0 and v1.5.0.

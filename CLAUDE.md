@@ -2,7 +2,11 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch state:** §V1 (PR #102, `e67a471`) and §V2 (PR #104, `a388f05`) are on `main`; `fix/policy-from-target-branch` and `fix/action-pr-head-sha` are merged and can be deleted. Active: `fix/pyproject-packaging` (from `main` `a388f05`) — §V3, not merged.
+- **Branch state:** §V1 (PR #102, `e67a471`), §V2 (PR #104, `a388f05`) and §V3 (PR #105, `e77edf3`) are on `main`; `fix/policy-from-target-branch`, `fix/action-pr-head-sha` and `fix/pyproject-packaging` are merged and can be deleted. PR #105 CI on GitHub's Ubuntu runner: `test_analyzer.py` 301 passed; the self-scan resolved the PR head by SHA. Active: `fix/d01-unsupported-extension` (from `main` `e77edf3`) — §V4, not merged.
+- **§V4 D01 unsupported-language coverage (2026-10-26, branch `fix/d01-unsupported-extension`):**
+  - §V4 fixed (`cdb8395`): `ConsequenceEngine.analyze_deltas()` skipped files without a registered parser, so D01 never emitted `UNSUPPORTED_EXTENSION` and a Ruby/C#/`.mjs` change reported `parser_completeness.complete: true`. Source files listed in `_UNPARSED_SOURCE_EXTS` now reach `extract_symbols()`; D01 reports them as LOW / WARN with a manual-review remediation; syntax capability is `unavailable` when no changed file had a parser. Data/config/markup files remain excluded; SQL migrations remain with D10. Verdicts and exit codes are unchanged.
+  - New open finding §V7 (LOW): `.mjs`/`.cjs`/`.mts`/`.cts` are not mapped to the installed JS/TS grammars.
+  - **Tests:** 354 passed, 15 skipped (Z3/CrossHair not installed). Harness oracle 41/41; mutation suite 16/16.
 - **§V3 distribution packaging repair (2026-10-26, branch `fix/pyproject-packaging`):**
   - §V3 fixed (`6b66374`): `pyproject.toml` listed `consequence_engine` under `packages`; it is a single-file module, so `pip install .` and `python -m build` (publish.yml) failed. It is now in `py-modules`. Removing the `packages` line alone builds a wheel without `consequence_engine.py`, which `analyze.py` imports at load time.
   - `TestDistributionPackaging` builds sdist → wheel as publish.yml does and runs a scan through the installed `payloadguard` entry point. Verified separately: `pip install` into a fresh venv; the `payloadguard` console script returns exit 2 on a gutted method and exit 0 on a benign change.
@@ -13,7 +17,7 @@
 - **v1.5.0 audit + §V1 policy trust-boundary repair (2026-10-26, branch `fix/policy-from-target-branch`):**
   - Findings §V1–§V6 recorded in `AUDIT_LOG.md` (Findings Register — Audit Run: 2026-10-26).
   - §V1 fixed (`6d1477e`): `payloadguard.yml` and `allowlist.yml` were read from the working tree, which in CI is the PR merge result, so a PR could set `consequence.mode: shadow`, raise thresholds or allowlist its own dependency and pass its own scan. `load_config(repo_path, ref=None)` and `_load_allowlist(repo_path, ref=None)` now read from `ref` via `_read_file_at_ref()` (origin/<ref> fallback); `main()` passes the target branch and `analyze()` the resolved target. Without `ref` the working-tree behaviour is unchanged.
-  - Open: §V4 (MEDIUM) D01 never emits `UNSUPPORTED_EXTENSION`; §V5/§V6 (LOW) Action `verdict` output and consequence-mode wiring.
+  - Open: §V5/§V6 (LOW) Action `verdict` output and consequence-mode wiring.
   - **Tests:** 340 passed, 15 skipped (Z3/CrossHair not installed), 1 xfailed (§V2 evidence) across `test_analyzer.py`, `test_consequence_engine.py`, `tests/`. Harness `validate_manifest.py --verify-consequence` 41/41; mutation suite 16/16 (0 FP / 0 FN). Live PR harness not run.
 - **D10 Migration/Persistence Loss + D05/D08 Extensions (Robust Real-Diff Hardening) — COMPLETE (2026-10-25, branch eat/d08-d09-d10-consequence-detectors):**
   - consequence_engine.py: Hardened D10_MIGRATION_PERSISTENCE_LOSS with multi-statement SQL AST/tokenizer parser, forward-vs-rollback boundary isolation, and framework-aware irreversibility:
@@ -218,8 +222,8 @@ sca:
 |---|---|---|---|
 | INC-3 | Direct push to main -> L5b returns UNVERIFIED but raises no flag | MEDIUM | Backlog |
 | §2.3 | Single-branch clone / detached HEAD raises BadName exception | MEDIUM | Backlog |
-| §V4 | D01 never reports `UNSUPPORTED_EXTENSION` for code in unsupported languages | MEDIUM | Open |
 | §V5/§V6 | Action `verdict` output omits REVIEW/CAUTION; no consequence-mode input | LOW | Open |
+| §V7 | `.mjs`/`.cjs`/`.mts`/`.cts` not mapped to the installed JS/TS grammars (reported via D01 since §V4) | LOW | Open |
 | WS03 | workflow-security/dormant-trigger: expected DESTRUCTIVE, getting CAUTION (score=3) | MEDIUM | **RESOLVED** — test expectation corrected (see DEVLOG 2026-05-31) |
 
 ## Vericoding Plan (from `payloadguard-vericoding-plan.md` on main)
