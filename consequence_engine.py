@@ -156,7 +156,7 @@ _UNPARSED_SOURCE_EXTS = frozenset({
     ".swift", ".m", ".mm", ".dart",
     ".rb", ".php", ".pl", ".pm", ".lua", ".r", ".jl",
     ".ex", ".exs", ".erl", ".hs", ".ml", ".nim", ".zig", ".sol",
-    ".mjs", ".cjs", ".mts", ".cts", ".vue", ".svelte",
+    ".vue", ".svelte",
     ".pyi", ".pyx",
     ".sh", ".bash", ".zsh", ".ps1",
 })
