@@ -2,6 +2,17 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-26 — Documentation brought up to date with v1.6.0
+
+Current-state statements corrected against the code (history entries left as written):
+
+- **README:** test counts; SCG stage and transition list; consequence-mode behaviour (`advisory` ignores WARN, never exits 2); policy column note (D-detector findings act only in `advisory`/`enforce`); L5b escalation instead of "BLOCK"; corrupted arrow; `allowlist.yml` format — the documented flat `packages:` list matched no ecosystem key (`python`, `npm`, `go`, `rust`), so following it would flag every added package; scanned manifests (`pyproject.toml`, `Cargo.toml`, not `Gemfile`).
+- **SYSTEM_BLUEPRINT:** D01–D10, configuration loading from the target branch and mode precedence, Action head-SHA entry point, CLI flags, package metadata (was 1.0.2), SCA +3 once (not per package), temporal age from the target commit date and `ValueError` on non-finite input, runtime events path (`PG_RUNTIME_EVENTS_PATH`), actual report keys, verification summary.
+- **WHITEPAPER:** consequence-engine section (detector IDs `D01_RENAME_MOVE`, `D02_HOLLOW_BODY`, `D05_SECURITY_TOUCH` and submodules `consequence_engine/matcher.py`, `detectors.py` did not exist), maximum score 36 (was 31), SCA scoring and allowlist keys, L2b/L2c double-scan claim (workflows are excluded from the content scanner), configuration reference (mode `off` and `compound_min_*` keys do not exist), data flow, three verification methods, Layer 2d section and Abstract heading added, live-harness status note and pin (`fe68338`, not `32014117…`), section numbering.
+- **llms.txt:** structural CRITICAL weight (+5, was listed as +3), MAX_SCORE 36, SCA, L2d, consequence engine and modes, proof counts.
+- **VERIFICATION / VERIFICATION_SPEC / HARNESS_BLUEPRINT / CLAUDE.md:** last-run status, scope note for the consequence engine, spec pin still valid (`_assess_consequence()` unchanged since `257d1f3`), offline harness tools, scoring and config sections, environment.
+- **TEST_REPORT.md** regenerated from a live run: 391 passed, 0 skipped, 0 failed (Python 3.14.3, Windows 11).
+
 ## 2026-10-26 — v1.6.0 released; Z3 P9 made meaningful (AUDIT_LOG §V8)
 
 **Release:** tag `v1.6.0` on `6c3df91` (PR #110 merge commit, tree identical to the verified tree; #110 checks passed). "Publish to PyPI" run 40350394223 succeeded; `payloadguard-plg==1.6.0` installed from PyPI into a fresh virtualenv returns exit 2 on a destructive PR and 0 on a benign one. PR #108 was closed without merging; the six merged branches were deleted.

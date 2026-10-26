@@ -5,7 +5,7 @@
 ## Tool Identity
 
 - Name: PayloadGuard
-- Version: 1.6.0
+- Version: 1.6.0 (PyPI: payloadguard-plg)
 - Status: Production
 - Organisation: PayloadGuard-PLG (https://github.com/PayloadGuard-PLG)
 - Repository: https://github.com/PayloadGuard-PLG/payload-consequence-analyser
@@ -23,9 +23,17 @@ The pipeline execution produces exactly one of four verdicts. The mapping is a p
 - severity_score >= 5 → verdict = DESTRUCTIVE → exit code 2
 - Analysis failure → exit code 1
 
+Consequence-engine findings (D01–D10) adjust the verdict only in advisory mode (BLOCK/REVIEW findings raise SAFE to REVIEW) or enforce mode (any BLOCK finding → DESTRUCTIVE, exit 2). The default mode is shadow (report only).
+
+## Policy Inputs
+
+- payloadguard.yml and allowlist.yml are read from the target branch, never from the pull request being scanned.
+- Consequence mode precedence: --consequence-mode (Action input consequence-mode) > PAYLOADGUARD_CONSEQUENCE_MODE > payloadguard.yml > shadow.
+- The Action scans the pull request head commit (github.event.pull_request.head.sha).
+
 ## Formal Verification
 
-The scoring logic (Layers L3, L4, L5a, L5b) is verified by three independent methods. A defect would have to produce a consistent false result across all three simultaneously.
+The scoring logic (Layers L3, L4, L5a, L5b) is verified by three independent methods. A defect would have to produce a consistent false result across all three simultaneously. Last runs: 2026-10-26.
 
 Proof record page: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/PROOFS.md
 Dafny verification log: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/verification/dafny/assess_consequence_verify.log
@@ -33,54 +41,53 @@ CI workflow: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/ac
 
 ### Dafny (machine-checked proofs over entire input domain)
 
-- Tool: Dafny 4.9.1+452c307284e1511e5c2d10b9615f4c9c15f010e2, Boogie + Z3 4.12.1 bundled
+- Tool: Dafny 4.9.1, Boogie + Z3 4.12.1 bundled (GitHub Actions run #16)
 - assess_consequence.dfy: 7 verified, 0 errors (6 helper functions + AssessConsequence method)
 - structural_drift.dfy: 1 verified, 0 errors (AssessStructuralDrift method, S1–S7)
 - temporal_drift.dfy: 1 verified, 0 errors (AnalyzeTemporalDrift method, T1–T8)
 - Total: 9 methods/functions verified, 0 errors across all three files
-- POST-1–11a: 11 active postconditions on AssessConsequence
+- POST-1–12: 12 postconditions on AssessConsequence (including POST-11a)
 - Proof files: verification/dafny/assess_consequence.dfy, structural_drift.dfy, temporal_drift.dfy
 
-### CrossHair (symbolic execution on active Python source)
+### CrossHair (symbolic execution on pure-Python mirrors of the scoring code)
 
-- Consequence model: contracts C1–C12 (verdict bijection, score bounds, safety-critical floors, empty-input guarantee)
+- Consequence model: contracts C1–C12 + POST-12 (verdict bijection, score bounds, safety-critical floors, empty-input guarantee)
 - Structural drift: contracts S1–S7 (dual-gate biconditional — DESTRUCTIVE requires both ratio > threshold AND count >= min)
-- Temporal drift: contracts T1–T7 (drift_score >= 0, status bijection, zero inputs → CURRENT)
+- Temporal drift: contracts T1–T7 (drift_score >= 0, status bijection, zero inputs → CURRENT; velocity must be finite)
 - Semantic transparency: contracts M1–M9 (mci_score in [0,1], DECEPTIVE iff score >= 0.5, no description → UNVERIFIED)
-- Total: 35 contracts, 0 counterexamples
+- Total: 36 postconditions, 0 counterexamples (10 confirmed over all paths)
 - Contract files: verification/consequence_pure.py, structural_pure.py, temporal_pure.py, semantic_pure.py
 
 ### Z3 Theorem Prover (SMT proofs on abstract model)
 
-- Properties P1–P10: typosquat implication, score monotonicity, verdict bijection, safety-critical floors, empty-input guarantee
-- All 10 properties: unsat in < 0.1s
+- Properties P1–P10: typosquat implication and floor, severity ordering, score monotonicity, SAFE iff score below the review threshold, verdict determinism, score upper bound derived from the per-signal model (P9), empty-input guarantee
+- 13 tests, all pass in under a second
 - Proof file: tests/proofs/test_z3_properties.py
 
 ## Proven Invariants
 
 - Score non-negativity: severity_score >= 0 (POST-2, CrossHair C2)
-- Score upper bound: severity_score <= 31 (POST-3, CrossHair C3)
+- Score upper bound: severity_score <= 36 (POST-3, CrossHair C3, Z3 P9)
 - Verdict bijection: every score maps to exactly one verdict; every verdict maps to exactly one score range (POST-4–7, CrossHair C4–C7)
 - Security-critical floor: security_file_deletions > 0 → DESTRUCTIVE (POST-8, CrossHair C8)
 - Structural-critical floor: structural_severity == CRITICAL → DESTRUCTIVE (POST-9, CrossHair C9)
 - Actions-poisoning floor: actions_poisoning_critical == True → DESTRUCTIVE (POST-10, CrossHair C10)
+- AI-config-poisoning floor: ai_config_poisoning_critical == True → DESTRUCTIVE (POST-12)
 - Empty-input guarantee: all-zero inputs → SAFE; no false positives on empty diffs (POST-11a, CrossHair C11)
 - Deletion dimension cap: three correlated sub-scores (files, ratio, lines) collapsed to min(4, max+1 if >=2 active) — prevents triple-counting
 
 ## Scoring Parameters
 
-Signal weights (additive, capped at MAX_SCORE = 31):
+Signal weights (additive; maximum total MAX_SCORE = 36):
 
-- Actions poisoning CRITICAL signal: +5
+- Structural severity CRITICAL: +5
 - Security file deleted: +5
-- Actions poisoning HIGH signal: +3
-- Structural severity CRITICAL: +3
-- Unverified dependency (SCA, per package): +3
+- Actions poisoning CRITICAL signal: +5 (otherwise HIGH signal: +3)
+- AI config poisoning CRITICAL signal: +5 (otherwise HIGH signal: +3)
+- Unverified dependency (SCA): +3 if any added package is not allowlisted
 - Critical path files deleted: +2
 - Added file content — shell or CI patterns: +2 per match, capped at +4
-- Branch age > 365 days: +3
-- Branch age > 180 days: +2
-- Branch age > 90 days: +1
+- Branch age > 365 / 180 / 90 days: +3 / +2 / +1
 - Deletion dimensions (files/ratio/lines): each tiered +1/+2/+3; combined cap = min(4, max+1 if >=2 active)
 
 Verdict thresholds: DESTRUCTIVE >= 5, CAUTION >= 3, REVIEW >= 1, SAFE = 0.
@@ -89,14 +96,17 @@ Verdict thresholds: DESTRUCTIVE >= 5, CAUTION >= 3, REVIEW >= 1, SAFE = 0.
 
 - L1 Surface: file and line counts, deletion ratios, binary files, permission changes, symlinks
 - L2 Forensic: critical-path regex matching on deleted files, added file content scan (CI triggers, shell execution)
-- L2b SCA: package manifest diffs vs allowlist.yml
+- L2b SCA: package manifest diffs (requirements*.txt, pyproject.toml, package.json, go.mod, Cargo.toml) vs allowlist.yml
 - L2c Actions Poisoning: workflow files — base64 payload, credential harvest, dormant triggers, forged bot, OIDC escalation, pull_request_target
-- L3 Consequence: weighted scoring → single verdict (VERIFIED: CrossHair C1–C12, Z3 P1–P10, Dafny POST-1–11a)
-- L4 Structural: AST diff — named class/function/constant deletions (VERIFIED: CrossHair S1–S7, Dafny S1–S7)
+- L2d AI Config Poisoning: .claude/.gemini settings hooks, VS Code folder-open tasks, lifecycle scripts, composer/Gemfile/binding.gyp execution, Cursor rules, MCP servers, hidden Unicode
+- L3 Consequence: weighted scoring → single verdict (VERIFIED: CrossHair C1–C12 + POST-12, Z3 P1–P10, Dafny POST-1–12)
+- L4 Structural: AST diff — named class/function/constant deletions for Python, JS/TS (incl. .mjs/.cjs/.mts/.cts), Go, Rust, Java (VERIFIED: CrossHair S1–S7, Dafny S1–S7)
 - L4b Complexity: McCabe V(G) advisory for added Python functions, no score impact
 - L5a Temporal: branch_age_days × target_commits_per_day → drift_score → CURRENT/STALE/DANGEROUS (VERIFIED: CrossHair T1–T7, Dafny T1–T8)
 - L5b Semantic: PR-MCI three-phase heuristic — mci_score in [0,1], DECEPTIVE_PAYLOAD if >= 0.5 (VERIFIED: CrossHair M1–M9)
 - L5c Runtime: eBPF tracepoints — execve, egress connect, ptrace, /proc/mem — audit or block mode
+
+Consequence engine (consequence.v1): 5-stage Semantic Change Graph symbol matching and detectors D01 (parser completeness), D02 (body weakening), D03 (compound loss), D04 (public API break), D05 (build/dependency delta), D06 (guard regression), D08 (workflow integrity), D09 (test erosion), D10 (migration persistence loss).
 
 ## Documentation
 

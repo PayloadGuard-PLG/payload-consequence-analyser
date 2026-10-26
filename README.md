@@ -7,7 +7,7 @@
 [![Formal Proofs](https://img.shields.io/badge/formal%20proofs-36%20contracts%20%7C%2010%20Z3%20%7C%2012%20Dafny-blue.svg)](PROOFS.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Formally verified** — 36 CrossHair contracts • 10 Z3 SMT proofs • 12 Dafny postconditions • **330 tests pass (100%)** • 3 independent proof methods. → [`PROOFS.md`](PROOFS.md)
+**Formally verified** — 36 CrossHair contracts • 10 Z3 SMT proofs • 12 Dafny postconditions • **391 tests pass (100%)** • 3 independent proof methods. → [`PROOFS.md`](PROOFS.md)
 
 PayloadGuard is a GitHub Action and pre-merge consequence analysis engine that forensically scans pull requests for destructive, deceptive, or supply-chain payloads before they reach your default branch.
 
@@ -42,7 +42,7 @@ Wire PayloadGuard to your branch protection rules, and catastrophic pull request
 | **Broken Cross-File Callers & API Breaks** | `D04_PUBLIC_API_BREAK` | Deleting exported functions or tightening required parameters while surviving callers (including aliased imports) still invoke the old contract | `BLOCK` |
 | **Build Wrapper Script Tampering** | `D05_BUILD_DEPENDENCY_DELTA` | Remote script execution or reverse shell (`curl \| sh`) injected into `mvnw`, `gradlew`, `Makefile`, or `build.sh` | `BLOCK` |
 | **Manifest Dependency Drift** | `D05_BUILD_DEPENDENCY_DELTA` | Dependency added to `package.json` or `pyproject.toml` without accompanying lockfile update | `REVIEW` |
-| **Security Guard & Rollback Regression** | `D06_GUARD_REGRESSION` | Removing `@require_auth`, dropping `self._rollback()`, inverting guard polarity (`if not verify()` $	o$ `if verify()`), or inserting `and False` short-circuits | `BLOCK` |
+| **Security Guard & Rollback Regression** | `D06_GUARD_REGRESSION` | Removing `@require_auth`, dropping `self._rollback()`, inverting guard polarity (`if not verify()` → `if verify()`), or inserting `and False` short-circuits | `BLOCK` |
 | **Untrusted CI Expression Injection** | `D08_WORKFLOW_INTEGRITY` | Interpolating untrusted context (`${{ github.event.pull_request.title }}`) directly inside `run:` shell blocks (W02 / CWE-78) | `BLOCK` |
 | **Pwn Request Checkout** | `D08_WORKFLOW_INTEGRITY` | Combining privileged `pull_request_target` trigger with checkout of untrusted pull request head ref (W01) | `BLOCK` |
 | **Action SHA Pin Downgrade** | `D08_WORKFLOW_INTEGRITY` | Action downgraded from an immutable 40-character commit SHA to a mutable tag or branch (`@v4`, `@main`) | `REVIEW` |
@@ -55,7 +55,9 @@ Wire PayloadGuard to your branch protection rules, and catastrophic pull request
 | **Destructive Migration Drop** | `D10_MIGRATION_PERSISTENCE_LOSS` | Dropping persistent table or column in forward migration (with working rollback procedure) | `REVIEW` |
 | **Workflow Actions Poisoning & OIDC** | `L2c` | Workflow files modified to exfiltrate secrets, steal OIDC tokens, or forge CI identities | `BLOCK` |
 | **AI Tooling Config Poisoning** | `L2d` | Malicious `.claude/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, or lifecycle scripts executing on folder open | `BLOCK` |
-| **Deceptive PR Descriptions** | `L5b` | PR description says *"minor copy fix"* while the diff alters authentication or drops database tables | `BLOCK` |
+| **Deceptive PR Descriptions** | `L5b` | PR description says *"minor copy fix"* while the diff alters authentication or drops database tables | Escalates the verdict one level (SAFE/REVIEW → CAUTION, CAUTION → DESTRUCTIVE) |
+
+The policy column is each finding's recommendation. Consequence-detector (`Dxx`) findings change the verdict and exit code only in `advisory` or `enforce` mode; the default mode is `shadow` (see [Consequence Modes](#3-consequence-modes)).
 
 ---
 
@@ -92,11 +94,13 @@ PayloadGuard operates across three analysis tiers. Each tier builds on the one b
 ## SCG Consequence Engine (`consequence.v1`)
 
 The Consequence Engine (`consequence_engine.py`) matches `base` and `head` symbols through a 5-stage Semantic Change Graph (SCG) pipeline:
-1. **Exact ID Match:** Matches qualified symbols unchanged in name and container.
-2. **Body Hash & Signature Match:** Detects symbols moved across files or renamed within the same container when their normalized AST tokens match.
-3. **Cross-File Move Resolution:** Tracks symbols transferred across module boundaries.
-4. **Fuzzy Container / Member Match:** Distinguishes genuine refactoring from structural gutting.
-5. **Residual Classification:** Emits symbol transitions (`ADDED`, `MODIFIED`, `DELETED`, `RENAMED`, `MOVED`).
+1. **Exact match:** same file, qualified name and kind.
+2. **Renamed-file match:** same qualified name and kind in a file git reports as renamed.
+3. **Cross-file move:** same qualified name (or same name with matching signature or body hash) in another changed file.
+4. **Container and body-hash rename:** renamed classes/structs matched by member overlap, functions renamed with an identical body hash and signature, and same-scope replacements by a no-op stub.
+5. **Residual classification:** anything unmatched is `REMOVED` or `ADDED`.
+
+Transitions: `UNCHANGED`, `MODIFIED`, `GUTTED`, `MOVED`, `MOVED_AND_GUTTED`, `RENAMED`, `RENAMED_AND_GUTTED`, `AMBIGUOUS`, `REMOVED`, `ADDED`. A body counts as gutted when a non-stub symbol becomes a no-op stub, or when three or more statements with calls collapse to at most one statement without calls.
 
 ### Consequence Detectors Reference
 
@@ -164,7 +168,7 @@ jobs:
             echo "::error::PayloadGuard encountered an analysis error."
             exit 1
           fi
-          echo "PayloadGuard verdict is SAFE or REVIEW. Proceed with review."
+          echo "PayloadGuard verdict is SAFE, REVIEW or CAUTION. Proceed with review."
 ```
 
 ### 2. Configure Branch Protection (Enforce Blocking)
@@ -183,8 +187,8 @@ PayloadGuard supports three policy enforcement modes. The mode is taken from the
 | Mode | Behavior | Use Case |
 |---|---|---|
 | `shadow` *(default)* | Runs all consequence detectors, logs findings in JSON, PR comments, and SARIF, but does not escalate the exit code to `2`. | Initial trial / baseline observation in existing repositories. |
-| `advisory` | Emits findings, labels findings in PR comments, requests human review for `POLICY_REVIEW` / `POLICY_WARN`, but allows override. | Team transition / soft enforcement. |
-| `enforce` | Verified blocking consequences (`POLICY_BLOCK`) immediately set the exit code to `2`, blocking CI merge checks. | Production repositories requiring strict pre-merge safety guarantees. |
+| `advisory` | `BLOCK` and `REVIEW` findings are added to the verdict flags and raise a `SAFE` verdict to `REVIEW`; the exit code is never escalated to `2`. `WARN` findings are reported only. | Team transition / soft enforcement. |
+| `enforce` | Any `BLOCK` finding sets the verdict to `DESTRUCTIVE` (exit code `2`); `REVIEW` findings raise a `SAFE` verdict to `REVIEW`. | Production repositories requiring strict pre-merge safety guarantees. |
 
 To enforce blocking mode via your workflow:
 ```yaml
@@ -213,8 +217,10 @@ You can run PayloadGuard locally or in custom CI pipelines without GitHub Action
 ### Installation via pip
 
 ```bash
-pip install payloadguard-plg
+pip install payloadguard-plg     # Python 3.11+
 ```
+
+This installs the `payloadguard` command (equivalent to `python analyze.py`).
 
 ### From Source
 
@@ -294,14 +300,18 @@ semantic:
 
 ### Approved Dependencies Allowlist (`allowlist.yml`)
 
-If `sca.fail_on_unknown: true` is configured, dependencies added in package manifests (`package.json`, `requirements.txt`, `pyproject.toml`, `Gemfile`, `go.mod`) are checked against `allowlist.yml`:
+Software composition analysis (L2b) runs only when `allowlist.yml` exists in the repository root on the target branch. Packages added in `requirements*.txt`, `pyproject.toml`, `package.json`, `go.mod` and `Cargo.toml` are checked against the list for their ecosystem; with `sca.fail_on_unknown: true` (the default) any unlisted package adds +3 to the score.
 
 ```yaml
-packages:
+python:          # requirements*.txt, pyproject.toml
   - requests
   - pydantic
-  - sqlalchemy
-  - tree-sitter
+npm:             # package.json
+  - express
+go:              # go.mod
+  - github.com/spf13/cobra
+rust:            # Cargo.toml
+  - serde
 ```
 
 ---
@@ -312,21 +322,21 @@ PayloadGuard's consequence and scoring logic is mathematically proven to elimina
 
 | Method | Specification & Tool | What is Proven |
 |---|---|---|
-| **SMT Prover** | **Z3** | Score upper bounds, verdict bijection, safety-critical floors, empty-input guarantees (P1–P10). |
+| **SMT Prover** | **Z3** | Typosquat floor and severity ordering for Actions signals, score monotonicity, SAFE ↔ score below the review threshold, the score upper bound derived from the per-signal model, and the empty-input guarantee (P1–P10). |
 | **Symbolic Execution** | **CrossHair** | Postcondition contracts across consequence scoring, structural drift, temporal drift, and semantic transparency (C1–C12, S1–S7, T1–T7, M1–M9). |
 | **Machine-Checked Proofs** | **Dafny** | Full input domain coverage and 12 machine-checked postconditions verified with zero verification errors (POST-1–12). |
 
 ### Test Metrics
 
 ```bash
-# Run complete test suite
-python -m pytest test_analyzer.py test_consequence_engine.py -q
-# 330 passed in 2.39s
+# Run the complete suite, including the proof tests (needs z3-solver and crosshair-tool from requirements.txt)
+python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q
+# 391 passed
 ```
 
-- **Core & Consequence Test Suite:** **330 passed, 0 failed** (`test_analyzer.py` + `test_consequence_engine.py`).
-- **Mutation Suite:** **16 / 16 passed** with **0 False Positives and 0 False Negatives** ([`run_mutation_suite.py`](tools/run_mutation_suite.py)).
-- **Harness Manifest Oracle:** **41 / 41 passed** across schema validations and Consequence Engine v1 assertions ([`validate_manifest.py`](tools/validate_manifest.py)).
+- **Test suite:** **391 passed, 0 failed** (`test_analyzer.py` 311, `test_consequence_engine.py` 61, `tests/proofs/` 19). Without Z3 and CrossHair installed: 374 passed, 17 skipped.
+- **Mutation Suite:** **16 / 16 passed** with **0 False Positives and 0 False Negatives** ([`run_mutation_suite.py`](https://github.com/PayloadGuard-PLG/payloadguard-test-harness/blob/main/tools/run_mutation_suite.py)).
+- **Harness Manifest Oracle:** **41 / 41 passed** across schema validations and Consequence Engine v1 assertions ([`validate_manifest.py`](https://github.com/PayloadGuard-PLG/payloadguard-test-harness/blob/main/tools/validate_manifest.py)).
 
 Detailed specifications and mathematical proofs are documented in [`VERIFICATION.md`](VERIFICATION.md) and [`PROOFS.md`](PROOFS.md).
 
@@ -381,8 +391,8 @@ cd payload-consequence-analyser
 # Install development dependencies
 pip install -r requirements.txt
 
-# Run full test suite
-python -m pytest test_analyzer.py test_consequence_engine.py -q
+# Run the full test suite, including the proof tests
+python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q
 ```
 
 All new detectors require corresponding test cases in [`test_consequence_engine.py`](test_consequence_engine.py). Open findings and vulnerability disclosures are tracked in [`AUDIT_LOG.md`](AUDIT_LOG.md).

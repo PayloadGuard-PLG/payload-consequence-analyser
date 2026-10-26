@@ -2,7 +2,7 @@
 
 **Purpose:** This document is the authoritative specification for external verification of PayloadGuard's scoring model. It was produced by reading the source code and is intended for use by an independent verifier — human auditor, CrossHair, Nagini, or Dafny — without relying on any tests or proofs written by the same author as the code.
 
-**Version pinned:** commit `257d1f3` (branch `claude/general-conversation-klxctt` — Sprint 1, L2d AI Config Poisoning)  
+**Version pinned:** commit `257d1f3` (branch `claude/general-conversation-klxctt` — Sprint 1, L2d AI Config Poisoning). Still current at v1.6.0 (`6c3df91`): `_assess_consequence()` is unchanged since that commit (checked 2026-10-26).  
 **Previous pin:** commit `d0541f6cdc1a46b8b05f15bf689bc6f5532bbb48` (branch `claude/oidc-typosquat-detection-UBCOJ`, merged to `main` as PR #63)  
 **Source file:** `analyze.py`  
 **Method:** `PayloadAnalyzer._assess_consequence()`

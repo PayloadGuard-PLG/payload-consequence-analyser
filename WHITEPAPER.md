@@ -17,8 +17,11 @@
 7. [Regression Validation](#7-regression-validation)
 8. [Configuration Reference](#8-configuration-reference)
 9. [Known Limitations](#9-known-limitations)
+10. [GitHub 2026 Roadmap Alignment](#10-github-2026-roadmap-alignment)
 
 ---
+
+## 1. Abstract
 
 PayloadGuard is a nine-layer static + runtime analysis system that runs on every pull request before merge. It detects destructive code payloads — mass deletions, structural gutting, CI pipeline poisoning, deceptive descriptions — that bypass normal code review because they are either too large for a human reviewer to fully parse or deliberately disguised as low-impact changes.
 
@@ -78,8 +81,9 @@ actions/checkout@v4  (fetch-depth: 0)
         ▼
 payload-consequence-analyser@main  (composite action)
         │
-        ├──► python analyze.py <workspace> <head_ref> <base_ref>
-        │         --pr-description  --save-json  --save-markdown
+        ├──► python analyze.py <workspace> <PR head SHA> <base_ref>
+        │         --pr-description  --save-json  --save-markdown  [--consequence-mode]
+        │         (policy files read from the base branch)
         │                   │
         │         ┌─────────┴──────────┐
         │         │   8-layer engine   │
@@ -88,15 +92,14 @@ payload-consequence-analyser@main  (composite action)
         │         payloadguard-report.json
         │         payloadguard-report.md
         │                   │
+        ├──► PR comment (actions/github-script, updated in place)
+        │
         ├──► post_check_run.py
         │         JWT (App private key)
         │         → GitHub Check Run API
         │         → named badge + full markdown body
         │
-        ├──► actions/upload-artifact@v4
-        │         payloadguard-results / .json
-        │
-        └──► Enforce verdict step
+        └──► Enforce verdict step (in the consumer workflow, reads the exit-code output)
                   exit 0 → SAFE/REVIEW/CAUTION
                   exit 1 → analysis error
                   exit 2 → DESTRUCTIVE → branch protection blocks merge
@@ -180,16 +183,16 @@ git.Repo(workspace)
 |---|---|
 | `analyze.py` | All layers, CLI entry point, report generation (JSON, Markdown, SARIF 2.1.0) |
 | `structural_parser.py` | Multi-language AST node & `SymbolFact` v1 extraction |
-| `consequence_engine/` | SCG Consequence Engine (`consequence.v1`): 5-stage symbol matching + `D01`–`D06` v2 detectors |
+| `consequence_engine.py` | SCG Consequence Engine (`consequence.v1`): 5-stage symbol matching + `D01`–`D10` detectors |
 | `post_check_run.py` | GitHub Check Run posting via App JWT |
 | `remediate.py` | Workflow action SHA-pinning auto-remediation |
 | `action.yml` | Composite GitHub Action definition |
 | `agent/` | eBPF runtime defence agent (Go + cilium/ebpf) |
 | `agent/bpf/probe.c` | 4 tracepoint probes + block mode BPF maps |
-| `test_analyzer.py` | 284-test unit suite |
-| `test_consequence_engine.py` | 31-test SCG Consequence Engine v1 + v2 unit & integration suite (315 total) |
-| `tests/proofs/` | Z3 SMT proofs (P1–P10) + CrossHair pytest wrapper (5 tests) |
-| `verification/` | CrossHair pure extraction modules — consequence, structural, temporal, semantic |
+| `test_analyzer.py` | 311-test unit, integration, policy, Action-path and packaging suite |
+| `test_consequence_engine.py` | 61-test SCG Consequence Engine unit & integration suite |
+| `tests/proofs/` | Z3 SMT proofs (P1–P10, 13 tests) + CrossHair pytest wrappers (5) + temporal contract regression (1) |
+| `verification/` | CrossHair pure extraction modules — consequence, structural, temporal, semantic — and Dafny specifications (`verification/dafny/`) |
 
 ---
 
@@ -248,9 +251,9 @@ authorization[^/]*\.(py|js|ts)
 
 **Purpose:** Detect unverified dependency additions in package manifest files. A PR that adds an unrecognised package — whether a dependency confusion attack, a typosquatted package, or an AI hallucination — produces no structural or deletion signal. L2b provides a dedicated check.
 
-**Activation:** Requires `allowlist.yml` in the scanned repository root. Without this file, L2b is a no-op.
+**Activation:** Requires `allowlist.yml` in the repository root on the target branch (a pull request cannot add or edit its own allowlist). Without this file, L2b is a no-op.
 
-**Manifest types scanned:** `requirements*.txt`, `package.json`, `go.mod`, `Cargo.toml`, `Gemfile`.
+**Manifest types scanned:** `requirements*.txt` and `pyproject.toml` (allowlist key `python`), `package.json` (`npm`), `go.mod` (`go`), `Cargo.toml` (`rust`).
 
 **Algorithm:**
 ```python
@@ -258,15 +261,16 @@ for diff in diffs where change_type in ('A', 'M'):
     if path matches _MANIFEST_PATTERNS:
         added_packages = _parse_added_packages(diff)
         for pkg in added_packages:
-            if pkg not in allowlist['packages']:
+            if pkg not in allowlist[ecosystem_key]:      # python | npm | go | rust
                 unverified_packages.add(pkg)
 
-score += 3 * len(unverified_packages)
+if unverified_packages and sca.fail_on_unknown:
+    score += 3
 ```
 
-Each unique unverified package adds +3 points. Multiple packages in a single manifest can push a PR to CAUTION or DESTRUCTIVE regardless of diff volume.
+Any unverified package adds +3 points once, regardless of how many are listed, so SCA alone reaches CAUTION but not DESTRUCTIVE. Every unverified package is listed in the report.
 
-**Interaction with L2c:** Added `.yml` workflow files are also processed by L2b's content scanner (`_scan_added_file_content`), which checks for CI trigger strings and shell execution patterns. This means a dormant-trigger workflow that contains `curl | bash` will be flagged by both L2c (`dormant_trigger_with_payload`, +3) and L2b shell pattern scanning (+2 per match). This is defense-in-depth, not double-counting — the signals represent independent detection dimensions.
+**Interaction with L2c and L2d:** the added-file content scanner (`_scan_added_file_content`) excludes `.github/workflows/` files and AI tooling configuration paths; L2c and L2d are the exclusive handlers for those files, so a signal is not scored twice.
 
 **Outputs:** `sca_flags` dict with `unverified_packages` list and count; count passed to L3.
 
@@ -302,6 +306,30 @@ A single CRITICAL signal is sufficient to reach DESTRUCTIVE (score ≥ 5). A sin
 *H3 — `pull_request_target` two-tier scoring.* `pull_request_target` alone without any write permission scores HIGH (+3 → CAUTION). Combined with any write permission (`contents: write`, `pull-requests: write`, `id-token: write`, etc.) it scores CRITICAL (+5 → DESTRUCTIVE). This prevents false positives on repos that legitimately use `pull_request_target` in read-only mode while still catching the pwn-request attack surface.
 
 **Outputs:** `actions_poisoning` dict with `flagged_workflows` list (file, signals, severity, change_type), `total`; counts and severity passed to L3.
+
+---
+
+### 4.2d Layer 2d — AI Tooling Configuration Poisoning
+
+**Purpose:** Detect added or modified configuration that makes developer tools or package managers execute commands when a repository is opened, installed or loaded by an AI coding assistant.
+
+**Surfaces (`_AI_CONFIG_PATH_RE`):** `.claude/settings.json`, `.gemini/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `mcp.json`, `composer.json`, `Gemfile`, `binding.gyp`, `package.json`.
+
+| Signal | Helper | Severity |
+|---|---|---|
+| `command_in_session_hook` | `_check_agent_settings_json` | CRITICAL |
+| `command_in_folder_open_task` | `_check_vscode_tasks` | CRITICAL |
+| `lifecycle_script_hijack` | `_check_package_json_scripts` | CRITICAL |
+| `composer_post_install` | `_check_composer_json` | CRITICAL |
+| `gemfile_system_call` | `_check_gemfile` | CRITICAL |
+| `binding_gyp_command_substitution` | `_check_binding_gyp` | CRITICAL |
+| `cursor_nl_exec_imperative` | `_check_cursor_rule` | HIGH |
+| `mcp_local_server_command` | `_check_mcp_json` | HIGH |
+| `hidden_unicode` | all surfaces | HIGH |
+
+**Scoring:** any CRITICAL signal adds +5 (DESTRUCTIVE floor, Dafny POST-12); otherwise any HIGH signal adds +3. These paths are excluded from the added-file content scanner, so a signal is not scored twice.
+
+**Outputs:** `ai_config_poisoning` dict with `flagged_configs` list and `total`.
 
 ---
 
@@ -485,22 +513,25 @@ Unlike L1–L4, L5b verdict escalation operates on the pre-existing verdict rath
 **Purpose:** Distinguish genuine behavioural and structural consequences from benign refactoring (renames, file moves, signature preservations) and detect adversarial distributed deletions (`A03`) and sub-threshold compound attacks (`A06`) using deterministic evidence.
 
 **Architecture:**
-1. **`SymbolFact` v1 Extraction (`structural_parser.py`):** Extracts language-normalized symbol facts across Python (`ast`) and JS/TS/Go/Rust/Java (`tree-sitter`), capturing `qualified_name`, `signature_shape`, `body_norm_hash`, `body_tokens`, `calls`, `imports` (including `alias:module.target`), `guard_conditions` (`if`/`assert`/guard predicates), `has_auth_signal`, `is_exported`, and `is_hollow_body`.
-2. **5-Stage Symbol Matching (`consequence_engine/matcher.py`):** Computes a differential `ConsequenceGraph` between base and head snapshots:
-   - Stage 1: Exact `(file_path, kind, qualified_name)` match (`MODIFIED` / `UNCHANGED`)
-   - Stage 2: Exact `body_norm_hash` match across files or names (`RENAMED` / `MOVED`, confidence `1.0`)
-   - Stage 3: Same-file signature + call-set / body-token Jaccard match (`RENAMED`, confidence `≥ 0.65`)
-   - Stage 4: Cross-file signature + body Jaccard match (`MOVED`, confidence `≥ 0.65`)
-   - Stage 5: Unmatched symbols classified as `DELETED` or `ADDED`
-3. **Detectors `D01`–`D06` v2 (`consequence_engine/detectors.py`):**
-   - `D01_RENAME_MOVE`: Reconciles `RENAMED`/`MOVED` symbols (`is_benign_refactor=True`).
-   - `D02_HOLLOW_BODY`: Detects implementations gutted to pass/stub/constant returns while preserving signatures (`CRITICAL` on security/auth symbols, `HIGH` otherwise).
-   - `D03_COMPOUND_LOSS`: Resolves `A03` (distributed deletion across ≥3 files) and `A06` (compound threshold gaming across ≥2 files + security-path or exported API loss) after filtering out reconciled renames/moves.
-   - `D04_PUBLIC_API_BREAK`: Detects deleted/incompatible exported symbols with static caller breakage (including import-alias resolution `from m import fn as alias`).
-   - `D05_SECURITY_TOUCH`: Detects deleted or hollowed authentication/authorization/validation symbols (`CRITICAL`).
-   - `D06_GUARD_REGRESSION`: Detects removed `if`/`assert` guard predicates inside surviving functions even when the function body is not hollow (`CRITICAL` on security symbols, `HIGH` otherwise).
+1. **`SymbolFact` v1 Extraction (`structural_parser.py`):** Extracts language-normalized symbol facts across Python (`ast`) and JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`), Go, Rust and Java (`tree-sitter`): qualified name, kind, normalized signature, body hash, statement count, calls, imports (including aliases), guard conditions, decorators, export status and stub status. Each file also gets an explicit parser status (`AVAILABLE`, `PARSE_ERROR`, `GRAMMAR_UNAVAILABLE`, `UNSUPPORTED_EXTENSION`, `TIMEOUT`).
+2. **5-Stage Symbol Matching (`match_symbols_5_stage` in `consequence_engine.py`):**
+   - Stage 1: Exact `(symbol_id, kind)` match (`UNCHANGED` / `MODIFIED` / `GUTTED`)
+   - Stage 2: Same qualified name in a file git reports as renamed (`MOVED` / `MOVED_AND_GUTTED`)
+   - Stage 3: Cross-file move — same qualified name, or same name with matching signature or body hash (`MOVED` / `MOVED_AND_GUTTED`)
+   - Stage 4: Container rename by member overlap (cascading to members), function rename with identical body hash and signature, same-scope replacement by a no-op stub (`RENAMED` / `RENAMED_AND_GUTTED` / `AMBIGUOUS`)
+   - Stage 5: Unmatched symbols classified as `REMOVED` or `ADDED`
+3. **Detectors `D01`–`D10`:**
+   - `D01_PARSER_INCOMPLETE`: syntax errors, missing grammars, and changed source in languages without a parser (`ANALYSIS_INCOMPLETE`; WARN, or REVIEW for a head-side parse error).
+   - `D02_BODY_WEAKENING` / `D02_AMBIGUOUS_REFACTOR`: surviving, renamed or moved symbols gutted to no-op stubs; ambiguous refactors reported as incomplete.
+   - `D03_COMPOUND_LOSS`: distributed deletion (`A03`) and threshold-gaming dilution (`A06`) after renames and moves are reconciled.
+   - `D04_PUBLIC_API_BREAK`: removed or incompatible exported symbols with surviving callers, including import-alias resolution.
+   - `D05_BUILD_DEPENDENCY_DELTA`: build wrapper tampering, lifecycle scripts, manifest changes without lockfile updates.
+   - `D06_GUARD_REGRESSION`: removed decorators and rollback calls, guard polarity inversion, boolean short-circuits, state-guard removal, early-return bypass, swallowed exceptions.
+   - `D08_WORKFLOW_INTEGRITY`: `run:` expression injection, `pull_request_target` untrusted checkout, SHA pin downgrade, gate weakening, `workflow_run` artifact poisoning, unpinned third-party actions.
+   - `D09_TEST_EROSION`: tautological assertion replacement and newly skipped tests.
+   - `D10_MIGRATION_PERSISTENCE_LOSS`: `TRUNCATE` / `DROP DATABASE|SCHEMA`, irreversible and forward-only drops across SQL and migration frameworks.
 
-**Rollout modes (`consequence.mode` / `--consequence-mode`):** `shadow` (default — attaches `consequence` report block, CLI/Markdown/SARIF findings without altering legacy L3 verdict), `enforce` (escalates verdict on `D02`–`D06` and downgrades pure rename/move false positives when `D01` reconciles all deleted symbols), or `off`.
+**Policy modes (`consequence.mode`, `--consequence-mode`, the Action's `consequence-mode` input, or `PAYLOADGUARD_CONSEQUENCE_MODE`):** `shadow` (default — findings are reported in JSON, CLI, Markdown and SARIF without altering the legacy L3 verdict), `advisory` (BLOCK/REVIEW findings become verdict flags and raise SAFE to REVIEW; never exit 2), `enforce` (any BLOCK finding sets DESTRUCTIVE, exit 2; REVIEW findings raise SAFE to REVIEW; a legacy L4 CRITICAL is suppressed when parsing is complete and the SCG finds only renames and moves).
 
 ---
 
@@ -565,7 +596,7 @@ Auth, security, permission, or authorization files (`.py/.js/.ts`) deleted outri
 
 | Condition | Points |
 |---|---|
-| CI trigger string or shell execution pattern in added non-code file | +2 per match |
+| CI trigger string or shell execution pattern in added non-code file | +2 per match, capped at +4 |
 
 Patterns scanned include `curl | bash`, `wget | sh`, `chmod +x`, `setfacl`, CI trigger strings. Fires on added `.txt`, `.md`, `.yml`, and similar non-code files.
 
@@ -573,9 +604,9 @@ Patterns scanned include `curl | bash`, `wget | sh`, `chmod +x`, `setfacl`, CI t
 
 | Condition | Points |
 |---|---|
-| Package in manifest diff not in allowlist.yml | +3 per unique package |
+| Any added package not in `allowlist.yml` (with `sca.fail_on_unknown: true`) | +3 (once) |
 
-Requires `allowlist.yml` to be present in the target repo root. No-op otherwise.
+Requires `allowlist.yml` in the repository root on the target branch. No-op otherwise.
 
 **GitHub Actions poisoning signals (L2c)**
 
@@ -586,7 +617,14 @@ Requires `allowlist.yml` to be present in the target repo root. No-op otherwise.
 
 A single CRITICAL poisoning signal scores identically to a security file deletion — immediate DESTRUCTIVE. A single HIGH signal alone reaches CAUTION. Multiple flagged workflows accumulate at the single highest-severity level (one CRITICAL outweighs any number of HIGH signals for scoring purposes).
 
-**Maximum score (all signals simultaneously):** 31.
+**AI tooling configuration poisoning signals (L2d)**
+
+| Condition | Points |
+|---|---|
+| Any CRITICAL signal (`command_in_session_hook`, `command_in_folder_open_task`, `lifecycle_script_hijack`, `composer_post_install`, `gemfile_system_call`, `binding_gyp_command_substitution`) | +5 |
+| Any HIGH signal (`cursor_nl_exec_imperative`, `hidden_unicode`, `mcp_local_server_command`) | +3 |
+
+**Maximum score (all signals simultaneously):** 36 (3 + 4 + 5 + 2 + 5 + 3 + 4 + 5 + 5). Proved as Z3 P9 from the per-signal model, and as CrossHair C-03 and Dafny POST-3.
 
 ### 5.2 Verdict Thresholds
 
@@ -633,11 +671,13 @@ A single CRITICAL poisoning signal scores identically to a security file deletio
           exit 2               exit 0
 ```
 
+Not drawn: SCA (+3), added-file content flags (up to +4), Actions poisoning (+5 / +3) and AI configuration poisoning (+5 / +3); all are additive into `severity_score`. Consequence-engine findings adjust the verdict only in `advisory` or `enforce` mode (section 4.8).
+
 ---
 
 ## 6. Formal Verification
 
-PayloadGuard applies two orthogonal formal methods to its scoring logic. Both are independent
+PayloadGuard applies three independent formal methods to its scoring logic. Both are independent
 of the production code's author — the specifications are written for external verifiers and
 external tools run the checks.
 
@@ -645,15 +685,16 @@ external tools run the checks.
 
 | Method | Tool | Scope | What it proves |
 |--------|------|-------|----------------|
-| SMT proof | Z3 Solver | L3 only | P1–P10: abstract symbolic properties of the scoring model |
-| Contract verification | CrossHair | L3, L4, L5a, L5b | C1–C12, S1–S7, T1–T7, M1–M9: pre/post conditions on the actual Python code |
+| SMT proof | Z3 Solver | L3, L2c | P1–P10: abstract symbolic properties of the scoring model (P9 derives the score bound from the per-signal model) |
+| Contract verification | CrossHair | L3, L4, L5a, L5b | C1–C12 + POST-12, S1–S7, T1–T7, M1–M9: pre/post conditions on pure-Python mirrors of the scoring code |
+| Machine-checked proof | Dafny 4.9.1 | L3, L4, L5a | POST-1–12, S1–S7, T1–T8 over the entire input domain |
 
 **Z3 proofs** (`tests/proofs/test_z3_properties.py`) encode the L3 scoring logic as integer
 constraints and prove monotonicity, score bounds, and verdict ordering. Run in < 0.1 s each.
 
-**CrossHair contracts** (`verification/*.py`) symbolically execute the actual Python
-implementation — not an abstract model — and verify function pre/post conditions for all
-inputs satisfying the domain constraints. Run in ~8 s for all five tests.
+**CrossHair contracts** (`verification/*.py`) symbolically execute pure-Python mirrors of the
+scoring functions and verify function pre/post conditions for all inputs satisfying the
+domain constraints. Run in ~8 s for all five tests.
 
 ### 6.2 Pure Extraction Modules
 
@@ -663,9 +704,9 @@ self-contained pure-Python module in `verification/`:
 
 | Module | Layer | Key invariants |
 |--------|-------|----------------|
-| `consequence_pure.py` | L3 | verdict ∈ {SAFE,REVIEW,CAUTION,DESTRUCTIVE}; score ∈ [0,36]; security_file_del > 0 → DESTRUCTIVE; pli_critical → DESTRUCTIVE |
+| `consequence_pure.py` | L3 | verdict ∈ {SAFE,REVIEW,CAUTION,DESTRUCTIVE}; score ∈ [0,36]; security_file_del > 0, structural CRITICAL, actions_poisoning_critical, ai_config_poisoning_critical → DESTRUCTIVE |
 | `structural_pure.py` | L4 | DESTRUCTIVE requires BOTH ratio > threshold AND count ≥ min (dual-gate) |
-| `temporal_pure.py` | L5a | drift_score ≥ 0; zero age or velocity → CURRENT |
+| `temporal_pure.py` | L5a | drift_score ≥ 0; zero age or velocity → CURRENT (velocity must be finite) |
 | `semantic_pure.py` | L5b | mci_score ∈ [0,1]; DECEPTIVE ↔ score ≥ 0.5; no description → UNVERIFIED |
 
 ### 6.3 Running the Verification Suite
@@ -681,8 +722,9 @@ crosshair check semantic_pure    --analysis_kind PEP316 --per_condition_timeout 
 pytest tests/proofs/ -v --timeout=60
 ```
 
-Expected: all CrossHair checks exit 0 (no counterexamples). The two Z3 and five CrossHair
-pytest tests all pass.
+Expected: all CrossHair checks exit 0 (no counterexamples) and the 19 pytest proof tests pass.
+Last runs (2026-10-26): Dafny in GitHub Actions (run #16, 9 verified, 0 errors); Z3 and CrossHair
+locally. Results and environment are recorded in `PROOFS.md`.
 
 ### 6.4 Constraint
 
@@ -696,7 +738,9 @@ Dafny/Z3 restatement intended for external formal verification platforms.
 
 ## 7. Regression Validation
 
-### 6.1 Test Harness Architecture
+**Status (2026-10-26):** the results below come from live regression runs of the harness. The harness workflow pins the analyser at `fe68338` (v1.3.0), and the last live regression (2026-06-01) passed 34/34 stable cases. v1.6.0 has been verified offline against the same fixtures (`validate_manifest.py --verify-consequence` 41/41, mutation suite 16/16 with 0 false positives and 0 false negatives); a live regression against v1.6.0 has not been run.
+
+### 7.1 Test Harness Architecture
 
 The test harness (`payloadguard-plg/payloadguard-test-harness`) maintains 35 active permanent branches (plus 3 pending for future GitHub APIs), each representing a specific adversarial scenario. Each branch has a closed PR against main. Running a regression:
 
@@ -707,9 +751,9 @@ The test harness (`payloadguard-plg/payloadguard-test-harness`) maintains 35 act
 5. `ingest.py` pulls the `payloadguard-results` artifact from each workflow run and writes to SQLite
 6. `dashboard.py` visualises results with a threshold simulator; the **Last Run** summary card shows a full `YYYY-MM-DD HH:MM` timestamp linked directly to the GitHub Actions workflow run that produced the data
 
-The harness CI is pinned to the analyser at SHA `32014117afeb5c99f51045b3df0d7ba27e0a187a` (post INC-3 fix). Temporal grouping controls which cases run: `--mode stable` (default, excludes aging/temporal cases), `--mode temporal` (aging cases only), `--mode full` (all cases).
+The harness CI pins the analyser by commit SHA (currently `fe6833887f34e77e53cf7e1dcf73c37297f5fea3`, v1.3.0). Temporal grouping controls which cases run: `--mode stable` (default, excludes aging/temporal cases), `--mode temporal` (aging cases only), `--mode full` (all cases).
 
-### 6.2 Test Case Matrix
+### 7.2 Test Case Matrix
 
 **Track 1 — Core detection (Layers 1–5)**
 
@@ -776,7 +820,7 @@ RTA02 was a registered bypass; it is now closed. The fix applies `_normalize_yam
 | T24 | Workflow redefines GITHUB_TOKEN scopes — centralised policy controls API |
 | T25 | Curl command to exfiltrate $SECRETS — native egress firewall complement |
 
-### 6.3 Results at Default Thresholds
+### 7.3 Results at Default Thresholds
 
 ```
 structural deletion_ratio    : 0.20 (20%)
@@ -812,7 +856,7 @@ actions high_signal_score    : 3
 
 The one persistent miss is A06 (threshold-gaming), a known limitation of purely additive scoring with no compound detection. All Layer 2c and red-team simulation cases pass. RTA02 bypass is closed — the analyser now returns DESTRUCTIVE for the multiline curl exfiltration pattern.
 
-### 6.4 Scoring Trace for Key Cases
+### 7.4 Scoring Trace for Key Cases
 
 **T04 — April 2026 replica (DESTRUCTIVE, score ≈ 9)**
 ```
@@ -858,7 +902,7 @@ branch_age < 90 days
 
 ## 8. Configuration Reference
 
-Drop `payloadguard.yml` in the repo root. All keys are optional.
+Commit `payloadguard.yml` to the repository root. It is read from the target branch, so changes take effect once merged. All keys are optional.
 
 ```yaml
 thresholds:
@@ -876,11 +920,22 @@ semantic:
   micro_scope_churn_limit: 50          # V_s: churn threshold for scope_understated signal
   insertion_ratio_fix_threshold: 0.9   # V_r: insertion ratio threshold for phantom_additions
 
+sca:
+  fail_on_unknown: true                # +3 when any added package is not in allowlist.yml
+
+actions:
+  enabled: true
+  critical_signal_score: 5
+  high_signal_score: 3
+  trusted_oidc_consumers: []           # extra OIDC consumer actions to treat as legitimate
+
 consequence:
-  mode: shadow                         # shadow | enforce | off
-  compound_min_files: 3                # D03: distributed deletion file threshold
-  compound_min_deleted_symbols: 3      # D03: distributed deletion symbol threshold
+  enabled: true
+  mode: shadow                         # shadow | advisory | enforce
+  max_repo_files: 200                  # head files indexed for cross-file caller checks
 ```
+
+The consequence mode can also be set with `--consequence-mode`, the Action's `consequence-mode` input, or `PAYLOADGUARD_CONSEQUENCE_MODE`; the command-line flag takes precedence, then the environment variable, then this file.
 
 Out-of-order threshold lists are auto-sorted after load. Deep-merge semantics — only keys present in your file override the defaults.
 
@@ -888,25 +943,25 @@ Out-of-order threshold lists are auto-sorted after load. Deep-merge semantics �
 
 ## 9. Known Limitations
 
-### 8.1 Compound Threshold Gaming (A06) & Distributed Deletion (A03)
+### 9.1 Compound Threshold Gaming (A06) & Distributed Deletion (A03)
 
 In the legacy additive L3 scoring model, an adversary who tunes every metric to sit just below its individual threshold (`A06`) or distributes single-symbol deletions across many files (`A03` at <20% aggregate AST node ratio) scores 0 points (`SAFE`).
 
-**Mitigation in v1.4.0 (`consequence.v1`):** The SCG Consequence Engine (`consequence_engine.py`) resolves both `A03` and `A06` via `D03_COMPOUND_LOSS`, `D04_PUBLIC_API_BREAK`, and `D06_GUARD_REGRESSION` after Stage 1–4 symbol matching filters out benign renames and cross-file moves (`D01_RENAME_MOVE`). In `shadow` mode (default), these findings are emitted in the JSON `consequence` block, CLI output, Markdown PR comment, and SARIF 2.1.0 report while keeping legacy L3 verdicts unchanged; in `enforce` mode (`--consequence-mode enforce`), both `A03` and `A06` escalate to `DESTRUCTIVE` (exit code `2`) with zero false positives on multi-file refactors.
+**Mitigation in v1.4.0 (`consequence.v1`):** The SCG Consequence Engine (`consequence_engine.py`) resolves both `A03` and `A06` via `D03_COMPOUND_LOSS`, `D04_PUBLIC_API_BREAK`, and `D06_GUARD_REGRESSION` after Stage 1–4 symbol matching filters out benign renames and cross-file moves. In `shadow` mode (default), these findings are emitted in the JSON `consequence` block, CLI output, Markdown PR comment, and SARIF 2.1.0 report while keeping legacy L3 verdicts unchanged; in `enforce` mode (`--consequence-mode enforce`), both `A03` and `A06` escalate to `DESTRUCTIVE` (exit code `2`) with zero false positives on multi-file refactors.
 
-### 8.2 Generated Code Volume
+### 9.2 Generated Code Volume
 
 A PR that adds 50,000 lines of generated code (e.g. a vendored library, a protobuf output, a lock file) and also deletes meaningful source files may have its deletion ratio diluted below detection thresholds. The deletion dimensions cap at 4 regardless of additions, but ratio scoring depends on the additions-to-deletions balance.
 
-### 8.3 Grammar Coverage
+### 9.3 Grammar Coverage
 
-Structural drift analysis requires a tree-sitter grammar for non-Python languages. Languages without an installed grammar are silently skipped. A PR that guts a Ruby or PHP codebase will have no L4 signal.
+Structural analysis covers Python, JavaScript, TypeScript, Go, Rust and Java. A PR that guts a Ruby, PHP, C# or other unsupported codebase produces no L4 or symbol-level consequence signal. Since v1.6.0 the consequence engine reports such files through `D01` as `UNSUPPORTED_EXTENSION` (WARN), so the gap is visible in the report rather than silent.
 
-### 8.4 Merge Base Ambiguity
+### 9.4 Merge Base Ambiguity
 
 For repositories with complex merge histories, `merge_base()` may return multiple candidates. The implementation uses `[0]` — the first candidate returned by git. In pathological cases this may not be the optimal merge base.
 
-### 8.5 Semantic Layer Signal Coverage
+### 9.5 Semantic Layer Signal Coverage
 
 Layer 5b v2 uses structural heuristics rather than keyword lists, but coverage remains bounded by what can be inferred from description text and diff structure alone.
 
@@ -916,7 +971,7 @@ Layer 5b v2 uses structural heuristics rather than keyword lists, but coverage r
 
 *V_f acknowledgement check* uses the last two path components (e.g. `auth_handler.py` for `src/auth_handler.py`). The full filename including extension must appear in the description to suppress the signal — stem-only references ("auth_handler" without ".py") are not recognised as acknowledgement.
 
-### 8.6 AI Research Tool Context Pollution is an Out-of-Scope Threat
+### 9.6 AI Research Tool Context Pollution is an Out-of-Scope Threat
 
 PayloadGuard's threat model is a human submitting a destructive PR. It does not model the case where an AI assistant — an LLM research tool, notebook, or deep-research agent — is processing repository documents on a maintainer's behalf. In that scenario, a document *added* to the repository (not deleted from it) can contain plausible-looking but hallucinated content that lands in version control, bypassing all five layers because the problem is the LLM's context window, not the git diff.
 
@@ -930,11 +985,11 @@ Proposed future mitigations are documented in `AUDIT_LOG.md §INC-1 through §IN
 
 ---
 
-## 9. GitHub 2026 Roadmap Alignment
+## 10. GitHub 2026 Roadmap Alignment
 
 PayloadGuard complements GitHub's 2026 security roadmap without overlapping it. GitHub is building the execution-security layer — dependency locking, policy controls, egress firewalls, real-time monitoring. PayloadGuard is the **semantic consequence layer** that sits upstream: it analyzes what a change *means* before it merges, where execution-level controls cannot yet reach.
 
-### 9.1 Layer-to-Roadmap Mapping
+### 10.1 Layer-to-Roadmap Mapping
 
 | PayloadGuard Layer | What it detects | 2026 Roadmap Pillar |
 |---|---|---|
@@ -947,7 +1002,7 @@ PayloadGuard complements GitHub's 2026 security roadmap without overlapping it. 
 | L5a — Temporal | Branch staleness, semantic gap relative to target velocity | Observability — stale-context risk surfaced before execution |
 | L5b — Semantic Transparency | Deceptive descriptions, commit red-flag keywords | Policy controls — description must align with verified impact |
 
-### 9.2 Complementary, Not Overlapping
+### 10.2 Complementary, Not Overlapping
 
 ```
 GitHub 2026 secures:                      PayloadGuard secures:
@@ -963,7 +1018,7 @@ GitHub 2026 secures:                      PayloadGuard secures:
 
 GitHub ensures the merge pipeline is secure. PayloadGuard ensures the thing being merged is safe. Both are required; neither replaces the other.
 
-### 9.3 Pending Integration Points (2026)
+### 10.3 Pending Integration Points (2026)
 
 Three test cases (T23–T25) are reserved in the regression harness for GitHub 2026 APIs that are not yet available:
 
