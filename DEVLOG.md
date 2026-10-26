@@ -2,6 +2,16 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-26 — Harness scan history; live regression blocked; fixture aging (AUDIT_LOG §H1–§H3)
+
+**Scan history:** workflow artifacts expire after 90 days, so the April–May `results.db` cannot be rebuilt. Harness `tools/collect_history.py` (branch `data/scan-history`) records the `PayloadGuard` check run of every scan on the fixture PRs' head commits in `regression-reports/scan_history.jsonl`, with the analyser commit and version resolved from the workflow pin at each report's target commit. 423 scans, 2026-04-24 to 2026-05-31, 17 sweeps; the last sweep (`fe68338`) matches 34/34 exit codes and 33/34 verdicts against the current manifest.
+
+**Live regression:** harness PR #78 (pin to v1.6.0) merged as `defb060`. Regression run #27 failed on its first API call: `REGRESSION_PAT` returns 401 (§H3). No PR was reopened.
+
+**Preflight** (v1.6.0 against harness `main` `defb060`, live PR bodies): 38/38 exit codes match. Branch age is measured against the target commit, so the PR #78 merge aged every fixture to 152–185 days; 14 verdicts are raised by age alone. §H1: the six CAUTION-expected stable cases reach DESTRUCTIVE for age once `main` has a commit dated from 2026-11-22. §H2: RTA01 expects REVIEW from the content-scan signal that v1.2.0 removed for workflow files.
+
+**Tests:** `test_analyzer.py` 311 passed (no analyser code changed).
+
 ## 2026-10-26 — Documentation brought up to date with v1.6.0
 
 Current-state statements corrected against the code (history entries left as written):

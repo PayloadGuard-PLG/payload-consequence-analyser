@@ -505,6 +505,29 @@ Action-path evidence was produced by executing the `run:` bodies of `action.yml`
 | §V10 | `crosshair check temporal_pure --analysis_kind PEP316 --per_condition_timeout 30` (CrossHair 0.0.112) found `analyze_drift_pure(0, float("inf"), 0.25, 0.5)` returning `drift_score` NaN (0 × ∞) with status CURRENT, violating T-02 and T-05. The precondition `target_velocity >= 0.0` admitted ∞, and `TemporalDriftAnalyzer.analyze_drift()` accepted ∞ and NaN (it rejected only negative values). Not reachable from the CLI, where velocity is `len(commits) / 90` with `max_count=1000` (≤ 11.111), but the class is public. The 10-second wrapper test in `tests/proofs/` did not reach this input. Found while running the proof suite. | MEDIUM | **Fixed** | `c74f612` — `analyze_drift()` raises `ValueError` for non-finite age or velocity; `temporal_pure.py` adds `pre: math.isfinite(target_velocity)`. Tests: 3 production cases + deterministic contract test (4 fail before, 4 pass after). Retest: the same CrossHair run exits 0 |
 | §V11 | The `payloadguard` console script exited 1 with `UnicodeEncodeError` when stdout could not encode the report's symbols (`→`, emoji): redirected output on Windows without UTF-8 mode uses cp1252. `print_report()` runs before the reports are saved, so no report was written and a DESTRUCTIVE verdict surfaced as an analysis error. The Action and every CLI test set `PYTHONUTF8=1`, which masked it. Found by v1.6.0 release verification (built wheel installed in a fresh virtualenv). | MEDIUM | **Fixed** | `50d6723` — `main()` reconfigures stdout/stderr with `errors="replace"`. Test: `test_verdict_exit_code_survives_non_utf8_stdout` (`PYTHONIOENCODING=cp1252`; exit 1 before, 2 after) |
 
+## Harness Regression Register — 2026-10-26 (analyser v1.6.0, harness `main` `defb060`)
+
+Sources: harness `regression-reports/scan_history.jsonl` (423 `PayloadGuard` check runs on the fixture PRs' head commits, 2026-04-24 to 2026-05-31, collected by `tools/collect_history.py`; harness branch `data/scan-history`) and an offline preflight: `analyze.py <harness> <fixture head SHA> main --pr-description <live PR body>`, default `shadow` mode, harness `main` `defb060` (dated 2026-10-26), analyser `main` `19215fd` (v1.6.0 code).
+
+Live run: regression run #27 (`workflow_dispatch`, full mode) failed before reopening any PR (§H3). No live sweep has run on the v1.6.0 pin. The last live sweep on record (2026-05-31 14:11 UTC, analyser `fe68338`, v1.3.0) matches 34/34 exit codes and 33/34 verdicts against the current manifest (RTA01: SAFE, expected REVIEW).
+
+Preflight: 38/38 exit codes match `expected_exit_code`. Verdicts that differ from the manifest, or whose score has risen, all do so through branch age:
+
+| Cases | Group | Expected | Actual (score) | Age (days) | Signals fired |
+|---|---|---|---|---|---|
+| A03, A06 | stable | SAFE | REVIEW (2) | 185 | branch age > 180 (+2) |
+| WS07, AW04 | stable | SAFE | REVIEW (1) | 154 | branch age > 90 (+1) |
+| RT01, RT02, RT03 | stable | SAFE | REVIEW (1) | 152 | branch age > 90 (+1) |
+| T01, T02, T12, A10 | aging | SAFE | REVIEW (2) | 185 | branch age > 180 (+2) |
+| WS03, WS04, WS05, AW02, RTA03, RTA04 | stable | CAUTION | CAUTION (4) | 154 | L2c poisoning HIGH (+3), branch age > 90 (+1) |
+| RTA01 | stable | REVIEW | REVIEW (1) | 154 | branch age > 90 (+1) only (§H2) |
+
+| ID | Finding | Severity | Status | Commit |
+|---|---|---|---|---|
+| §H1 | Branch age (target commit date minus fixture commit date; `days_old` > 90 / 180 / 365 adds +1 / +2 / +3) applies to stable fixtures. Every commit on harness `main` ages all fixtures; merging harness PR #78 moved them from 4–37 days to 152–185. The six CAUTION-expected stable cases (WS03, WS04, WS05, AW02, RTA03, RTA04) score 3 from an L2c HIGH signal plus age; once age exceeds 180 days (+2) they score 5 = DESTRUCTIVE (exit 2) and fail the live regression with no analyser change. All six fixtures were committed on 2026-05-25, so this applies to any live run against a harness `main` commit dated from 2026-11-22. HARNESS.md assumed age is harmless to stable cases. | MEDIUM | Open — needs a decision: move the six cases to the aging group, raise `branch_age_days` in a harness `payloadguard.yml` on `main` (the target branch the policy is read from), or recreate the fixtures | — |
+| §H2 | RTA01 (`rta/push-rm-rf`: adds a `workflow_dispatch` workflow running `rm -rf node_modules dist build .cache`) expects REVIEW from the L2 content scan. Since v1.2.0 `_scan_added_file_content()` skips `.github/workflows/` (L2c is the exclusive workflow handler), and L2c has no signal for this content. History: REVIEW under v1.1.0 (`3201411`, "1 added file(s) contain CI trigger strings or shell execution patterns"), SAFE under v1.3.0 (`fe68338`). Under v1.6.0 it reads REVIEW only through branch age. The exit code (0) is unaffected. | LOW | Open — decide between expecting SAFE and adding a workflow signal | — |
+| §H3 | The harness `REGRESSION_PAT` secret is rejected with 401, so `regression.yml` cannot reopen fixture PRs. Run #27 (`40359379620`, 2026-10-26) exited 1 on its first API call; no PR was touched. | MEDIUM | Open — the repository owner must replace the secret | — |
+
 ---
 
 ## Next Audit Checklist
