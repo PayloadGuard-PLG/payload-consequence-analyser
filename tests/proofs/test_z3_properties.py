@@ -11,7 +11,7 @@ import pytest
 try:
     from z3 import (
         Bool, BoolVal, EnumSort, Function, If, Implies, Int, IntSort,
-        Not, Or, Real, Solver, Sum, unsat, unknown,
+        Not, Or, Real, Solver, Sum, sat, unsat, unknown,
     )
     _Z3_AVAILABLE = True
 except ImportError:
@@ -243,22 +243,95 @@ def test_p8_typosquat_cannot_yield_safe_verdict():
 
 # ── P9 ────────────────────────────────────────────────────────────────────────
 
+# MAX_SCORE as stated by consequence_pure.py (C-03) and assess_consequence.dfy (POST-3).
+_MAX_SCORE = 36
+
+
+def _assess_score_model(s, cap_content=True):
+    """
+    Total score as the sum of _assess_consequence()'s per-signal contributions, each
+    constrained to the values the code can produce. AUDIT_LOG §V8: the previous P9
+    asserted the bound as a constraint and checked its negation, so it held for any
+    bound; this model derives the score from the signals instead.
+    """
+    age = Int("age")                                    # +1 / +2 / +3 by branch age
+    s.add(Or(age == 0, age == 1, age == 2, age == 3))
+
+    dims = [Int("files_dim"), Int("ratio_dim"), Int("lines_dim")]   # each 0..3
+    for d in dims:
+        s.add(d >= 0, d <= 3)
+    files_d, ratio_d, lines_d = dims
+    largest = If(files_d >= ratio_d, If(files_d >= lines_d, files_d, lines_d),
+                 If(ratio_d >= lines_d, ratio_d, lines_d))
+    active = Sum([If(d > 0, 1, 0) for d in dims])
+    bonus_dim = largest + If(active >= 2, 1, 0)
+    deletion_dim = If(bonus_dim > 4, 4, bonus_dim)      # min(4, max + bonus)
+
+    critical_paths, security_files, unverified = Int("critical_paths"), Int("security_files"), Int("unverified")
+    content_flags, actions_flags, ai_flags = Int("content_flags"), Int("actions_flags"), Int("ai_flags")
+    for n in (critical_paths, security_files, unverified, content_flags, actions_flags, ai_flags):
+        s.add(n >= 0)
+    structural_critical, actions_critical, ai_critical = Bool("structural_critical"), Bool("actions_critical"), Bool("ai_critical")
+
+    content = If(2 * content_flags > 4, 4, 2 * content_flags) if cap_content else 2 * content_flags
+    return Sum([
+        age,
+        deletion_dim,
+        If(structural_critical, 5, 0),
+        If(critical_paths > 0, 2, 0),
+        If(security_files > 0, 5, 0),
+        If(unverified > 0, 3, 0),
+        content,
+        If(actions_critical, _CRITICAL_SCORE, If(actions_flags > 0, _HIGH_SCORE, 0)),
+        If(ai_critical, _CRITICAL_SCORE, If(ai_flags > 0, _HIGH_SCORE, 0)),
+    ])
+
+
 @_skip
-def test_p9_score_upper_bound_finite():
-    """P9: total score is bounded by a finite constant (no integer overflow risk)."""
+def test_p9_score_upper_bound_is_sum_of_signal_maxima():
+    """P9: no combination of signals makes the total exceed MAX_SCORE (36)."""
     s = Solver()
     s.set("timeout", 5000)
-
-    score = Int("score")
-    # Upper bound: all non-L2c signals max out + CRITICAL_SCORE
-    _HARD_UPPER = _MAX_OTHER_SCORE + _CRITICAL_SCORE  # = 24
-
-    s.add(score >= 0, score <= _HARD_UPPER)
-
-    # Attempt: score exceeds the hard upper bound while satisfying constraints
-    s.add(score > _HARD_UPPER)
-
+    score = _assess_score_model(s)
+    s.add(score > _MAX_SCORE)
     _check(s)
+
+
+@_skip
+def test_p9_bound_is_attained():
+    """P9 is not vacuous: MAX_SCORE itself is reachable."""
+    s = Solver()
+    s.set("timeout", 5000)
+    score = _assess_score_model(s)
+    s.add(score == _MAX_SCORE)
+    assert s.check() == sat, "MAX_SCORE is not reachable — the model or the bound is wrong"
+
+
+@_skip
+def test_p9_bound_depends_on_signal_caps():
+    """P9 exercises the model: without the content-flag cap (min(4, 2n)) the bound fails."""
+    s = Solver()
+    s.set("timeout", 5000)
+    score = _assess_score_model(s, cap_content=False)
+    s.add(score > _MAX_SCORE)
+    assert s.check() == sat
+
+
+def test_p9_model_matches_assess_consequence():
+    """Every signal at its maximum in the production scorer yields exactly MAX_SCORE."""
+    from unittest.mock import patch
+
+    import analyze
+
+    with patch("git.Repo"):
+        analyzer = analyze.PayloadAnalyzer("/fake/repo", "feature", "main")
+    verdict = analyzer._assess_consequence(
+        files_deleted=10_000, lines_deleted=1_000_000, days_old=10_000, deletion_ratio=100.0,
+        structural_severity="CRITICAL", critical_file_deletions=10, security_file_deletions=1,
+        unverified_dependencies=5, content_flags=10, actions_poisoning_flags=3,
+        actions_poisoning_critical=True, ai_config_poisoning_flags=3, ai_config_poisoning_critical=True,
+    )
+    assert verdict["severity_score"] == _MAX_SCORE
 
 
 # ── P10 ───────────────────────────────────────────────────────────────────────
