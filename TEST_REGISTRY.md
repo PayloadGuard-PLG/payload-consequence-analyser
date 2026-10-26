@@ -1,7 +1,7 @@
 # PayloadGuard — Test Registry
 
-**Last run:** 2026-10-26 12:41 UTC  
-**Result:** 326 passed · 0 skipped · 0 failed · 326 total
+**Last run:** 2026-10-26 12:58 UTC  
+**Result:** 327 passed · 0 skipped · 0 failed · 327 total
 
 Run with: `python -m pytest test_analyzer.py tests/proofs/ --timeout=30 -v`  
 Regenerate this file: `python tools/gen_test_registry.py`
@@ -422,6 +422,7 @@ Regenerate this file: `python tools/gen_test_registry.py`
 - ✓ `test_pr_cannot_allowlist_its_own_dependency`
 - ✓ `test_pr_cannot_downgrade_its_own_consequence_mode`
 - ✓ `test_pr_cannot_raise_its_own_thresholds`
+- ✓ `test_verdict_exit_code_survives_non_utf8_stdout`
 
 ## test_analyzer.py — TestActionPolicyTrustBoundary
 
