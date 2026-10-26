@@ -520,7 +520,7 @@ PayloadAnalyzer.analyze()
        ↓
   Fix in: analyze.py (the relevant layer or signal)
        ↓
-  Verify: python -m pytest test_analyzer.py test_consequence_engine.py tests/proofs/ -q  (373 pass, 15 skip without Z3/CrossHair; 388 pass with them)
+  Verify: python -m pytest test_analyzer.py test_consequence_engine.py tests/proofs/ -q  (374 pass, 17 skip without Z3/CrossHair; 391 pass with them)
        ↓
   Update: AUDIT_LOG.md (RESOLVED), CLAUDE.md (remove from Open Findings), DEVLOG.md (session entry)
 ```

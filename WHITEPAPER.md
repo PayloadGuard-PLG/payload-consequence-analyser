@@ -677,7 +677,7 @@ crosshair check structural_pure  --analysis_kind PEP316 --per_condition_timeout 
 crosshair check temporal_pure    --analysis_kind PEP316 --per_condition_timeout 30
 crosshair check semantic_pure    --analysis_kind PEP316 --per_condition_timeout 30
 
-# Via pytest (16 pass: 10 Z3 properties + 5 CrossHair wrappers + 1 temporal contract regression, ~10 s)
+# Via pytest (19 pass: 13 Z3 tests + 5 CrossHair wrappers + 1 temporal contract regression, ~12 s)
 pytest tests/proofs/ -v --timeout=60
 ```
 

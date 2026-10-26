@@ -2,12 +2,15 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch state:** §V1–§V7 are on `main` (PRs #102, #104, #105, #106, #107; `main` at `9e83cce`). Branches `fix/policy-from-target-branch`, `fix/action-pr-head-sha`, `fix/pyproject-packaging`, `fix/d01-unsupported-extension` and `fix/v5-v7` are merged and can be deleted. Open PR #108 (`fix/policy-from-target-branch` → `main`, head `88c0cfc`, the #103 merge commit) changes no files and can be closed. Active: `docs/v1.5.0-version-history-and-proofs` (from `9e83cce`) — version history, proof runs, §V10 fix and the v1.6.0 release bump; not merged. Release procedure: after merge, confirm the merge commit's tree equals the verified branch tree and CI is green, then tag it `v1.6.0` and push the tag (`publish.yml` builds and uploads to PyPI).
+- **Branch state:** `main` at `6c3df91` = **v1.6.0, released**: tag `v1.6.0` on the PR #110 merge commit (tree identical to the verified tree `f4477970…`; #110 checks passed); "Publish to PyPI" run 40350394223 succeeded; `pip install payloadguard-plg==1.6.0` from PyPI verified in a fresh virtualenv. PR #108 was closed without merging (no-op). The six fix/docs branches of this work are deleted. Active: `fix/z3-p9-score-bound` — §V8 fix and this handover; not merged.
+- **§V8 Z3 P9 repair (2026-10-26, branch `fix/z3-p9-score-bound`):**
+  - §V8 fixed (`4da89c4`): P9 asserted its bound as a constraint and checked the negation, so it passed for any bound (0, −100). It now builds the score from `_assess_consequence()`'s per-signal contributions and proves score ≤ 36; companion tests show 36 is reachable, that dropping the content-flag cap breaks the bound, and that the production scorer with every signal maxed returns 36. A bound of 35 yields a counterexample.
+  - **Tests:** 391 passed with Z3/CrossHair (`tests/proofs/` 19); 374 passed, 17 skipped without them.
 - **Version history + proof runs + §V10 (2026-10-26, branch `docs/v1.5.0-version-history-and-proofs`):**
   - Docs brought to v1.5.0 (CLAUDE.md current version and changelog incl. "Unreleased" §V1–§V7; SYSTEM_BLUEPRINT, WHITEPAPER, llms.txt, VERIFICATION, PROOFS). Stale proof records corrected (Z3 table vs actual P1–P10; C-03 bound 36; proof-suite counts).
   - Proof runs: Z3 P1–P10 10/10 and CrossHair wrappers 5/5 (`tests/proofs/`, z3-solver 5.3.2.0, crosshair-tool 0.0.112, local Windows/Python 3.14). Full CrossHair CLI (`--per_condition_timeout 30`): `consequence_pure`, `structural_pure`, `semantic_pure` 0 counterexamples; `temporal_pure` counterexample → §V10. Dafny run #16 (GitHub Actions, `9e83cce`): 7 + 1 + 1 verified, 0 errors — first recorded verification of the Sprint 1 `assess_consequence.dfy` (§V9 fixed).
   - §V10 fixed (`c74f612`): `TemporalDriftAnalyzer.analyze_drift()` accepted ∞/NaN velocity (0 × ∞ = NaN → CURRENT); now raises `ValueError` for non-finite age or velocity, and `temporal_pure.py` adds `pre: math.isfinite(target_velocity)`. CrossHair retest exits 0.
-  - Open: §V8 (LOW) — Z3 P9 is vacuous as encoded.
+  - §V8 fixed later on `fix/z3-p9-score-bound` (see above).
   - **Tests:** 387 passed with Z3/CrossHair installed (368 + 15 proof + 4 §V10); 372 passed, 15 skipped without them.
 - **§V5–§V7 Action outputs, consequence-mode input, JS/TS module extensions (2026-10-26, branch `fix/v5-v7`):**
   - §V5 fixed (`3780691`): the action's `verdict` output mapped exit 0 to SAFE; it is now read from the JSON report (exit-code mapping as fallback), so REVIEW and CAUTION are emitted.
@@ -89,7 +92,7 @@ everse_sql, empty/missing downgrade() or down() functions, or missing/empty roll
   - `scripts/pc-smoke-test.sh`: one-command build+run+verify. Run with `sudo bash scripts/pc-smoke-test.sh`.
 - **Phase 2 Stage 2 (Z3 proofs):** `tests/proofs/test_z3_properties.py`: P1–P10. `_MAX_OTHER_SCORE` updated 19→24 (Sprint 1).
 - **Phase 2 Stage 1 (auto-remediation):** `remediate.py` `WorkflowRemediator` operational.
-- **Test suite:** `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` → **373 passed, 15 skipped** without Z3/CrossHair; **388 passed** with them installed (`tests/proofs/` 16 tests) (2026-10-26).
+- **Test suite:** `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` → **374 passed, 17 skipped** without Z3/CrossHair; **391 passed** with them installed (`tests/proofs/` 19 tests) (2026-10-26).
 - **Open findings:** INC-3 (direct push to main).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
