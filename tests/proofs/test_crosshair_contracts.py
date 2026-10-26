@@ -133,6 +133,45 @@ def test_crosshair_temporal_drift_contracts():
     )
 
 
+def _pep316_holds(func, module, kind, args, ret=None):
+    """Evaluate each `pre:` or `post:` clause of func's PEP316 docstring for args."""
+    env = dict(vars(module), **args, __return__=ret, implies=lambda a, b: (not a) or b)
+    clauses = [
+        line.strip()[len(kind) + 1:].strip()
+        for line in (func.__doc__ or "").splitlines()
+        if line.strip().startswith(kind + ":")
+    ]
+    assert clauses, f"no {kind}: clauses found"
+    return [bool(eval(clause, env)) for clause in clauses]  # trusted repository source
+
+
+@_skip_no_verification
+def test_temporal_contract_excludes_non_finite_velocity():
+    """
+    AUDIT_LOG §V10: `crosshair check temporal_pure --per_condition_timeout 30` found
+    analyze_drift_pure(0, inf, 0.25, 0.5) returning drift_score nan (0 * inf) with
+    status CURRENT, violating T-02 and T-05. The contract domain must exclude the input
+    (production raises ValueError for it), and every postcondition must hold at
+    finite inputs around it. Deterministic: does not need crosshair-tool.
+    """
+    sys.path.insert(0, str(_VERIFICATION_DIR))
+    try:
+        import temporal_pure
+    finally:
+        sys.path.remove(str(_VERIFICATION_DIR))
+    func = temporal_pure.analyze_drift_pure
+
+    counterexample = dict(branch_age_days=0, target_velocity=float("inf"),
+                          warning_threshold=0.25, critical_threshold=0.5)
+    assert not all(_pep316_holds(func, temporal_pure, "pre", counterexample))
+
+    for age, velocity in [(0, 1e308), (1, 0.25), (2, 0.25), (1, 0.5), (10**6, 1e300), (0, 0.0)]:
+        args = dict(branch_age_days=age, target_velocity=velocity,
+                    warning_threshold=0.25, critical_threshold=0.5)
+        assert all(_pep316_holds(func, temporal_pure, "pre", args)), args
+        assert all(_pep316_holds(func, temporal_pure, "post", args, func(**args))), args
+
+
 # ---------------------------------------------------------------------------
 # Layer 4 — Structural dual-gate (structural_pure.py)
 # ---------------------------------------------------------------------------

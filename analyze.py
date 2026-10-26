@@ -18,6 +18,7 @@ import git
 import re
 import sys
 import json
+import math
 import textwrap
 import yaml
 from datetime import datetime, timezone, timedelta
@@ -652,8 +653,13 @@ class TemporalDriftAnalyzer:
         self.CRITICAL_THRESHOLD = critical_threshold
 
     def analyze_drift(self) -> Dict[str, Union[str, float, int]]:
-        if self.branch_age_days < 0 or self.target_velocity < 0:
-            raise ValueError("Age and velocity metrics must be non-negative.")
+        # Non-finite inputs are rejected too: 0 * inf is NaN, which compares below
+        # every threshold and would be classified CURRENT.
+        if not all(
+            math.isfinite(v) and v >= 0
+            for v in (self.branch_age_days, self.target_velocity)
+        ):
+            raise ValueError("Age and velocity metrics must be finite and non-negative.")
 
         drift_score = self.branch_age_days * self.target_velocity
 
