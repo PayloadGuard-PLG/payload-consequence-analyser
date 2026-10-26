@@ -3375,8 +3375,12 @@ class TestActionPolicyTrustBoundary(unittest.TestCase):
     def tearDownClass(cls):
         _force_rmtree(cls.tmp)
 
-    def _pr_scan(self, name, head_repo, head_branch, files, description):
-        """Commit files on head_branch in head_repo, check the PR out as CI does, run the scan steps."""
+    def _pr_scan(self, name, head_repo, head_branch, files, description, event_head_sha=True):
+        """Commit files on head_branch in head_repo, check the PR out as CI does, run the scan steps.
+
+        event_head_sha=False leaves github.event.pull_request.head.sha empty, as on
+        events without a pull_request payload.
+        """
         import yaml
 
         _run_git(head_repo, "checkout", "-q", "-B", head_branch, "origin/main")
@@ -3402,7 +3406,7 @@ class TestActionPolicyTrustBoundary(unittest.TestCase):
             "github.base_ref": "main",
             "github.head_ref": head_branch,
             "github.workspace": workspace,
-            "github.event.pull_request.head.sha": head_sha,
+            "github.event.pull_request.head.sha": head_sha if event_head_sha else "",
             "inputs.pr-description": description,
             "inputs.save-markdown": "payloadguard-report.md",
         }
@@ -3457,17 +3461,48 @@ class TestActionPolicyTrustBoundary(unittest.TestCase):
         self.assertEqual(outputs["exit_code"], "0")
         self.assertEqual(outputs["verdict"], "SAFE")
 
-    @unittest.expectedFailure
-    def test_fork_pr_scans_the_pr_head_commit(self):
-        """AUDIT_LOG §V2 (open): the head is resolved by branch name, so a fork PR
-        from its own `main` scans the base repository's `main` against itself."""
-        fork = os.path.join(self.tmp, "fork")
+    def _fork(self, name):
+        fork = os.path.join(self.tmp, name)
         _run_git(self.tmp, "clone", "-q", self.upstream, fork)
+        return fork
+
+    # AUDIT_LOG §V2: the head must be resolved from the PR head commit. A fork's
+    # branch does not exist in the base repository, and a same-named one does.
+
+    def test_fork_pr_from_colliding_branch_name_scans_the_pr_head(self):
+        """A fork PR from the fork's `main` previously diffed the base `main` against itself."""
         outputs, report, head_sha = self._pr_scan(
-            "fork-main", fork, "main", {"auth.py": _POLICY_AUTH_GUTTED}, "Tidy auth module",
+            "fork-main", self._fork("fork-a"), "main", {"auth.py": _POLICY_AUTH_GUTTED}, "Tidy auth module",
         )
         self.assertEqual(report["temporal"]["branch_commit_hash"], head_sha[:7])
         self.assertEqual(outputs["exit_code"], "2")
+        self.assertEqual(outputs["verdict"], "DESTRUCTIVE")
+
+    def test_fork_pr_from_fork_only_branch_scans_the_pr_head(self):
+        """A fork PR from a branch absent in the base repository previously exited 1."""
+        outputs, report, head_sha = self._pr_scan(
+            "fork-patch", self._fork("fork-b"), "patch-1", {"auth.py": _POLICY_AUTH_GUTTED}, "Tidy auth module",
+        )
+        self.assertNotIn("error", report)
+        self.assertEqual(report["temporal"]["branch_commit_hash"], head_sha[:7])
+        self.assertEqual(outputs["exit_code"], "2")
+        self.assertEqual(outputs["verdict"], "DESTRUCTIVE")
+
+    def test_head_ref_fallback_without_pull_request_payload(self):
+        outputs, report, head_sha = self._pr_scan(
+            "no-payload", self.seed, "feature/fallback", {"auth.py": _POLICY_AUTH_GUTTED}, "Tidy auth module",
+            event_head_sha=False,
+        )
+        self.assertEqual(report["temporal"]["branch_commit_hash"], head_sha[:7])
+        self.assertEqual(outputs["exit_code"], "2")
+
+    def test_legitimate_fork_pr_passes_through_action(self):
+        outputs, report, head_sha = self._pr_scan(
+            "fork-benign", self._fork("fork-c"), "patch-2", _POLICY_README_EDIT, "Document login helper usage",
+        )
+        self.assertEqual(report["temporal"]["branch_commit_hash"], head_sha[:7])
+        self.assertEqual(outputs["exit_code"], "0")
+        self.assertEqual(outputs["verdict"], "SAFE")
 
 
 if __name__ == "__main__":
