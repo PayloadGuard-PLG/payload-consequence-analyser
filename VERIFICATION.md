@@ -230,7 +230,7 @@ CI runs Dafny automatically on any PR touching `verification/dafny/**` via `.git
 
 ```bash
 pytest tests/proofs/ -v --timeout=60
-# Expected: 274 pass, 7 skip
+# Expected: 15 passed (10 Z3 properties + 5 CrossHair wrappers)
 ```
 
 ---

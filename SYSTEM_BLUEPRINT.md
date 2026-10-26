@@ -1,6 +1,6 @@
 # PayloadGuard — System Blueprint
 
-**Version:** 1.4.0 (branch `main`) | **Updated:** 2026-10-23
+**Version:** 1.5.0 (branch `main`, plus post-release fixes §V1–§V7) | **Updated:** 2026-10-26
 
 This document is the authoritative reference for the repository structure, module roles, production
 dependencies, and the end-to-end analysis pipeline. Keep it in sync with the codebase; the code
@@ -74,10 +74,10 @@ payload-consequence-analyser/
 ├── orchestrator.py                   # R&D only — AIntegrity integration, not in production path
 ├── trust_grader.py                   # R&D only — TrustDecayModel / TrustGradingEngineV4, not wired in
 ├── action.yml                        # GitHub Action composite wrapper (inputs, outputs, steps)
-├── pyproject.toml                    # package: payloadguard-plg v1.0.2; entry payloadguard=analyze:main
+├── pyproject.toml                    # package: payloadguard-plg v1.5.0 (py-modules incl. consequence_engine); entry payloadguard=analyze:main
 ├── requirements.txt                  # Python runtime + test dependencies
-├── test_analyzer.py                  # pytest suite: 284 pass (Z3/CrossHair proof tests skip without external install)
-├── test_consequence_engine.py        # pytest suite: 31 pass (SymbolFact v1, SCG matching, D01-D06 v2, SARIF)
+├── test_analyzer.py                  # pytest suite: 307 pass (policy, Action-path and packaging tests included)
+├── test_consequence_engine.py        # pytest suite: 61 pass (SymbolFact v1, SCG matching, D01–D10, SARIF)
 ├── part1.txt                         # stale scratch artifact — candidate for removal
 │
 ├── AUDIT_LOG.md                      # architectural findings + incident reports (source of truth)
@@ -520,7 +520,7 @@ PayloadAnalyzer.analyze()
        ↓
   Fix in: analyze.py (the relevant layer or signal)
        ↓
-  Verify: python -m pytest test_analyzer.py test_consequence_engine.py tests/proofs/ -q  (315 pass, 7 skip)
+  Verify: python -m pytest test_analyzer.py test_consequence_engine.py tests/proofs/ -q  (368 pass, 15 skip without Z3/CrossHair; 383 pass with them)
        ↓
   Update: AUDIT_LOG.md (RESOLVED), CLAUDE.md (remove from Open Findings), DEVLOG.md (session entry)
 ```

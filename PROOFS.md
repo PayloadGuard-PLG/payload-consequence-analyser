@@ -36,6 +36,11 @@ Generated: 2026-05-28T19:46:34Z
 
 ### Committed verification output
 
+**Status (2026-10-26):** the output below was generated on 2026-05-28. `structural_drift.dfy` and
+`temporal_drift.dfy` are unchanged since then. `assess_consequence.dfy` was changed on 2026-06-11
+(`257d1f3`, Sprint 1: `MAX_SCORE` 31 → 36, POST-12 added), and no verification output for the
+current file is committed. Re-verification is pending (`AUDIT_LOG.md` §V9).
+
 ```
 ## assess_consequence.dfy
 Dafny program verifier finished with 7 verified, 0 errors
@@ -196,7 +201,7 @@ Source: [`verification/consequence_pure.py`](verification/consequence_pure.py)
 |---|---|
 | C-01 | `verdict in {"SAFE", "REVIEW", "CAUTION", "DESTRUCTIVE"}` |
 | C-02 | `severity_score >= 0` |
-| C-03 | `severity_score <= 31` |
+| C-03 | `severity_score <= 36` |
 | C-04 | `verdict == "SAFE" ↔ severity_score < 1` |
 | C-05 | `verdict == "REVIEW" ↔ 1 <= severity_score < 3` |
 | C-06 | `verdict == "CAUTION" ↔ 3 <= severity_score < 5` |
@@ -206,6 +211,7 @@ Source: [`verification/consequence_pure.py`](verification/consequence_pure.py)
 | C-10 | `actions_poisoning_critical → verdict == "DESTRUCTIVE"` |
 | C-11 | `all-zero inputs → verdict == "SAFE"` |
 | C-12 | `deletion_dim ∈ [0, 4]` |
+| POST-12 | `ai_config_poisoning_critical → verdict == "DESTRUCTIVE"` |
 
 ### L4 Contracts (S1–S7)
 
@@ -270,15 +276,19 @@ pytest tests/proofs/test_z3_properties.py -m proof -v --timeout=30
 | Property | What is proven |
 |---|---|
 | P1 | `oidc_elevation_typosquatted` fires → score contribution ≥ CRITICAL_SCORE (5) |
-| P2 | Typosquat with zero other signals → score ≥ DESTRUCTIVE threshold (5) |
-| P3 | Score monotonicity — adding a signal never decreases the verdict |
-| P4 | SAFE verdict → score < DESTRUCTIVE threshold |
-| P5 | DESTRUCTIVE verdict → score ≥ DESTRUCTIVE threshold |
-| P6 | Both SAFE and DESTRUCTIVE cannot hold simultaneously |
-| P7 | Every score value in [0, 31] maps to exactly one verdict |
-| P8 | Safety-critical floor: `security_file_deletions > 0` forces score ≥ 5 |
-| P9 | Safety-critical floor: `structural_severity == CRITICAL` forces score ≥ 5 |
-| P10 | Empty-input guarantee: all-zero inputs produce score = 0 → SAFE |
+| P2 | Typosquat (CRITICAL +5) with zero other signals → score ≥ DESTRUCTIVE threshold (5) |
+| P3 | No trust-signal subtraction can reduce a typosquat score below the DESTRUCTIVE threshold |
+| P4 | CRITICAL_SCORE > HIGH_SCORE (severity mapping is strictly ordered) |
+| P5 | Adding a CRITICAL signal to any base score never decreases the total |
+| P6 | SAFE verdict ↔ score < REVIEW threshold (both directions) |
+| P7 | Identical scores always produce identical verdicts |
+| P8 | Any score that includes a typosquat contribution cannot be SAFE |
+| P9 | Total score is bounded by `_MAX_OTHER_SCORE + CRITICAL_SCORE` (24 + 5) — vacuous as encoded, see note |
+| P10 | Zero signals → score = 0 → SAFE |
+
+**Last run:** 2026-10-26 — 10 passed (`z3-solver` 5.3.2.0), Windows 11, Python 3.14.3, on `main` `9e83cce`.
+
+**Note on P9:** the test adds `score <= _HARD_UPPER` as a constraint and then checks `score > _HARD_UPPER`, which is unsatisfiable by construction; it does not relate the bound to the scoring model. The code comment also states the bound as 24 rather than 29. The score upper bound is established by CrossHair C-03 and Dafny POST-3. Recorded as `AUDIT_LOG.md` §V8.
 
 ---
 
@@ -287,8 +297,9 @@ pytest tests/proofs/test_z3_properties.py -m proof -v --timeout=30
 ### Dafny
 
 ```bash
-# Install (requires .NET SDK)
-dotnet tool install --global dafny   # installs 4.x with bundled Z3
+# Install Dafny 4.9.1 from the release zip, which bundles Z3 4.12.1
+# (the dotnet tool package does not bundle Z3). CI does the same:
+# .github/workflows/verify-dafny.yml (also runnable via workflow_dispatch).
 
 # Verify
 dafny verify verification/dafny/assess_consequence.dfy
@@ -315,9 +326,9 @@ crosshair check semantic_pure    --analysis_kind PEP316 --per_condition_timeout 
 ### Z3 + full proof suite
 
 ```bash
-pip install z3-solver pytest
+pip install z3-solver crosshair-tool pytest pytest-timeout
 pytest tests/proofs/ -v --timeout=60
-# Expected: 272 pass, 7 skip
+# Expected: 15 passed (10 Z3 properties + 5 CrossHair contract wrappers)
 ```
 
 ---
