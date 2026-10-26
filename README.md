@@ -250,7 +250,9 @@ python analyze.py . feature/my-branch main   --save-json reports/scan.json   --s
 
 ## Configuration (`payloadguard.yml`)
 
-Place `payloadguard.yml` in your repository root to customize rules and thresholds. All fields are optional:
+Place `payloadguard.yml` in your repository root to customize rules and thresholds. All fields are optional.
+
+`payloadguard.yml` and `allowlist.yml` are read from the target branch (for example `main`), not from the branch being scanned. A pull request cannot change the policy its own scan runs under; edits to either file take effect once merged.
 
 ```yaml
 # Consequence Engine Configuration
