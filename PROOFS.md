@@ -199,6 +199,23 @@ crosshair check semantic_pure    --analysis_kind PEP316 --per_condition_timeout 
 **Expected result:** exit code 0, no output. Any counterexample is printed to stdout with
 the specific input values and violated contract name.
 
+**Last run (2026-10-26):** the commands above with `--report_all`, CrossHair 0.0.112, local
+Windows 11 / Python 3.14.3, after the §V10 fix (`c74f612`). "Confirmed over all paths" means
+CrossHair exhausted every execution path; "Not confirmed" means no counterexample was found
+within the 30 s per-condition budget but the path space was not exhausted (typical for float
+arithmetic).
+
+| Module | Exit | Time | Confirmed over all paths | Not confirmed | Counterexamples |
+|---|---|---|---|---|---|
+| `consequence_pure` | 0 | 366 s | 1 (C-12, `deletion_dim`) | 12 (C-01–C-11, POST-12) | 0 |
+| `structural_pure` | 0 | 224 s | 0 | 7 (S-01–S-07) | 0 |
+| `temporal_pure` | 0 | 219 s | 0 | 7 (T-01–T-07) | 0 |
+| `semantic_pure` | 0 | 11 s | 9 (M-01–M-09) | 0 | 0 |
+
+Before the §V10 fix, `temporal_pure` exited 1 with a counterexample
+(`analyze_drift_pure(0, float("inf"), 0.25, 0.5)` → `drift_score` NaN, violating T-02 and T-05).
+The five pytest wrappers in `tests/proofs/` use a 10 s budget and did not reach that input.
+
 ### L3 Contracts (C1–C12)
 
 Source: [`verification/consequence_pure.py`](verification/consequence_pure.py)
