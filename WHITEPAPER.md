@@ -189,7 +189,7 @@ git.Repo(workspace)
 | `action.yml` | Composite GitHub Action definition |
 | `agent/` | eBPF runtime defence agent (Go + cilium/ebpf) |
 | `agent/bpf/probe.c` | 4 tracepoint probes + block mode BPF maps |
-| `test_analyzer.py` | 322-test unit, integration, policy, Action-path and packaging suite |
+| `test_analyzer.py` | 332-test unit, integration, policy, Action-path and packaging suite |
 | `test_consequence_engine.py` | 61-test SCG Consequence Engine unit & integration suite |
 | `tests/proofs/` | Z3 SMT proofs (P1–P11, 18 tests) + CrossHair pytest wrappers (5) + temporal contract regression (1) + L3 model parity (1) |
 | `verification/` | CrossHair pure extraction modules — consequence, structural, temporal, semantic — and Dafny specifications (`verification/dafny/`) |
@@ -470,7 +470,7 @@ Five independent signals, each contributing to `mci_score`:
 | 0.0 | `TRANSPARENT` | No change |
 | (no description) | `UNVERIFIED` | Escalates SAFE→REVIEW |
 
-Unlike L1–L4, L5b verdict escalation operates on the pre-existing verdict rather than contributing to the numerical `severity_score`. This allows it to upgrade a SAFE verdict on a low-volume deceptive PR without interfering with the scoring model's calibration.
+Unlike L1–L4, L5b adds no evidence points: it raises the verdict produced by L3. The raised verdict takes the severity and recommendation of its new status, and its score rises to the lowest score of that band (REVIEW 1, CAUTION 3, DESTRUCTIVE 5), so the final verdict stays in the L3 score bands; `escalation_score` records the points added (AUDIT_LOG §V12). This allows L5b to upgrade a SAFE verdict on a low-volume deceptive PR without changing the calibration of the content signals.
 
 **Output:** `semantic` dict with `status`, `is_deceptive`, `mci_score`, `signals` list, `semantic_claim` (scope, dominant_op, raw_tokens), `diff_reality` (churn, insertion_ratio, ext_count, structural_alterations, sensitive_paths), `matched_keyword` (first signal, for backwards compatibility), `directive` string.
 

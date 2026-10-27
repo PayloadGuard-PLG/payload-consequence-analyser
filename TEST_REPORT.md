@@ -1,10 +1,10 @@
 # PayloadGuard — Test Run Report
 
-**Date:** 2026-10-27 11:16 UTC  
+**Date:** 2026-10-27 15:13 UTC  
 **Environment:** Python 3.14.3, pytest 9.1.1, z3-solver 5.3.2.0, crosshair-tool 0.0.112, tree-sitter 0.26.0  
 **Platform:** Windows 11 (local)  
-**Commit:** `1d2c719`  
-**Result:** 408 passed · 0 skipped · 0 failed
+**Commit:** `529014e`  
+**Result:** 418 passed · 0 skipped · 0 failed
 
 Run with: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -v`
 
@@ -110,6 +110,17 @@ Run with: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -
 
 - ✓ `test_deception_on_age_only_caution_stays_caution`
 - ✓ `test_deception_on_content_caution_escalates_to_destructive`
+
+## test_analyzer.py::TestEscalatedVerdictFields
+
+- ✓ `test_deception_on_age_only_caution_keeps_status_and_score`
+- ✓ `test_deception_on_clean_change_reports_caution`
+- ✓ `test_deception_on_content_caution_reports_destructive`
+- ✓ `test_l3_fields_keep_their_values`
+- ✓ `test_missing_description_reports_review`
+- ✓ `test_raise_keeps_a_score_already_in_band`
+- ✓ `test_raise_lifts_score_to_lowest_score_of_new_band`
+- ✓ `test_semantic_escalation_across_signal_grid`
 
 ## test_analyzer.py::TestPayloadAnalyzerInit
 
@@ -433,8 +444,10 @@ Run with: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -
 
 ## test_analyzer.py::TestPolicyReadFromTargetBranch
 
+- ✓ `test_advisory_review_carries_review_recommendation`
 - ✓ `test_cli_flag_takes_precedence_over_env_mode`
 - ✓ `test_control_destructive_change_blocks_under_base_policy`
+- ✓ `test_enforce_block_reports_destructive_fields`
 - ✓ `test_env_mode_still_overrides_policy_file`
 - ✓ `test_legitimate_change_passes_under_base_policy`
 - ✓ `test_load_config_ref_reads_commit_not_working_tree`

@@ -8,7 +8,7 @@ Three orthogonal verification methods cover the pure scoring logic across four a
 
 | Layer | Function | Module | Contracts |
 |-------|----------|--------|-----------|
-| L3 Consequence | `_assess_consequence()` | `verification/consequence_pure.py` | C1–C13 |
+| L3 Consequence | `_assess_consequence()` | `verification/consequence_pure.py` | C-01–C-15 |
 | L4 Structural | `analyze_structural_drift()` | `verification/structural_pure.py` | S1–S7 |
 | L5a Temporal | `analyze_drift()` | `verification/temporal_pure.py` | T1–T7 |
 | L5b Semantic | `analyze_transparency()` phase 3 | `verification/semantic_pure.py` | M1–M9 |
@@ -49,7 +49,7 @@ no GitPython, no AST parsing, no file I/O.
 
 ---
 
-### Layer 3 — Consequence Scoring (C1–C13)
+### Layer 3 — Consequence Scoring (C-01–C-15)
 
 **Target:** `PayloadAnalyzer._assess_consequence()` → `verification/consequence_pure.py`
 
@@ -88,6 +88,8 @@ no GitPython, no AST parsing, no file I/O.
 | C-15 | `content_score <= severity_score <= content_score + age_score` (POST-16) | Branch age never lowers the score and adds at most its tier |
 
 `content_score` is every signal except branch age (`_content_score()`); `age_score` is the branch age tier (`_age_score()`).
+
+**Scope:** these contracts cover the L3 verdict. The consequence policy (`advisory`, `enforce`) and L5b can raise it afterwards through `_raise_verdict()`, which keeps the final verdict in the score bands of C-04–C-07 and records the points added as `escalation_score` (AUDIT_LOG §V12). That step is tested over the L3 signal grid (`TestEscalatedVerdictFields` in `test_analyzer.py`), not formally verified.
 
 ---
 
