@@ -100,7 +100,7 @@ payload-consequence-analyser/
 
 | Module | Role | Key symbols |
 |---|---|---|
-| `analyze.py` | Core analyser — all layers, scoring, report generation, CLI | `PayloadAnalyzer`, `PayloadGuardConfig`, `DEFAULT_CONFIG`, `load_config()`, `StructuralPayloadAnalyzer`, `TemporalDriftAnalyzer`, `SemanticTransparencyAnalyzer`, `_assess_consequence()`, `_scan_added_file_content()`, `_scan_github_actions_poisoning()`, `_scan_ai_tooling_configs()`, `_check_agent_settings_json()`, `_check_vscode_tasks()`, `_check_cursor_rule()`, `_check_package_json_scripts()`, `_check_composer_json()`, `_check_gemfile()`, `_check_binding_gyp()`, `_check_mcp_json()`, `_iter_workflow_file_diffs()`, `_scan_mutable_action_refs()`, `_load_runtime_events()`, `print_report()`, `format_markdown_report()`, `format_sarif_report()`, `save_json_report()`, `save_markdown_report()`, `save_sarif_report()`, `main()` |
+| `analyze.py` | Core analyser — all layers, scoring, report generation, CLI | `PayloadAnalyzer`, `PayloadGuardConfig`, `DEFAULT_CONFIG`, `load_config()`, `StructuralPayloadAnalyzer`, `TemporalDriftAnalyzer`, `SemanticTransparencyAnalyzer`, `_assess_consequence()`, `_raise_verdict()`, `_apply_semantic_transparency()`, `_scan_added_file_content()`, `_scan_github_actions_poisoning()`, `_scan_ai_tooling_configs()`, `_check_agent_settings_json()`, `_check_vscode_tasks()`, `_check_cursor_rule()`, `_check_package_json_scripts()`, `_check_composer_json()`, `_check_gemfile()`, `_check_binding_gyp()`, `_check_mcp_json()`, `_iter_workflow_file_diffs()`, `_scan_mutable_action_refs()`, `_load_runtime_events()`, `print_report()`, `format_markdown_report()`, `format_sarif_report()`, `save_json_report()`, `save_markdown_report()`, `save_sarif_report()`, `main()` |
 | `structural_parser.py` | AST & Tree-sitter `SymbolFact` v1 + legacy L4 node extraction for Python/JS/JSX/MJS/CJS/TS/TSX/MTS/CTS/Go/Rust/Java | `SymbolFact`, `CallSiteFact`, `ParseResult`, `CapabilityStatus`, `language_for_path()`, `_load_language()`, `get_parser_capabilities()`, `extract_symbols()`, `extract_named_nodes()` |
 | `consequence_engine.py` | Semantic Change Graph (SCG) 5-stage matcher & D01–D10 consequence detectors (`consequence.v1`) | `ConsequenceEngine`, `ConsequenceReport`, `ConsequenceFinding`, `EvidenceItem`, `SymbolTransition`, `FileDeltaInput`, `match_symbols_5_stage()` |
 | `post_check_run.py` | Posts named Check Run to GitHub via App JWT (RS256) | `_safe_truncate()`, `main()` |
@@ -362,7 +362,7 @@ PayloadAnalyzer.analyze()
         V_f: phantom_additions       +0.4  remedial claim + insertion ratio > 90%
         V_r: hidden_component_modification  +0.3  sensitive file not named in description
         V_e: cross_stack_micro_claim +0.2  micro-scope language + ≥3 distinct file types
-      mci_score ≥ 0.5 → DECEPTIVE_PAYLOAD (escalates verdict)
+      mci_score ≥ 0.5 → DECEPTIVE_PAYLOAD (escalates verdict; see Step 8)
       mci_score > 0   → CAUTION_MISMATCH
       no description  → UNVERIFIED
 ```
@@ -397,7 +397,7 @@ PayloadAnalyzer.analyze()
       unverified_dependencies, content_flags,
       actions_poisoning_flags, actions_poisoning_critical,
       ai_config_poisoning_flags, ai_config_poisoning_critical
-  ) → {status, severity_score, branch_age_score}
+  ) → {status, severity, severity_score, branch_age_score, escalation_score = 0, flags, recommendation}
 
   Scoring (MAX_SCORE = 36):
   ┌─────────────────────────────────────────────────────┬────────┐
@@ -434,6 +434,15 @@ PayloadAnalyzer.analyze()
     structural_severity == CRITICAL → always DESTRUCTIVE
     actions_poisoning_critical      → always DESTRUCTIVE
     ai_config_poisoning_critical    → always DESTRUCTIVE
+
+  Escalation after L3 (_raise_verdict, AUDIT_LOG §V12): the consequence policy (Step 8b) and
+  L5b (_apply_semantic_transparency, Step 6) can only raise the verdict.
+    UNVERIFIED / CAUTION_MISMATCH → SAFE becomes REVIEW
+    DECEPTIVE_PAYLOAD             → SAFE/REVIEW become CAUTION; CAUTION becomes DESTRUCTIVE only
+                                    when the content score alone is ≥ 3
+  The raised verdict takes its status's severity and recommendation, and its score rises to the
+  band's lowest score (REVIEW 1, CAUTION 3, DESTRUCTIVE 5):
+    severity_score = content score + branch_age_score + escalation_score
 ```
 
 ---
@@ -481,7 +490,7 @@ PayloadAnalyzer.analyze()
   ├── files: {added, deleted, modified, renamed, copied, type_changed, total_changed}
   ├── lines: {added, deleted, net_change, deletion_ratio_percent, codebase_reduction_percent}
   ├── temporal: {branch_age_days, branch_last_commit, branch_commit_hash, target_last_commit, target_commit_hash}
-  ├── verdict: {status, severity, severity_score, flags[], recommendation}
+  ├── verdict: {status, severity, severity_score, branch_age_score, escalation_score, flags[], recommendation}
   ├── structural: {overall_severity, max_deletion_ratio_pct, flagged_files[]}
   ├── complexity_advisory[]
   ├── sca: {status, unverified_packages[], manifest_files_scanned[], allowlist_active}

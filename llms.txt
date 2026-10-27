@@ -25,6 +25,8 @@ The pipeline execution produces exactly one of four verdicts. The mapping is a p
 
 Consequence-engine findings (D01–D10) adjust the verdict only in advisory mode (BLOCK/REVIEW findings raise SAFE to REVIEW) or enforce mode (any BLOCK finding → DESTRUCTIVE, exit 2). The default mode is shadow (report only).
 
+L5b raises the verdict for a missing PR description or a partial mismatch (SAFE → REVIEW) and for a description that contradicts the diff (one step, to DESTRUCTIVE only when the change itself scores CAUTION). A raised verdict takes the severity, recommendation and lowest score of its new band, so the mapping above holds for the final verdict; escalation_score reports the points added.
+
 ## Policy Inputs
 
 - payloadguard.yml and allowlist.yml are read from the target branch, never from the pull request being scanned.
@@ -33,7 +35,7 @@ Consequence-engine findings (D01–D10) adjust the verdict only in advisory mode
 
 ## Formal Verification
 
-The scoring logic (Layers L3, L4, L5a, L5b) is verified by three independent methods. A defect would have to produce a consistent false result across all three simultaneously. Last runs: 2026-10-26.
+The scoring logic (Layers L3, L4, L5a, L5b) is verified by three independent methods. A defect would have to produce a consistent false result across all three simultaneously. Last runs: 2026-10-27.
 
 Proof record page: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/PROOFS.md
 Dafny verification log: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/verification/dafny/assess_consequence_verify.log

@@ -55,7 +55,7 @@ Wire PayloadGuard to your branch protection rules, and catastrophic pull request
 | **Destructive Migration Drop** | `D10_MIGRATION_PERSISTENCE_LOSS` | Dropping persistent table or column in forward migration (with working rollback procedure) | `REVIEW` |
 | **Workflow Actions Poisoning & OIDC** | `L2c` | Workflow files modified to exfiltrate secrets, steal OIDC tokens, or forge CI identities | `BLOCK` |
 | **AI Tooling Config Poisoning** | `L2d` | Malicious `.claude/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, or lifecycle scripts executing on folder open | `BLOCK` |
-| **Deceptive PR Descriptions** | `L5b` | PR description says *"minor copy fix"* while the diff alters authentication or drops database tables | Escalates the verdict one level (SAFE/REVIEW → CAUTION, CAUTION → DESTRUCTIVE when the content evidence alone reaches CAUTION) |
+| **Deceptive PR Descriptions** | `L5b` | PR description says *"minor copy fix"* while the diff alters authentication or drops database tables | Escalates the verdict one level (SAFE/REVIEW → CAUTION, CAUTION → DESTRUCTIVE when the content evidence alone reaches CAUTION); severity, score and recommendation follow the new verdict |
 
 The policy column is each finding's recommendation. Consequence-detector (`Dxx`) findings change the verdict and exit code only in `advisory` or `enforce` mode; the default mode is `shadow` (see [Consequence Modes](#3-consequence-modes)).
 
@@ -331,10 +331,10 @@ PayloadGuard's consequence and scoring logic is mathematically proven to elimina
 ```bash
 # Run the complete suite, including the proof tests (needs z3-solver and crosshair-tool from requirements.txt)
 python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q
-# 408 passed
+# 418 passed
 ```
 
-- **Test suite:** **408 passed, 0 failed** (`test_analyzer.py` 322, `test_consequence_engine.py` 61, `tests/proofs/` 25). Without Z3 and CrossHair installed: 387 passed, 21 skipped.
+- **Test suite:** **418 passed, 0 failed** (`test_analyzer.py` 332, `test_consequence_engine.py` 61, `tests/proofs/` 25). Without Z3 and CrossHair installed: 397 passed, 21 skipped.
 - **Mutation Suite:** **16 / 16 passed** with **0 False Positives and 0 False Negatives** ([`run_mutation_suite.py`](https://github.com/PayloadGuard-PLG/payloadguard-test-harness/blob/main/tools/run_mutation_suite.py)).
 - **Harness Manifest Oracle:** **41 / 41 passed** across schema validations and Consequence Engine v1 assertions ([`validate_manifest.py`](https://github.com/PayloadGuard-PLG/payloadguard-test-harness/blob/main/tools/validate_manifest.py)).
 
@@ -346,6 +346,7 @@ Detailed specifications and mathematical proofs are documented in [`VERIFICATION
 
 1. **Branch age never decides DESTRUCTIVE** (`AUDIT_LOG.md` §H1): branch age, measured against the current target commit, still raises the verdict to REVIEW or CAUTION, but a DESTRUCTIVE verdict (exit code `2`) now requires evidence from the change itself. A deceptive PR description escalates CAUTION to DESTRUCTIVE only when that CAUTION does not depend on branch age. The JSON verdict reports `branch_age_score`.
 2. **Dormant workflow triggers detected in any YAML layout** (`AUDIT_LOG.md` §H2): the L2c check for a `workflow_dispatch` or `schedule` workflow running shell commands read the trigger by line layout, so `on: workflow_dispatch`, `on: [push, workflow_dispatch]` or a trigger listed second went undetected. Triggers are now read from the parsed workflow.
+3. **Escalated verdicts report matching severity, score and recommendation** (`AUDIT_LOG.md` §V12): when a missing or contradicting PR description (L5b) or the consequence policy raises the verdict, its severity, its recommendation and a score in the new verdict's band now follow; the JSON verdict reports the points added as `escalation_score`. A deceptive description on a change with no other signals previously reported CAUTION with severity LOW, score 0 and "Proceed with normal review process". Verdicts and exit codes are unchanged.
 
 ## What's New in v1.6.0
 

@@ -2,6 +2,18 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-27 — Escalated verdicts carry matching severity, score and recommendation (AUDIT_LOG §V12 fixed)
+
+**Fix (`529014e`):** the L5b escalations (UNVERIFIED and CAUTION_MISMATCH: SAFE → REVIEW; DECEPTIVE_PAYLOAD: one step up) changed only the verdict status. A deceptive description on a change with no signals reported CAUTION with severity LOW, score 0 and "✓ Proceed with normal review process"; on a content CAUTION it reported DESTRUCTIVE (exit 2) with severity HIGH, score 4 and "REVIEW CAREFULLY". Advisory mode raised SAFE to REVIEW and kept SAFE's recommendation. `_raise_verdict()` now performs every escalation after L3 (consequence policy, L5b): severity and recommendation follow the new status, the score rises to the lowest score of its band (REVIEW 1, CAUTION 3, DESTRUCTIVE 5), and `escalation_score` records the points added. `_assess_consequence()` reads the same table (`_VERDICT_BANDS`); the L5b block moved into `_apply_semantic_transparency()`. Statuses and exit codes are unchanged.
+
+**Evidence:** all 38 harness fixtures give identical status, severity, score, recommendation and exit code before and after (offline, harness `main` `c801635`); no fixture escalates. Oracle 41/41; mutation suite 16/16. A reference model of the escalation matches `_apply_semantic_transparency()` on 103,680 verdicts (the §H1 signal grid at four age tiers under four L5b outcomes).
+
+**New finding §V13 (LOW, open):** the L5b section of the report prints the semantic layer's own directive, "❌ DO NOT MERGE. PR description is inconsistent with actual diff scope and structure.", for every DECEPTIVE_PAYLOAD result. A deceptive description on a change scoring below CAUTION gives a CAUTION verdict (exit 0, "⚠️  REVIEW CAREFULLY — PR description contradicts the changes"), so the report recommends two different actions.
+
+**Docs:** VERIFICATION.md names the L3 contracts C-01–C-15 (it read C1–C13 after §H1 added C-14/C-15); VERIFICATION_SPEC.md no longer states that `_assess_consequence()` alone sets the final verdict; llms.txt last-run date.
+
+**Tests:** 418 passed with Z3/CrossHair (`test_analyzer.py` 332); 397 passed, 21 skipped without.
+
 ## 2026-10-27 — Dormant workflow triggers detected in any YAML layout (AUDIT_LOG §H2 fixed)
 
 **Fix (`1d2c719`):** The L2c dormant-trigger composite (workflow_dispatch or schedule plus a shell execution pattern → HIGH) matched the trigger by line layout: only a block mapping with `workflow_dispatch` as the first key under `on:`, or `on:` followed by `schedule`. The same `curl … | bash` workflow carried the signal in 1 of 7 layouts (block mapping, trigger first); inline `on: workflow_dispatch`, flow list, flow map, quoted `"on"` key and the trigger listed after another event read SAFE. `_has_dormant_trigger()` now reads the events from the parsed `on:` field and keeps the line patterns as a fallback.
