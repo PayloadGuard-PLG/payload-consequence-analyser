@@ -1037,7 +1037,75 @@ def load_config(repo_path: str, ref: str = None) -> PayloadGuardConfig:
         actions=merged.get("actions",   copy.deepcopy(DEFAULT_CONFIG["actions"])),
         consequence=merged.get("consequence", copy.deepcopy(DEFAULT_CONFIG["consequence"])),
     )
-    
+
+# ==============================================================================
+# VERDICT BANDS
+# ==============================================================================
+
+# Severity, lowest score and recommendation of each verdict. _assess_consequence assigns them
+# from the L3 score; _raise_verdict applies them when a later layer raises the verdict.
+_VERDICT_BANDS = {
+    "SAFE":        ("LOW",      0, "✓ Proceed with normal review process"),
+    "REVIEW":      ("MEDIUM",   1, "→ Proceed with normal review process, but note the flags above"),
+    "CAUTION":     ("HIGH",     3, "⚠️  REVIEW CAREFULLY — Significant destructive changes detected"),
+    "DESTRUCTIVE": ("CRITICAL", 5, "❌ DO NOT MERGE — This would catastrophically alter the codebase"),
+}
+
+# Recommendation when a description that contradicts the diff sets the verdict (L5b DECEPTIVE_PAYLOAD).
+_DECEPTION_RECOMMENDATIONS = {
+    "CAUTION":     "⚠️  REVIEW CAREFULLY — PR description contradicts the changes",
+    "DESTRUCTIVE": "❌ DO NOT MERGE — PR description contradicts significant destructive changes",
+}
+
+
+def _raise_verdict(verdict: dict, status: str, recommendation: str = None) -> None:
+    """Set a verdict raised after L3 (consequence policy, L5b) to ``status`` (AUDIT_LOG §V12).
+
+    Severity and recommendation follow the new status, and the score rises to the lowest score of
+    its band, so the final verdict keeps the L3 score bands. ``escalation_score`` records the points
+    added: severity_score = content score + branch_age_score + escalation_score.
+    """
+    severity, floor, default_recommendation = _VERDICT_BANDS[status]
+    lift = max(0, floor - verdict["severity_score"])
+    verdict["status"] = status
+    verdict["severity"] = severity
+    verdict["severity_score"] += lift
+    verdict["escalation_score"] = verdict.get("escalation_score", 0) + lift
+    verdict["recommendation"] = recommendation or default_recommendation
+
+
+def _apply_semantic_transparency(verdict: dict, semantic: dict) -> None:
+    """Layer 5b: flag the semantic transparency result and raise the verdict it calls for."""
+    if semantic["status"] == "UNVERIFIED":
+        # INC-3: no PR description — cannot validate; SAFE upgrades to REVIEW
+        # so the gap is visible to reviewers without blocking the PR.
+        verdict["flags"].append("No PR description — semantic transparency unverified")
+        if verdict["status"] == "SAFE":
+            _raise_verdict(verdict, "REVIEW")
+    elif semantic["status"] == "DECEPTIVE_PAYLOAD":
+        verdict["flags"].append(
+            f"Semantic mismatch — description contradicts diff profile "
+            f"(signals: {', '.join(semantic['signals'])})"
+        )
+        _escalate = {"SAFE": "CAUTION", "REVIEW": "CAUTION", "CAUTION": "DESTRUCTIVE"}
+        if verdict["status"] in _escalate:
+            escalated = _escalate[verdict["status"]]
+            # Branch age cannot decide DESTRUCTIVE (AUDIT_LOG §H1): a CAUTION that
+            # depends on branch age escalates no further than CAUTION.
+            content_score = (verdict["severity_score"] - verdict.get("branch_age_score", 0)
+                             - verdict.get("escalation_score", 0))
+            if escalated == "DESTRUCTIVE" and content_score < 3:
+                escalated = "CAUTION"
+            _raise_verdict(verdict, escalated, _DECEPTION_RECOMMENDATIONS[escalated])
+    elif semantic["status"] == "CAUTION_MISMATCH":
+        verdict["flags"].append(
+            f"Partial semantic mismatch — manual review advised "
+            f"(signals: {', '.join(semantic['signals'])})"
+        )
+        if verdict["status"] == "SAFE":
+            _raise_verdict(verdict, "REVIEW")
+
+
 # ==============================================================================
 # CORE ANALYZER
 # ==============================================================================
@@ -1425,20 +1493,13 @@ class PayloadAnalyzer:
 
                 if consequence_mode == "enforce":
                     if block_findings:
-                        verdict["status"] = "DESTRUCTIVE"
-                        verdict["severity"] = "CRITICAL"
-                        verdict["severity_score"] = max(verdict.get("severity_score", 0.0), 5.0)
-                        verdict["recommendation"] = "❌ DO NOT MERGE — Verified destructive code consequence detected"
+                        _raise_verdict(verdict, "DESTRUCTIVE",
+                                       "❌ DO NOT MERGE — Verified destructive code consequence detected")
                     elif review_findings and verdict["status"] == "SAFE":
-                        verdict["status"] = "REVIEW"
-                        verdict["severity"] = "MEDIUM"
-                        verdict["severity_score"] = max(verdict.get("severity_score", 0.0), 1.0)
-                        verdict["recommendation"] = "→ Proceed with normal review process, but note the flags above"
+                        _raise_verdict(verdict, "REVIEW")
                 elif consequence_mode == "advisory":
                     if (block_findings or review_findings) and verdict["status"] == "SAFE":
-                        verdict["status"] = "REVIEW"
-                        verdict["severity"] = "MEDIUM"
-                        verdict["severity_score"] = max(verdict.get("severity_score", 0.0), 1.0)
+                        _raise_verdict(verdict, "REVIEW")
 
             # LAYER 5a: TEMPORAL DRIFT
             temporal_th = self.config.thresholds["temporal"]
@@ -1456,34 +1517,7 @@ class PayloadAnalyzer:
                 diffs=diffs,
                 config=self.config.semantic,
             ).analyze_transparency()
-
-            if semantic["status"] == "UNVERIFIED":
-                # INC-3: no PR description — cannot validate; SAFE upgrades to REVIEW
-                # so the gap is visible to reviewers without blocking the PR.
-                verdict["flags"].append("No PR description — semantic transparency unverified")
-                if verdict["status"] == "SAFE":
-                    verdict["status"] = "REVIEW"
-            elif semantic["status"] == "DECEPTIVE_PAYLOAD":
-                verdict["flags"].append(
-                    f"Semantic mismatch — description contradicts diff profile "
-                    f"(signals: {', '.join(semantic['signals'])})"
-                )
-                _escalate = {"SAFE": "CAUTION", "REVIEW": "CAUTION", "CAUTION": "DESTRUCTIVE"}
-                if verdict["status"] in _escalate:
-                    escalated = _escalate[verdict["status"]]
-                    # Branch age cannot decide DESTRUCTIVE (AUDIT_LOG §H1): a CAUTION that
-                    # depends on branch age escalates no further than CAUTION.
-                    content_score = verdict["severity_score"] - verdict.get("branch_age_score", 0)
-                    if escalated == "DESTRUCTIVE" and content_score < 3:
-                        escalated = "CAUTION"
-                    verdict["status"] = escalated
-            elif semantic["status"] == "CAUTION_MISMATCH":
-                verdict["flags"].append(
-                    f"Partial semantic mismatch — manual review advised "
-                    f"(signals: {', '.join(semantic['signals'])})"
-                )
-                if verdict["status"] == "SAFE":
-                    verdict["status"] = "REVIEW"
+            _apply_semantic_transparency(verdict, semantic)
 
             # COMMIT MESSAGE ANALYSIS (advisory — §4.1)
             commit_flags: list[dict] = []
@@ -1591,8 +1625,10 @@ class PayloadAnalyzer:
         """
         Layer 3 consequence scoring -- assigns a severity verdict to the PR's deletion profile.
 
-        Returns a dict with keys: status, severity, severity_score, branch_age_score, flags,
-        recommendation. branch_age_score is the part of severity_score contributed by branch age.
+        Returns a dict with keys: status, severity, severity_score, branch_age_score,
+        escalation_score, flags, recommendation. branch_age_score is the part of severity_score
+        contributed by branch age; escalation_score is 0 here and records the points added when
+        a later layer raises the verdict (_raise_verdict).
 
         Formal contracts are maintained in verification/consequence_pure.py and verified by
         CrossHair. Invariants proven there:
@@ -1734,41 +1770,25 @@ class PayloadAnalyzer:
         severity_score += branch_age_score
 
         if severity_score >= 5:
-            return {
-                "status": "DESTRUCTIVE",
-                "severity": "CRITICAL",
-                "flags": flags,
-                "recommendation": "❌ DO NOT MERGE — This would catastrophically alter the codebase",
-                "severity_score": severity_score,
-                "branch_age_score": branch_age_score,
-            }
+            status = "DESTRUCTIVE"
         elif severity_score >= 3:
-            return {
-                "status": "CAUTION",
-                "severity": "HIGH",
-                "flags": flags,
-                "recommendation": "⚠️  REVIEW CAREFULLY — Significant destructive changes detected",
-                "severity_score": severity_score,
-                "branch_age_score": branch_age_score,
-            }
+            status = "CAUTION"
         elif severity_score >= 1:
-            return {
-                "status": "REVIEW",
-                "severity": "MEDIUM",
-                "flags": flags if flags else ["Some changes detected"],
-                "recommendation": "→ Proceed with normal review process, but note the flags above",
-                "severity_score": severity_score,
-                "branch_age_score": branch_age_score,
-            }
+            status = "REVIEW"
+            flags = flags or ["Some changes detected"]
         else:
-            return {
-                "status": "SAFE",
-                "severity": "LOW",
-                "flags": flags if flags else ["No major red flags detected"],
-                "recommendation": "✓ Proceed with normal review process",
-                "severity_score": severity_score,
-                "branch_age_score": branch_age_score,
-            }
+            status = "SAFE"
+            flags = flags or ["No major red flags detected"]
+        severity, _floor, recommendation = _VERDICT_BANDS[status]
+        return {
+            "status": status,
+            "severity": severity,
+            "flags": flags,
+            "recommendation": recommendation,
+            "severity_score": severity_score,
+            "branch_age_score": branch_age_score,
+            "escalation_score": 0,
+        }
 
     def _scan_added_file_content(self, diffs):
         """Scan added non-code files for CI trigger strings and shell execution patterns."""

