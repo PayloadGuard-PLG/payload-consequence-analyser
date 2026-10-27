@@ -227,6 +227,8 @@ _SEMANTIC_SENSITIVE_PATHS = [
 
 # Signal 3: Dormant trigger — workflow_dispatch or schedule combined with a
 # shell execution pattern in the same file constitutes a sleeper payload.
+# Triggers are read from the parsed `on:` field (_has_dormant_trigger); these line
+# patterns remain for content that does not parse as YAML.
 _ACTIONS_DORMANT_TRIGGER = [
     r"on:\s*\n\s+workflow_dispatch",
     r"on:\s*\[?\s*schedule",
@@ -460,6 +462,39 @@ def _normalize_yaml_content(content: str) -> str:
     that rely on line structure (dormant-trigger composite, forged-author).
     """
     return " ".join(content.split())
+
+
+def _workflow_triggers(content: str):
+    """Event names under a workflow's `on:` field, independent of YAML layout.
+
+    Returns None when the content does not parse as a YAML mapping. PyYAML follows
+    YAML 1.1, which loads an unquoted `on` key as the boolean True. Only string event
+    names are collected, so aliased structures under `on:` are never expanded.
+    """
+    try:
+        doc = yaml.safe_load(content)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    on = doc.get("on", doc.get(True))
+    if isinstance(on, str):
+        return {on}
+    if isinstance(on, (list, dict)):
+        return {event for event in on if isinstance(event, str)}
+    return set()
+
+
+def _has_dormant_trigger(content: str) -> bool:
+    """True when workflow_dispatch or schedule is among the workflow's triggers (AUDIT_LOG §H2).
+
+    Matching `on:` by line layout found only a block mapping with the trigger as its
+    first key; inline, flow and later-key layouts of the same workflow went undetected.
+    The line patterns still apply, so no layout detected before is lost.
+    """
+    if (_workflow_triggers(content) or set()) & {"workflow_dispatch", "schedule"}:
+        return True
+    return any(re.search(p, content, re.IGNORECASE | re.MULTILINE) for p in _ACTIONS_DORMANT_TRIGGER)
 
 
 def _read_file_at_ref(repo_path: str, ref: str, filename: str):
@@ -1847,10 +1882,7 @@ class PayloadAnalyzer:
                    re.search(pat, normalized, re.IGNORECASE):
                     signals.append({'type': 'credential_harvest', 'pattern': pat})
 
-            has_dormant_trigger = any(
-                re.search(p, content, re.IGNORECASE | re.MULTILINE)
-                for p in _ACTIONS_DORMANT_TRIGGER
-            )
+            has_dormant_trigger = _has_dormant_trigger(content)
             has_shell_exec = any(
                 re.search(p, content, re.IGNORECASE | re.MULTILINE)
                 for p in _CONTENT_SHELL_PATTERNS

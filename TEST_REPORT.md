@@ -1,10 +1,10 @@
 # PayloadGuard — Test Run Report
 
-**Date:** 2026-10-27 09:45 UTC  
+**Date:** 2026-10-27 11:16 UTC  
 **Environment:** Python 3.14.3, pytest 9.1.1, z3-solver 5.3.2.0, crosshair-tool 0.0.112, tree-sitter 0.26.0  
 **Platform:** Windows 11 (local)  
-**Commit:** `2bd08af`  
-**Result:** 405 passed · 0 skipped · 0 failed
+**Commit:** `1d2c719`  
+**Result:** 408 passed · 0 skipped · 0 failed
 
 Run with: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -v`
 
@@ -324,6 +324,7 @@ Run with: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -
 - ✓ `test_custom_trusted_oidc_consumer_via_config`
 - ✓ `test_decode_error_does_not_crash`
 - ✓ `test_deleted_workflow_not_scanned`
+- ✓ `test_dormant_trigger_detected_in_every_yaml_layout`
 - ✓ `test_dormant_trigger_with_shell_exec`
 - ✓ `test_dormant_trigger_without_shell_is_safe`
 - ✓ `test_flag_text_appears_in_verdict`
@@ -344,9 +345,11 @@ Run with: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -
 - ✓ `test_oidc_elevation_without_consumer`
 - ✓ `test_pull_request_target_alone_is_detected`
 - ✓ `test_pull_request_target_with_write_permissions_is_critical`
+- ✓ `test_push_only_trigger_is_not_dormant`
 - ✓ `test_typosquat_detection_patterns`
 - ✓ `test_typosquatted_oidc_action_detected_as_critical`
 - ✓ `test_typosquatted_oidc_action_fails_legitimacy_check`
+- ✓ `test_unparseable_workflow_keeps_line_pattern_detection`
 - ✓ `test_yaml_folded_block_base64_detected`
 - ✓ `test_yaml_literal_block_base64_detected`
 

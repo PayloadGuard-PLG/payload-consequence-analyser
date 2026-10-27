@@ -275,7 +275,7 @@ PayloadAnalyzer.analyze()
   │       ├── credential_harvest      CRITICAL  env exfil, cloud metadata, secret grep
   │       ├── pull_request_target_with_write_permissions  CRITICAL  pwn-request vector
   │       ├── oidc_elevation_typosquatted  CRITICAL  id-token:write + typosquatted consumer
-  │       ├── dormant_trigger_with_payload  HIGH  workflow_dispatch/schedule + shell exec
+  │       ├── dormant_trigger_with_payload  HIGH  workflow_dispatch/schedule (parsed on:) + shell exec
   │       ├── forged_bot_author       HIGH      git identity impersonating known bot
   │       ├── oidc_elevation_no_consumer  HIGH  id-token:write with no known OIDC consumer
   │       └── dangerous_trigger_pull_request_target  HIGH  pull_request_target alone
