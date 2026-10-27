@@ -119,4 +119,6 @@ Consequence engine (consequence.v1): 5-stage Semantic Change Graph symbol matchi
 - VERIFICATION_SPEC.md: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/VERIFICATION_SPEC.md
 - WHITEPAPER.md: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/WHITEPAPER.md
 - AUDIT_LOG.md: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/AUDIT_LOG.md
-- DEVLOG.md: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/DEVLOG.md
+- CHANGELOG.md: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/CHANGELOG.md
+- DEVLOG.md (engineering log from 2026-10-27): https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/DEVLOG.md
+- docs/devlog/DEVLOG-2026-04-22_to_2026-10-27.md (archive): https://github.com/PayloadGuard-PLG/payload-consequence-analyser/blob/main/docs/devlog/DEVLOG-2026-04-22_to_2026-10-27.md

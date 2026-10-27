@@ -239,7 +239,7 @@ CI runs Dafny automatically on any PR touching `verification/dafny/**` via `.git
 
 ```bash
 pytest tests/proofs/ -v --timeout=60
-# Expected: 19 passed (13 Z3 tests + 5 CrossHair wrappers + 1 temporal contract regression)
+# Expected: 25 passed (18 Z3 tests + 7 CrossHair-file tests: 5 contract wrappers, the temporal contract regression and the L3 model parity test)
 ```
 
 ---

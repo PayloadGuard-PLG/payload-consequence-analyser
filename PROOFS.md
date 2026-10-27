@@ -381,7 +381,7 @@ crosshair check semantic_pure    --analysis_kind PEP316 --per_condition_timeout 
 ```bash
 pip install z3-solver crosshair-tool pytest pytest-timeout
 pytest tests/proofs/ -v --timeout=60
-# Expected: 19 passed (13 Z3 tests + 5 CrossHair contract wrappers + 1 temporal contract regression)
+# Expected: 25 passed (18 Z3 tests + 7 CrossHair-file tests: 5 contract wrappers, the temporal contract regression and the L3 model parity test)
 ```
 
 ---
