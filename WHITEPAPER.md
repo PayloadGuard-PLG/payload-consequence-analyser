@@ -189,9 +189,9 @@ git.Repo(workspace)
 | `action.yml` | Composite GitHub Action definition |
 | `agent/` | eBPF runtime defence agent (Go + cilium/ebpf) |
 | `agent/bpf/probe.c` | 4 tracepoint probes + block mode BPF maps |
-| `test_analyzer.py` | 311-test unit, integration, policy, Action-path and packaging suite |
+| `test_analyzer.py` | 319-test unit, integration, policy, Action-path and packaging suite |
 | `test_consequence_engine.py` | 61-test SCG Consequence Engine unit & integration suite |
-| `tests/proofs/` | Z3 SMT proofs (P1–P10, 13 tests) + CrossHair pytest wrappers (5) + temporal contract regression (1) |
+| `tests/proofs/` | Z3 SMT proofs (P1–P11, 18 tests) + CrossHair pytest wrappers (5) + temporal contract regression (1) + L3 model parity (1) |
 | `verification/` | CrossHair pure extraction modules — consequence, structural, temporal, semantic — and Dafny specifications (`verification/dafny/`) |
 
 ---
@@ -465,7 +465,7 @@ Five independent signals, each contributing to `mci_score`:
 
 | mci_score | Status | Verdict effect |
 |---|---|---|
-| ≥ 0.5 | `DECEPTIVE_PAYLOAD` | Escalates verdict one step (SAFE→CAUTION, REVIEW→CAUTION, CAUTION→DESTRUCTIVE) |
+| ≥ 0.5 | `DECEPTIVE_PAYLOAD` | Escalates verdict one step (SAFE→CAUTION, REVIEW→CAUTION, CAUTION→DESTRUCTIVE when the content score alone reaches CAUTION, so branch age cannot decide DESTRUCTIVE) |
 | > 0.0 or macro advisory | `CAUTION_MISMATCH` | Escalates SAFE→REVIEW only |
 | 0.0 | `TRANSPARENT` | No change |
 | (no description) | `UNVERIFIED` | Escalates SAFE→REVIEW |
@@ -537,7 +537,7 @@ Unlike L1–L4, L5b verdict escalation operates on the pre-existing verdict rath
 
 ## 5. Scoring Model
 
-Layer 3 accumulates a `severity_score` across independent dimensions. No single signal can produce a false positive at default thresholds. DESTRUCTIVE requires either a combination of signals or a single high-confidence signal (security file deletion or structural CRITICAL).
+Layer 3 accumulates a `severity_score` across independent dimensions. No single signal can produce a false positive at default thresholds. DESTRUCTIVE requires either a combination of signals or a single high-confidence signal (security file deletion or structural CRITICAL). Branch age is not evidence of destruction: it can raise a verdict to REVIEW or CAUTION but never decides DESTRUCTIVE.
 
 ### 5.1 Signal Dimensions
 
@@ -548,6 +548,8 @@ Layer 3 accumulates a `severity_score` across independent dimensions. No single 
 | days_old > 365 | +3 |
 | days_old > 180 | +2 |
 | days_old > 90 | +1 |
+
+Branch age is applied after every other signal. When those signals total 5 or more it adds in full; otherwise it raises the score at most to 4, so age can lift a verdict to REVIEW or CAUTION but never decides DESTRUCTIVE (POST-15/16, Z3 P11; `AUDIT_LOG.md` §H1).
 
 **Deletion dimensions (files, ratio, lines)**
 
@@ -685,9 +687,9 @@ external tools run the checks.
 
 | Method | Tool | Scope | What it proves |
 |--------|------|-------|----------------|
-| SMT proof | Z3 Solver | L3, L2c | P1–P10: abstract symbolic properties of the scoring model (P9 derives the score bound from the per-signal model) |
-| Contract verification | CrossHair | L3, L4, L5a, L5b | C1–C12 + POST-12, S1–S7, T1–T7, M1–M9: pre/post conditions on pure-Python mirrors of the scoring code |
-| Machine-checked proof | Dafny 4.9.1 | L3, L4, L5a | POST-1–12, S1–S7, T1–T8 over the entire input domain |
+| SMT proof | Z3 Solver | L3, L2c | P1–P11: abstract symbolic properties of the scoring model (P9 derives the score bound from the per-signal model; P11 proves branch age never decides DESTRUCTIVE) |
+| Contract verification | CrossHair | L3, L4, L5a, L5b | C-01–C-15, S1–S7, T1–T7, M1–M9: pre/post conditions on pure-Python mirrors of the scoring code |
+| Machine-checked proof | Dafny 4.9.1 | L3, L4, L5a | POST-1–12, POST-15/16, S1–S7, T1–T8 over the entire input domain |
 
 **Z3 proofs** (`tests/proofs/test_z3_properties.py`) encode the L3 scoring logic as integer
 constraints and prove monotonicity, score bounds, and verdict ordering. Run in < 0.1 s each.

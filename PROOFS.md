@@ -11,8 +11,8 @@ false result across all three simultaneously to go undetected.
 | Method | Tool | Scope | Result |
 |---|---|---|---|
 | Machine-checked proofs | Dafny 4.9.1 + Boogie + Z3 4.12.1 | L3, L4, L5a — entire input domain | 9 methods/functions verified, 0 errors (GitHub Actions run #16) |
-| Symbolic execution | CrossHair 0.0.112 (PEP316 contracts) | L3, L4, L5a, L5b — pure-Python mirror modules in `verification/` | 36 postconditions, 0 counterexamples after the §V10 fix (one counterexample found and fixed in `temporal_pure`) |
-| SMT proofs | Z3 (z3-solver 5.3.2.0) | L3, L2c — abstract scoring model | 10 properties, all `unsat`; P9 is model-based with tightness and sensitivity checks (§V8 fixed) |
+| Symbolic execution | CrossHair 0.0.112 (PEP316 contracts) | L3, L4, L5a, L5b — pure-Python mirror modules in `verification/` | 40 postconditions, 0 counterexamples after the §V10 fix (one counterexample found and fixed in `temporal_pure`); `consequence_pure` re-run 2026-10-27 after the §H1 fix |
+| SMT proofs | Z3 (z3-solver 5.3.2.0) | L3, L2c — abstract scoring model | 11 properties, all `unsat`; P9 is model-based with tightness and sensitivity checks (§V8 fixed); P11 proves branch age never decides DESTRUCTIVE (§H1) |
 
 → Committed proof files: [`verification/dafny/`](verification/dafny/) · [`verification/`](verification/)  
 → CI workflow: [`.github/workflows/verify-dafny.yml`](.github/workflows/verify-dafny.yml)  
@@ -60,7 +60,7 @@ Source: [`verification/dafny/assess_consequence.dfy`](verification/dafny/assess_
 "7 verified" = 6 pure helper functions (AgeScore, FilesScore, LinesScore, RatioScore,
 DeletionDim, ContentFlagsScore) + 1 main method (AssessConsequence).
 
-The `AssessConsequence` method carries 12 postconditions (POST-1–12, including POST-11a).
+The `AssessConsequence` method carries 14 postconditions (POST-1–12 including POST-11a, POST-15, POST-16).
 Excerpt from the current `assess_consequence.dfy` (`MAX_SCORE` = 36):
 
 ```dafny
@@ -120,6 +120,21 @@ method AssessConsequence(
             actions_poisoning_flags == 0 && !actions_poisoning_critical &&
             ai_config_poisoning_flags == 0 && !ai_config_poisoning_critical
             ==> status == "SAFE"
+
+    // POST-15: branch age never decides DESTRUCTIVE (AUDIT_LOG §H1) — a DESTRUCTIVE
+    // verdict requires the content score alone to reach the threshold
+    ensures status == "DESTRUCTIVE" ==>
+            ContentScore(files_deleted, lines_deleted, deletion_ratio, structural_severity,
+                         critical_file_deletions, security_file_deletions, unverified_dependencies,
+                         content_flags, actions_poisoning_flags, actions_poisoning_critical,
+                         ai_config_poisoning_flags, ai_config_poisoning_critical) >= DESTRUCTIVE_THRESHOLD
+
+    // POST-16: branch age never lowers the score and adds at most its tier
+    ensures var c := ContentScore(files_deleted, lines_deleted, deletion_ratio, structural_severity,
+                                  critical_file_deletions, security_file_deletions, unverified_dependencies,
+                                  content_flags, actions_poisoning_flags, actions_poisoning_critical,
+                                  ai_config_poisoning_flags, ai_config_poisoning_critical);
+            c <= severity_score <= c + AgeScore(days_old)
 ```
 
 ### L4 Structural Drift — `structural_drift.dfy`
@@ -207,7 +222,7 @@ arithmetic).
 
 | Module | Exit | Time | Confirmed over all paths | Not confirmed | Counterexamples |
 |---|---|---|---|---|---|
-| `consequence_pure` | 0 | 366 s | 1 (C-12, `deletion_dim`) | 12 (C-01–C-11, POST-12) | 0 |
+| `consequence_pure` | 0 | 454 s | 2 (C-12 `deletion_dim`, `_age_score` bound) | 15 (C-01–C-11, POST-12, POST-15, POST-16, `_content_score` bound) | 0 |
 | `structural_pure` | 0 | 224 s | 0 | 7 (S-01–S-07) | 0 |
 | `temporal_pure` | 0 | 219 s | 0 | 7 (T-01–T-07) | 0 |
 | `semantic_pure` | 0 | 11 s | 9 (M-01–M-09) | 0 | 0 |
@@ -216,7 +231,9 @@ Before the §V10 fix, `temporal_pure` exited 1 with a counterexample
 (`analyze_drift_pure(0, float("inf"), 0.25, 0.5)` → `drift_score` NaN, violating T-02 and T-05).
 The five pytest wrappers in `tests/proofs/` use a 10 s budget and did not reach that input.
 
-### L3 Contracts (C1–C12)
+The `consequence_pure` row is from the 2026-10-27 re-run after the §H1 fix (`2bd08af`), which added POST-15, POST-16 and the `_content_score` and `_age_score` helpers (17 conditions; 13 on 2026-10-26, 366 s). The other three modules are unchanged since the 2026-10-26 run. `tests/proofs/test_crosshair_contracts.py` also checks, without CrossHair, that the model scores exactly as `_assess_consequence()` on a 20,736-input grid and that every postcondition holds there.
+
+### L3 Contracts (C-01–C-15)
 
 Source: [`verification/consequence_pure.py`](verification/consequence_pure.py)
 
@@ -235,6 +252,8 @@ Source: [`verification/consequence_pure.py`](verification/consequence_pure.py)
 | C-11 | `all-zero inputs → verdict == "SAFE"` |
 | C-12 | `deletion_dim ∈ [0, 4]` |
 | POST-12 | `ai_config_poisoning_critical → verdict == "DESTRUCTIVE"` |
+| C-14 (POST-15) | `verdict == "DESTRUCTIVE" → content_score >= 5` — branch age never decides DESTRUCTIVE |
+| C-15 (POST-16) | `content_score <= severity_score <= content_score + age_score` |
 
 ### L4 Contracts (S1–S7)
 
@@ -301,7 +320,7 @@ Source: [`tests/proofs/test_z3_properties.py`](tests/proofs/test_z3_properties.p
 ```bash
 pytest tests/proofs/test_z3_properties.py -m proof -v --timeout=30
 ```
-**Expected result:** 10 passed in < 0.1 s each.
+**Expected result:** 18 passed in < 0.1 s each.
 
 | Property | What is proven |
 |---|---|
@@ -315,8 +334,9 @@ pytest tests/proofs/test_z3_properties.py -m proof -v --timeout=30
 | P8 | Any score that includes a typosquat contribution cannot be SAFE |
 | P9 | No combination of signals makes the score built from `_assess_consequence()`'s per-signal contributions exceed MAX_SCORE (36); 36 is reachable; removing the content-flag cap breaks the bound; the production scorer with every signal at maximum returns 36 |
 | P10 | Zero signals → score = 0 → SAFE |
+| P11 | A DESTRUCTIVE score implies the signals other than branch age reach DESTRUCTIVE alone; content ≤ score ≤ content + age; age still lifts non-DESTRUCTIVE scores (sat); the pre-§H1 uncapped model violates P11 (sat); the production scorer caps Actions HIGH on a 400-day branch at 4 |
 
-**Last run:** 2026-10-26 — 13 passed (P1–P10, with P9 as four tests; `z3-solver` 5.3.2.0), Windows 11, Python 3.14.3.
+**Last run:** 2026-10-27 — 18 passed (P1–P11, with P9 as four tests and P11 as five; `z3-solver` 5.3.2.0), Windows 11, Python 3.14.3.
 
 **Note on P9 (§V8, fixed 2026-10-26):** the previous P9 added `score <= bound` as a constraint and then checked `score > bound`, which is unsatisfiable for any bound (it passed with a bound of 0 or −100). P9 now derives the score from the signal model; with a bound of 35 the solver returns a counterexample.
 

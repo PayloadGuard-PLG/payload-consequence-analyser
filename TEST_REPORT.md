@@ -1,10 +1,10 @@
 # PayloadGuard — Test Run Report
 
-**Date:** 2026-10-26 16:00 UTC  
+**Date:** 2026-10-27 09:45 UTC  
 **Environment:** Python 3.14.3, pytest 9.1.1, z3-solver 5.3.2.0, crosshair-tool 0.0.112, tree-sitter 0.26.0  
 **Platform:** Windows 11 (local)  
-**Commit:** `28345bc`  
-**Result:** 391 passed · 0 skipped · 0 failed
+**Commit:** `2bd08af`  
+**Result:** 405 passed · 0 skipped · 0 failed
 
 Run with: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -v`
 
@@ -79,7 +79,7 @@ Run with: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -
 
 ## test_analyzer.py::TestAssessConsequenceDestructive
 
-- ✓ `test_branch_over_365_days_and_many_files`
+- ✓ `test_branch_over_365_days_and_security_deletion`
 - ✓ `test_combined_flags_score`
 - ✓ `test_high_deletion_ratio_and_line_count`
 - ✓ `test_recommendation_says_do_not_merge`
@@ -96,6 +96,20 @@ Run with: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -
 
 - ✓ `test_custom_age_threshold_fires_earlier`
 - ✓ `test_custom_files_threshold`
+
+## test_analyzer.py::TestBranchAgeCannotDecideDestructive
+
+- ✓ `test_age_adds_to_destructive_content`
+- ✓ `test_age_does_not_lift_caution_content_to_destructive`
+- ✓ `test_age_does_not_lift_review_content_to_destructive`
+- ✓ `test_age_never_decides_destructive_across_signal_grid`
+- ✓ `test_age_still_escalates_safe_content`
+- ✓ `test_mass_deletion_on_old_branch_matches_fresh_branch`
+
+## test_analyzer.py::TestBranchAgeSemanticEscalation
+
+- ✓ `test_deception_on_age_only_caution_stays_caution`
+- ✓ `test_deception_on_content_caution_escalates_to_destructive`
 
 ## test_analyzer.py::TestPayloadAnalyzerInit
 
@@ -535,6 +549,7 @@ Run with: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -
 - ✓ `test_crosshair_assess_consequence_contracts`
 - ✓ `test_crosshair_temporal_drift_contracts`
 - ✓ `test_temporal_contract_excludes_non_finite_velocity`
+- ✓ `test_consequence_model_matches_production_and_contracts`
 - ✓ `test_crosshair_structural_drift_contracts`
 - ✓ `test_crosshair_semantic_mci_contracts`
 
@@ -553,3 +568,8 @@ Run with: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -
 - ✓ `test_p9_bound_depends_on_signal_caps`
 - ✓ `test_p9_model_matches_assess_consequence`
 - ✓ `test_p10_empty_signal_set_always_safe`
+- ✓ `test_p11_branch_age_never_decides_destructive`
+- ✓ `test_p11_age_never_lowers_score_and_adds_at_most_its_tier`
+- ✓ `test_p11_age_still_raises_score_below_destructive`
+- ✓ `test_p11_depends_on_age_cap`
+- ✓ `test_p11_model_matches_assess_consequence`

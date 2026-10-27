@@ -46,22 +46,22 @@ CI workflow: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/ac
 - structural_drift.dfy: 1 verified, 0 errors (AssessStructuralDrift method, S1–S7)
 - temporal_drift.dfy: 1 verified, 0 errors (AnalyzeTemporalDrift method, T1–T8)
 - Total: 9 methods/functions verified, 0 errors across all three files
-- POST-1–12: 12 postconditions on AssessConsequence (including POST-11a)
+- POST-1–12, POST-15/16: 14 postconditions on AssessConsequence (including POST-11a; POST-15: branch age never decides DESTRUCTIVE)
 - Proof files: verification/dafny/assess_consequence.dfy, structural_drift.dfy, temporal_drift.dfy
 
 ### CrossHair (symbolic execution on pure-Python mirrors of the scoring code)
 
-- Consequence model: contracts C1–C12 + POST-12 (verdict bijection, score bounds, safety-critical floors, empty-input guarantee)
+- Consequence model: contracts C-01–C-15 (verdict bijection, score bounds, safety-critical floors, empty-input guarantee, branch age never decides DESTRUCTIVE)
 - Structural drift: contracts S1–S7 (dual-gate biconditional — DESTRUCTIVE requires both ratio > threshold AND count >= min)
 - Temporal drift: contracts T1–T7 (drift_score >= 0, status bijection, zero inputs → CURRENT; velocity must be finite)
 - Semantic transparency: contracts M1–M9 (mci_score in [0,1], DECEPTIVE iff score >= 0.5, no description → UNVERIFIED)
-- Total: 36 postconditions, 0 counterexamples (10 confirmed over all paths)
+- Total: 40 postconditions, 0 counterexamples (11 confirmed over all paths; consequence_pure re-run 2026-10-27 after the §H1 fix)
 - Contract files: verification/consequence_pure.py, structural_pure.py, temporal_pure.py, semantic_pure.py
 
 ### Z3 Theorem Prover (SMT proofs on abstract model)
 
-- Properties P1–P10: typosquat implication and floor, severity ordering, score monotonicity, SAFE iff score below the review threshold, verdict determinism, score upper bound derived from the per-signal model (P9), empty-input guarantee
-- 13 tests, all pass in under a second
+- Properties P1–P11: typosquat implication and floor, severity ordering, score monotonicity, SAFE iff score below the review threshold, verdict determinism, score upper bound derived from the per-signal model (P9), empty-input guarantee, branch age never decides DESTRUCTIVE (P11)
+- 18 tests, all pass in under a second
 - Proof file: tests/proofs/test_z3_properties.py
 
 ## Proven Invariants
@@ -75,6 +75,7 @@ CI workflow: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/ac
 - AI-config-poisoning floor: ai_config_poisoning_critical == True → DESTRUCTIVE (POST-12)
 - Empty-input guarantee: all-zero inputs → SAFE; no false positives on empty diffs (POST-11a, CrossHair C11)
 - Deletion dimension cap: three correlated sub-scores (files, ratio, lines) collapsed to min(4, max+1 if >=2 active) — prevents triple-counting
+- Branch age never decides DESTRUCTIVE: DESTRUCTIVE requires the score without branch age to reach 5 (POST-15, CrossHair C14, Z3 P11)
 
 ## Scoring Parameters
 
@@ -87,7 +88,7 @@ Signal weights (additive; maximum total MAX_SCORE = 36):
 - Unverified dependency (SCA): +3 if any added package is not allowlisted
 - Critical path files deleted: +2
 - Added file content — shell or CI patterns: +2 per match, capped at +4
-- Branch age > 365 / 180 / 90 days: +3 / +2 / +1
+- Branch age > 365 / 180 / 90 days: +3 / +2 / +1, applied last; in full only when the other signals total >= 5, otherwise the score is capped at 4 (never DESTRUCTIVE from age)
 - Deletion dimensions (files/ratio/lines): each tiered +1/+2/+3; combined cap = min(4, max+1 if >=2 active)
 
 Verdict thresholds: DESTRUCTIVE >= 5, CAUTION >= 3, REVIEW >= 1, SAFE = 0.
@@ -99,7 +100,7 @@ Verdict thresholds: DESTRUCTIVE >= 5, CAUTION >= 3, REVIEW >= 1, SAFE = 0.
 - L2b SCA: package manifest diffs (requirements*.txt, pyproject.toml, package.json, go.mod, Cargo.toml) vs allowlist.yml
 - L2c Actions Poisoning: workflow files — base64 payload, credential harvest, dormant triggers, forged bot, OIDC escalation, pull_request_target
 - L2d AI Config Poisoning: .claude/.gemini settings hooks, VS Code folder-open tasks, lifecycle scripts, composer/Gemfile/binding.gyp execution, Cursor rules, MCP servers, hidden Unicode
-- L3 Consequence: weighted scoring → single verdict (VERIFIED: CrossHair C1–C12 + POST-12, Z3 P1–P10, Dafny POST-1–12)
+- L3 Consequence: weighted scoring → single verdict (VERIFIED: CrossHair C-01–C-15, Z3 P1–P11, Dafny POST-1–12 and POST-15/16)
 - L4 Structural: AST diff — named class/function/constant deletions for Python, JS/TS (incl. .mjs/.cjs/.mts/.cts), Go, Rust, Java (VERIFIED: CrossHair S1–S7, Dafny S1–S7)
 - L4b Complexity: McCabe V(G) advisory for added Python functions, no score impact
 - L5a Temporal: branch_age_days × target_commits_per_day → drift_score → CURRENT/STALE/DANGEROUS (VERIFIED: CrossHair T1–T7, Dafny T1–T8)

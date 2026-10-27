@@ -2,6 +2,18 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-27 — Branch age never decides DESTRUCTIVE (AUDIT_LOG §H1 fixed)
+
+**Fix (`2bd08af`):** branch age measures staleness, not consequence. `_assess_consequence()` applies it after every content signal: in full when the content score is already ≥ 5, otherwise capped so the total stays at the CAUTION ceiling (4). The verdict reports `branch_age_score`. The L5b deception escalation raises CAUTION to DESTRUCTIVE only when the content score alone reaches CAUTION.
+
+**Evidence:** before the fix, age decided DESTRUCTIVE in 16/25/29 of 6,480 signal combinations at the 90/180/365-day tiers. Against harness `main` trees dated 2026-11-30 and 2027-06-01 (dangling commits, not pushed), v1.6.0 fails WS03/WS04/WS05/AW02/RTA03/RTA04 (DESTRUCTIVE, exit 2); the fix keeps them CAUTION and matches all 38 exit codes, with no other verdict change. At today's `main` both versions agree on every case.
+
+**Behaviour change:** a diff whose content scores CAUTION stays CAUTION on an old branch (for example 60 files / 60,000 lines / 95 % deletion ratio, deletion dimension 4); before, age beyond 90 days made it DESTRUCTIVE.
+
+**Verification:** POST-15/16 in `consequence_pure.py` and `assess_consequence.dfy`; Z3 P11 (with non-vacuity, sensitivity and production cross-checks); a deterministic model-parity test over 20,736 inputs. CrossHair `consequence_pure` (`--per_condition_timeout 30`): exit 0, 17 conditions, 0 counterexamples, 454 s.
+
+**Tests:** 405 passed with Z3/CrossHair (`test_analyzer.py` 319); 384 passed, 21 skipped without. Harness oracle 41/41; mutation suite 16/16.
+
 ## 2026-10-26 — Harness REGRESSION_PAT replaced (AUDIT_LOG §H3 fixed)
 
 Run #27 attempt 3 (20:27 UTC) completed through `regression.yml`: 34 fixture PRs reopened, scanned on v1.6.0 and closed, no failures. Identical to the 16:45 browser sweep (34/34 exit codes, 27/34 verdicts, seven age-only SAFE→REVIEW mismatches). Harness history: 491 scans, 19 sweeps.

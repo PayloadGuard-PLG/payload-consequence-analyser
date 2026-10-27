@@ -2,7 +2,13 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch state:** `main` at `6c3df91` = **v1.6.0, released**: tag `v1.6.0` on the PR #110 merge commit (tree identical to the verified tree `f4477970…`; #110 checks passed); "Publish to PyPI" run 40350394223 succeeded; `pip install payloadguard-plg==1.6.0` from PyPI verified in a fresh virtualenv. PR #108 was closed without merging (no-op). The six fix/docs branches of this work are deleted. §V8 merged via PR #111 (`28345bc`); its branch is deleted. Documentation pass merged via PR #112 (`19215fd`); harness history and §H1–§H3 via PRs #113/#114 (`a214166`). Active: `docs/close-h3`; not merged.
+- **Branch state:** `main` at `4c2b606`. **v1.6.0 released** from `6c3df91`: tag `v1.6.0` on the PR #110 merge commit (tree identical to the verified tree `f4477970…`; #110 checks passed); "Publish to PyPI" run 40350394223 succeeded; `pip install payloadguard-plg==1.6.0` from PyPI verified in a fresh virtualenv. PR #108 was closed without merging (no-op). The six fix/docs branches of this work are deleted. §V8 merged via PR #111 (`28345bc`); its branch is deleted. Documentation pass merged via PR #112 (`19215fd`); harness history and §H1–§H3 via PRs #113/#114 (`a214166`); §H3 closed via PR #115 (`4c2b606`). Active: `fix/age-cannot-decide-destructive` (§H1); not merged.
+- **§H1 branch age cannot decide DESTRUCTIVE (2026-10-27, branch `fix/age-cannot-decide-destructive`):**
+  - Fixed (`2bd08af`): `_assess_consequence()` applies branch age after every content signal. It adds in full when the content score is already ≥ 5; otherwise it lifts the score at most to the CAUTION ceiling (4). The verdict dict reports `branch_age_score`. The L5b deception escalation raises CAUTION to DESTRUCTIVE only when the content score alone is ≥ 3. Before the fix, branch age was the deciding signal for DESTRUCTIVE in 16, 25 and 29 of 6,480 signal combinations at the 90-, 180- and 365-day tiers, and an age-only CAUTION with a deceptive description became DESTRUCTIVE.
+  - Behaviour change: a diff whose content scores CAUTION stays CAUTION on an old branch. Example: 60 files, 60,000 lines, 95 % deletion ratio (deletion dimension 4) was DESTRUCTIVE beyond 90 days and is now CAUTION, as on a fresh branch. Three legacy tests encoded the old behaviour and were updated.
+  - Verification: POST-15 (DESTRUCTIVE ⇒ content score ≥ 5) and POST-16 (content ≤ score ≤ content + age tier) in CrossHair (`consequence_pure.py`, C-14/C-15), Dafny (`assess_consequence.dfy`, new `ContentScore` function) and Z3 (P11, with non-vacuity, sensitivity and production cross-checks; the uncapped pre-fix model violates P11). CrossHair `consequence_pure` (`--per_condition_timeout 30`): exit 0 in 454 s, 17 conditions, 0 counterexamples (2 confirmed over all paths; 15, including POST-15/16, not confirmed within the 30 s budget). New deterministic test: the CrossHair model scores exactly as production on a 20,736-input grid and every postcondition holds.
+  - Harness (offline, fixture heads against harness `main` and future-dated dangling commits on its tree): at 2026-11-30 and 2027-06-01 v1.6.0 fails WS03/WS04/WS05/AW02/RTA03/RTA04 (DESTRUCTIVE, exit 2); the fix keeps them CAUTION (score 4, exit 0), matches all 38 exit codes and changes no other verdict; at today's `main` both versions agree on every case. Oracle 41/41; mutation suite 16/16. The live harness pins v1.6.0, so §H1 is resolved there only once the pin moves to a commit with this fix.
+  - Tests: 405 passed with Z3/CrossHair (`test_analyzer.py` 319, `test_consequence_engine.py` 61, `tests/proofs/` 25); 384 passed, 21 skipped without them.
 - **Harness scan history + live regression attempt (2026-10-26, branch `docs/harness-history-aging`; harness branch `data/scan-history`):**
   - Harness `tools/collect_history.py` records every `PayloadGuard` check run on the fixture PRs' head commits in harness `regression-reports/scan_history.jsonl`; artifacts expire after 90 days, check runs do not. Collected 423 scans (2026-04-24 to 2026-05-31, 17 sweeps). The last sweep (2026-05-31, `fe68338`) matches 34/34 exit codes and 33/34 verdicts against the current manifest.
   - Live regression run #27 failed before reopening any PR: `REGRESSION_PAT` returns 401 (§H3). The sweep was run instead by reopening and closing the 34 fixture PRs from the browser (no merges): v1.6.0 live 34/34 exit codes, 27/34 verdicts (the seven mismatches are age-only SAFE→REVIEW). History: 457 scans, 18 sweeps.
@@ -65,7 +71,7 @@ everse_sql, empty/missing downgrade() or down() functions, or missing/empty roll
   - `tests/proofs/test_z3_properties.py`: `_MAX_OTHER_SCORE` 19→24.
   - 16 new tests in `TestAIToolingConfigPoisoning` (8 unit, 8 integration; 3 FP-anchor safe cases).
   - Test suite: **274 pass, 0 fail** (`test_analyzer.py` alone; Z3/CrossHair require external install).
-- **Next:** After each live sweep (`regression.yml`), run `collect_history.py` and commit `regression-reports/`. Decide whether D08 on AW04 (SAFE-expected) should block in enforce mode. Decide §H1 before 2026-11-22 and §H2. Then Sprint 2 (L1-ext: executable magic bytes + compound large-blob detector) and Sprint 3 (harness WS08/WS09/WS10).
+- **Next:** After each live sweep (`regression.yml`), run `collect_history.py` and commit `regression-reports/`. Decide whether D08 on AW04 (SAFE-expected) should block in enforce mode. Move the harness pin to a commit with the §H1 fix before 2026-11-22 (release decision pending), then §H2. Then Sprint 2 (L1-ext: executable magic bytes + compound large-blob detector) and Sprint 3 (harness WS08/WS09/WS10).
 - **CI:** `trigger-regression.yml` manual-only (`workflow_dispatch`). Harness `regression.yml` also manual-only.
 - **Harness regression — last verified 2026-06-01 (analyser SHA fe68338, v1.3.0) — 34/34 PASS.**
   - Sprint 1 adds a new detection layer; re-regression required after merge to confirm no regressions on existing 34 cases.
@@ -98,7 +104,7 @@ everse_sql, empty/missing downgrade() or down() functions, or missing/empty roll
   - `scripts/pc-smoke-test.sh`: one-command build+run+verify. Run with `sudo bash scripts/pc-smoke-test.sh`.
 - **Phase 2 Stage 2 (Z3 proofs):** `tests/proofs/test_z3_properties.py`: P1–P10. `_MAX_OTHER_SCORE` updated 19→24 (Sprint 1).
 - **Phase 2 Stage 1 (auto-remediation):** `remediate.py` `WorkflowRemediator` operational.
-- **Test suite:** `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` → **374 passed, 17 skipped** without Z3/CrossHair; **391 passed** with them installed (`tests/proofs/` 19 tests) (2026-10-26).
+- **Test suite:** `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` → **384 passed, 21 skipped** without Z3/CrossHair; **405 passed** with them installed (`tests/proofs/` 25 tests) (2026-10-27).
 - **Open findings:** INC-3 (direct push to main).
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
@@ -148,10 +154,10 @@ action.yml                  — GitHub Action composite wrapper
 agent/                      — eBPF runtime defence agent (Go + cilium/ebpf)
 agent/bpf/probe.c           — 4 tracepoint probes + pg_config/egress_allow_ipv4 BPF maps
 scripts/pc-smoke-test.sh    — one-command build+verify on real kernel
-test_analyzer.py            — legacy, layer, policy, Action and packaging pytest suite (311 tests)
+test_analyzer.py            — legacy, layer, policy, Action and packaging pytest suite (319 tests)
 test_consequence_engine.py  — SCG & consequence engine pytest suite (61 tests)
-tests/proofs/               — Z3 formal property proofs (P1–P10) + CrossHair pytest wrapper
-verification/        — CrossHair verification targets: consequence_pure (C1-C12), temporal_pure (T1-T7), structural_pure (S1-S7), semantic_pure (M1-M9)
+tests/proofs/               — Z3 formal property proofs (P1–P11) + CrossHair pytest wrapper + L3 model parity test
+verification/        — CrossHair verification targets: consequence_pure (C-01–C-15), temporal_pure (T1-T7), structural_pure (S1-S7), semantic_pure (M1-M9)
 allowlist.yml        — SCA package allowlist (user-created, read from the target branch, not in repo by default)
 payloadguard.yml     — per-repo threshold and consequence-mode config (user-created, read from the target branch, not in repo by default)
 AUDIT_LOG.md         — architectural review findings + incident reports
@@ -171,7 +177,7 @@ DEVLOG.md           — chronological session log
 - Critical path deleted: +2
 - Added file content flags (CI triggers/shell): +2 per match, capped at +4
 - Line/file/ratio flags: up to +4 (capped, correlated dims)
-- Branch age: +1/+2/+3
+- Branch age: +1/+2/+3, applied after all other signals; it adds in full only when they total ≥ 5, otherwise the score is capped at 4 — branch age never decides DESTRUCTIVE (§H1)
 - Thresholds: score >=5 -> DESTRUCTIVE, >=3 -> CAUTION, >=1 -> REVIEW
 - MAX_SCORE: 36
 
@@ -199,6 +205,9 @@ consequence:
 ## Current Version
 
 `__version__ = "1.6.0"` (`analyze.py` / `pyproject.toml`). Tags: `v1.5.0` → `93f94f9`; `v1.6.0` → `6c3df91` (published to PyPI 2026-10-26). PyPI had 1.3.0 as its latest release: the v1.4.0 and v1.5.0 tag builds failed (§V3), so 1.6.0 is the first PyPI release since 1.3.0.
+
+### Unreleased
+- §H1: branch age never decides DESTRUCTIVE. Branch age is applied after every other signal. When those signals total 5 or more it adds in full; otherwise it raises the score at most to 4, so age can lift a verdict to REVIEW or CAUTION but never decides DESTRUCTIVE. The verdict reports `branch_age_score`; the L5b deception escalation raises CAUTION to DESTRUCTIVE only when the content score alone reaches CAUTION. Verified as POST-15/16 (CrossHair, Dafny) and Z3 P11.
 
 ### v1.6.0 changes (2026-10-26) — v1.5.0 audit fixes
 - §V1 (PR #102): `payloadguard.yml` and `allowlist.yml` are read from the target branch, not the PR merge result (`load_config(repo_path, ref)`, `_load_allowlist(repo_path, ref)`).
@@ -266,7 +275,7 @@ consequence:
 |---|---|---|---|
 | INC-3 | Direct push to main -> L5b returns UNVERIFIED but raises no flag | MEDIUM | Backlog |
 | §2.3 | Single-branch clone / detached HEAD raises BadName exception | MEDIUM | Backlog |
-| §H1 | Harness fixture aging: six CAUTION-expected stable cases reach DESTRUCTIVE for branch age alone against a harness `main` commit dated from 2026-11-22 | MEDIUM | Open — decision needed |
+| §H1 | Harness fixture aging: six CAUTION-expected stable cases reach DESTRUCTIVE for branch age alone against a harness `main` commit dated from 2026-11-22 | MEDIUM | **RESOLVED** in the analyser — branch age never decides DESTRUCTIVE; the harness pin must move to a commit with the fix |
 | §H2 | RTA01 expects REVIEW from a content-scan signal removed in v1.2.0; REVIEW now comes from branch age only | LOW | Open — decision needed |
 | §H3 | Harness `REGRESSION_PAT` returned 401; live regression could not run | MEDIUM | **RESOLVED** — secret replaced 2026-10-26; run #27 attempt 3 succeeded |
 | WS03 | workflow-security/dormant-trigger: expected DESTRUCTIVE, getting CAUTION (score=3) | MEDIUM | **RESOLVED** — test expectation corrected (see DEVLOG 2026-05-31) |
@@ -275,8 +284,8 @@ consequence:
 
 | Phase | Tool | Target | Status |
 |---|---|---|---|
-| 1 | Z3 SMT | L3 scoring — 10 properties (P1–P10) | Done — `tests/proofs/test_z3_properties.py` |
-| 2 | CrossHair | All 4 layers — C1–C12, T1–T7, S1–S7, M1–M9 | Done — `verification/consequence_pure.py`, `temporal_pure.py`, `structural_pure.py`, `semantic_pure.py` |
+| 1 | Z3 SMT | L3 scoring — 11 properties (P1–P11) | Done — `tests/proofs/test_z3_properties.py` |
+| 2 | CrossHair | All 4 layers — C-01–C-15, T1–T7, S1–S7, M1–M9 | Done — `verification/consequence_pure.py`, `temporal_pure.py`, `structural_pure.py`, `semantic_pure.py` |
 | 3 | Nagini | `_assess_consequence()` — heap/null safety | **SKIPPED** — pure integer scorer; no heap or concurrency; toolchain cost (Java, Viper JAR, Python ≤3.12) adds no theorem beyond CrossHair |
 | 4 | Dafny | L3/L4/L5a reference implementation vs spec | Done — `verification/dafny/assess_consequence.dfy`, `structural_drift.dfy`, `temporal_drift.dfy`; CI: `verify-dafny.yml`; last run #16 (2026-10-26): 9 verified, 0 errors |
 | 5 | Publication | `VERIFICATION.md` public summary | Done — three-method summary, Dafny row added |
@@ -357,7 +366,7 @@ broad checks and belong in CI.
 
 - Python 3.11+ (`requires-python >=3.11`; 3.11 in CI and the Action, 3.14 verified locally)
 - Dependencies: `pip install -r requirements.txt` — GitPython, PyYAML, PyJWT, requests, tree-sitter + 6 grammar packages; z3-solver and crosshair-tool for the proof tests
-- Test: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` (391 passed with the proof tools; 374 passed, 17 skipped without)
+- Test: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` (405 passed with the proof tools; 384 passed, 21 skipped without)
 - CI: GitHub Actions via `action.yml` -- runs on every PR in consumer repos
 
 ---
@@ -407,7 +416,7 @@ Tracking table: every verified layer must have an entry in `VERIFICATION.md` and
 
 | Layer | CrossHair | Z3 | Dafny |
 |---|---|---|---|
-| L3 Consequence | C1–C12 + POST-12 (`consequence_pure.py`) | P1–P10 (`test_z3_properties.py`) | POST-1–12 (`assess_consequence.dfy`) |
+| L3 Consequence | C-01–C-15 incl. POST-15/16 (`consequence_pure.py`) | P1–P11 (`test_z3_properties.py`) | POST-1–12, POST-15/16 (`assess_consequence.dfy`) |
 | L4 Structural | S1–S7 (`structural_pure.py`) | — | S1–S7 (`structural_drift.dfy`) |
 | L5a Temporal | T1–T7 (`temporal_pure.py`) | — | T1–T8 (`temporal_drift.dfy`) |
 | L5b Semantic | M1–M9 (`semantic_pure.py`) | — | — |
@@ -427,6 +436,7 @@ The following invariants are machine-verified and must not be violated by any co
 - **Verdict bijection:** Every score maps to exactly one verdict; every verdict maps to exactly one score range (POST-4–7)
 - **Safety-critical floor:** `security_file_deletions > 0` → DESTRUCTIVE; `structural_severity == CRITICAL` → DESTRUCTIVE; `actions_poisoning_critical` → DESTRUCTIVE; `ai_config_poisoning_critical` → DESTRUCTIVE (POST-8/9/10/12)
 - **Empty-input guarantee:** All-zero inputs → SAFE; no false positives on empty diffs (POST-11a)
+- **Branch age never decides DESTRUCTIVE:** DESTRUCTIVE requires the score without branch age to reach 5; age adds between 0 and its tier (POST-15/16, Z3 P11)
 - **Deletion dimension cap:** Three correlated deletion sub-scores (files/ratio/lines) are collapsed to `min(4, max + 1 if ≥2 active)` — prevents triple-counting
 
 These invariants hold over the entire input domain by construction. If a code change requires relaxing one, the verification proofs must be updated before merging.
