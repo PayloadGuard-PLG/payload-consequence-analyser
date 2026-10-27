@@ -724,8 +724,8 @@ crosshair check semantic_pure    --analysis_kind PEP316 --per_condition_timeout 
 pytest tests/proofs/ -v --timeout=60
 ```
 
-Expected: all CrossHair checks exit 0 (no counterexamples) and the 19 pytest proof tests pass.
-Last runs (2026-10-26): Dafny in GitHub Actions (run #16, 9 verified, 0 errors); Z3 and CrossHair
+Expected: all CrossHair checks exit 0 (no counterexamples) and the 25 pytest proof tests pass.
+Last runs (2026-10-27): Dafny in GitHub Actions (run #19, 11 verified, 0 errors); Z3 and CrossHair
 locally. Results and environment are recorded in `PROOFS.md`.
 
 ### 6.4 Constraint

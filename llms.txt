@@ -41,11 +41,11 @@ CI workflow: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/ac
 
 ### Dafny (machine-checked proofs over entire input domain)
 
-- Tool: Dafny 4.9.1, Boogie + Z3 4.12.1 bundled (GitHub Actions run #16)
-- assess_consequence.dfy: 7 verified, 0 errors (6 helper functions + AssessConsequence method)
+- Tool: Dafny 4.9.1, Boogie + Z3 4.12.1 bundled (GitHub Actions run #19, 2026-10-27)
+- assess_consequence.dfy: 9 verified, 0 errors (AssessConsequence method and 7 helper functions, incl. ContentScore)
 - structural_drift.dfy: 1 verified, 0 errors (AssessStructuralDrift method, S1–S7)
 - temporal_drift.dfy: 1 verified, 0 errors (AnalyzeTemporalDrift method, T1–T8)
-- Total: 9 methods/functions verified, 0 errors across all three files
+- Total: 11 verified, 0 errors across all three files
 - POST-1–12, POST-15/16: 14 postconditions on AssessConsequence (including POST-11a; POST-15: branch age never decides DESTRUCTIVE)
 - Proof files: verification/dafny/assess_consequence.dfy, structural_drift.dfy, temporal_drift.dfy
 

@@ -2,7 +2,7 @@
 
 Three orthogonal verification methods cover the pure scoring logic across four analysis layers.
 
-**Last runs (2026-10-26):** Dafny 9 verified, 0 errors (GitHub Actions run #16); CrossHair 40 postconditions, 0 counterexamples (`consequence_pure` re-run 2026-10-27 after the §H1 fix); Z3 18 tests passed (2026-10-27). Results and environments: [`PROOFS.md`](PROOFS.md).
+**Last runs (2026-10-27):** Dafny 11 verified, 0 errors (GitHub Actions run #19, after the §H1 fix); CrossHair 40 postconditions, 0 counterexamples (`consequence_pure` re-run 2026-10-27 after the §H1 fix); Z3 18 tests passed (2026-10-27). Results and environments: [`PROOFS.md`](PROOFS.md).
 
 ### CrossHair Symbolic Execution (Phase 2)
 

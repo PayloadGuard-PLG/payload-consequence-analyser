@@ -10,7 +10,7 @@ Reverse-chronological. Most recent entry first.
 
 **Behaviour change:** a diff whose content scores CAUTION stays CAUTION on an old branch (for example 60 files / 60,000 lines / 95 % deletion ratio, deletion dimension 4); before, age beyond 90 days made it DESTRUCTIVE.
 
-**Verification:** POST-15/16 in `consequence_pure.py` and `assess_consequence.dfy`; Z3 P11 (with non-vacuity, sensitivity and production cross-checks); a deterministic model-parity test over 20,736 inputs. CrossHair `consequence_pure` (`--per_condition_timeout 30`): exit 0, 17 conditions, 0 counterexamples, 454 s.
+**Verification:** POST-15/16 in `consequence_pure.py` and `assess_consequence.dfy`; Z3 P11 (with non-vacuity, sensitivity and production cross-checks); a deterministic model-parity test over 20,736 inputs. CrossHair `consequence_pure` (`--per_condition_timeout 30`): exit 0, 17 conditions, 0 counterexamples, 454 s. Dafny run #19 (PR #116): 9 + 1 + 1 verified, 0 errors.
 
 **Tests:** 405 passed with Z3/CrossHair (`test_analyzer.py` 319); 384 passed, 21 skipped without. Harness oracle 41/41; mutation suite 16/16.
 

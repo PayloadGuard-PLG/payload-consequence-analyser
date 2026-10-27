@@ -1,16 +1,17 @@
 # PayloadGuard — Formal Verification Record
 
 This page is the authoritative proof artifact record for PayloadGuard v1.6.0
-(proofs last run 2026-10-26 on `main` `9e83cce`, plus the §V10 change `c74f612`).
+(proofs last run 2026-10-26 on `main` `9e83cce`, plus the §V10 change `c74f612`; L3 re-verified
+2026-10-27 after the §H1 change `2bd08af`: Dafny run #19, CrossHair `consequence_pure`, Z3).
 Three independent verification methods — Dafny, CrossHair, and Z3 — cover the same
 scoring logic from different angles. A defect would have to produce a consistent
 false result across all three simultaneously to go undetected.
 
-**Quick summary (2026-10-26):**
+**Quick summary (2026-10-27):**
 
 | Method | Tool | Scope | Result |
 |---|---|---|---|
-| Machine-checked proofs | Dafny 4.9.1 + Boogie + Z3 4.12.1 | L3, L4, L5a — entire input domain | 9 methods/functions verified, 0 errors (GitHub Actions run #16) |
+| Machine-checked proofs | Dafny 4.9.1 + Boogie + Z3 4.12.1 | L3, L4, L5a — entire input domain | 11 verified, 0 errors (GitHub Actions run #19, 2026-10-27) |
 | Symbolic execution | CrossHair 0.0.112 (PEP316 contracts) | L3, L4, L5a, L5b — pure-Python mirror modules in `verification/` | 40 postconditions, 0 counterexamples after the §V10 fix (one counterexample found and fixed in `temporal_pure`); `consequence_pure` re-run 2026-10-27 after the §H1 fix |
 | SMT proofs | Z3 (z3-solver 5.3.2.0) | L3, L2c — abstract scoring model | 11 properties, all `unsat`; P9 is model-based with tightness and sensitivity checks (§V8 fixed); P11 proves branch age never decides DESTRUCTIVE (§H1) |
 
@@ -30,19 +31,20 @@ Every `ensures` clause is a machine-checked theorem.
 
 ```
 Dafny 4.9.1 (release zip), Boogie + Z3 4.12.1 (bundled)
-Generated: 2026-10-26T12:19:20Z — GitHub Actions "Dafny Verification" run #16, ubuntu-24.04
-Commit: 9e83cce (main)
+Generated: 2026-10-27T09:47:59Z — GitHub Actions "Dafny Verification" run #19 (PR #116), ubuntu-24.04
+Commit: fe24c59 (fix/age-cannot-decide-destructive)
 ```
 
 ### Committed verification output
 
-This run covers the current `assess_consequence.dfy`, including the 2026-06-11 Sprint 1 change
-(`MAX_SCORE` 36, POST-12). The previous committed output (2026-05-28) predated that change
-(`AUDIT_LOG.md` §V9).
+This run covers the current `assess_consequence.dfy`, including the §H1 change (`2bd08af`:
+`ContentScore`, POST-15, POST-16) and the 2026-06-11 Sprint 1 change (`MAX_SCORE` 36, POST-12).
+Run #16 (2026-10-26, 7 + 1 + 1 verified) preceded §H1; the output before that (2026-05-28) predated
+Sprint 1 (`AUDIT_LOG.md` §V9).
 
 ```
 ## assess_consequence.dfy
-Dafny program verifier finished with 7 verified, 0 errors
+Dafny program verifier finished with 9 verified, 0 errors
 
 ## structural_drift.dfy
 Dafny program verifier finished with 1 verified, 0 errors
@@ -57,8 +59,9 @@ Full log: [`verification/dafny/assess_consequence_verify.log`](verification/dafn
 
 Source: [`verification/dafny/assess_consequence.dfy`](verification/dafny/assess_consequence.dfy)
 
-"7 verified" = 6 pure helper functions (AgeScore, FilesScore, LinesScore, RatioScore,
-DeletionDim, ContentFlagsScore) + 1 main method (AssessConsequence).
+"9 verified" is Dafny's count for the file, which declares seven pure helper functions (AgeScore,
+FilesScore, LinesScore, RatioScore, DeletionDim, ContentFlagsScore, ContentScore) and the
+AssessConsequence method; the count was 7 before `ContentScore` and POST-15/16 were added.
 
 The `AssessConsequence` method carries 14 postconditions (POST-1–12 including POST-11a, POST-15, POST-16).
 Excerpt from the current `assess_consequence.dfy` (`MAX_SCORE` = 36):

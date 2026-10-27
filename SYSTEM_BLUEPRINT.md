@@ -62,7 +62,7 @@ payload-consequence-analyser/
 │   ├── semantic_pure.py              # L5b: CrossHair contracts M1–M9 (mci_score bounds, DECEPTIVE ↔ ≥0.5)
 │   └── dafny/
 │       ├── assess_consequence.dfy    # L3: Dafny POST-1–12 (machine-checked over entire input domain)
-│       ├── assess_consequence_verify.log  # dafny verify output for all three files (CI run #16, 2026-10-26)
+│       ├── assess_consequence_verify.log  # dafny verify output for all three files (CI run #19, 2026-10-27)
 │       ├── structural_drift.dfy      # L4: Dafny S1–S7 dual-gate biconditional
 │       └── temporal_drift.dfy        # L5a: Dafny T1–T8 linear drift, zero-input guarantees
 │
@@ -552,7 +552,7 @@ PayloadAnalyzer.analyze()
 |---|---|---|---|
 | CrossHair | C-01–C-15 (L3), S1–S7 (L4), T1–T7 (L5a), M1–M9 (L5b) — 40 postconditions | 0 counterexamples | `cd verification && crosshair check <module> --analysis_kind PEP316 --per_condition_timeout 30` |
 | Z3 SMT | P1–P11 (L3, L2c) | 18 tests passed | `pytest tests/proofs/test_z3_properties.py -v` |
-| Dafny | POST-1–12 (L3), S1–S7 (L4), T1–T8 (L5a) | 9 verified, 0 errors (CI run #16) | `dafny verify verification/dafny/assess_consequence.dfy` |
+| Dafny | POST-1–12, POST-15/16 (L3), S1–S7 (L4), T1–T8 (L5a) | 11 verified, 0 errors (CI run #19) | `dafny verify verification/dafny/assess_consequence.dfy` |
 | pytest (unit, integration, SCG) | all layers, `consequence.v1`, Action path, packaging | 372 passed | `python -m pytest test_analyzer.py test_consequence_engine.py -v` |
 | pytest (proofs) | Z3 properties, CrossHair wrappers, temporal contract regression | 19 passed | `python -m pytest tests/proofs/ -v` |
 
