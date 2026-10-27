@@ -1,7 +1,7 @@
 # PayloadGuard — Test Registry
 
-**Last run:** 2026-10-26 15:46 UTC  
-**Result:** 330 passed · 0 skipped · 0 failed · 330 total
+**Last run:** 2026-10-27 16:55 UTC  
+**Result:** 357 passed · 0 skipped · 0 failed · 357 total
 
 Run with: `python -m pytest test_analyzer.py tests/proofs/ --timeout=30 -v`  
 Regenerate this file: `python tools/gen_test_registry.py`
@@ -75,7 +75,7 @@ Regenerate this file: `python tools/gen_test_registry.py`
 
 ## test_analyzer.py — TestAssessConsequenceDestructive
 
-- ✓ `test_branch_over_365_days_and_many_files`
+- ✓ `test_branch_over_365_days_and_security_deletion`
 - ✓ `test_combined_flags_score`
 - ✓ `test_high_deletion_ratio_and_line_count`
 - ✓ `test_recommendation_says_do_not_merge`
@@ -92,6 +92,31 @@ Regenerate this file: `python tools/gen_test_registry.py`
 
 - ✓ `test_custom_age_threshold_fires_earlier`
 - ✓ `test_custom_files_threshold`
+
+## test_analyzer.py — TestBranchAgeCannotDecideDestructive
+
+- ✓ `test_age_adds_to_destructive_content`
+- ✓ `test_age_does_not_lift_caution_content_to_destructive`
+- ✓ `test_age_does_not_lift_review_content_to_destructive`
+- ✓ `test_age_never_decides_destructive_across_signal_grid`
+- ✓ `test_age_still_escalates_safe_content`
+- ✓ `test_mass_deletion_on_old_branch_matches_fresh_branch`
+
+## test_analyzer.py — TestBranchAgeSemanticEscalation
+
+- ✓ `test_deception_on_age_only_caution_stays_caution`
+- ✓ `test_deception_on_content_caution_escalates_to_destructive`
+
+## test_analyzer.py — TestEscalatedVerdictFields
+
+- ✓ `test_deception_on_age_only_caution_keeps_status_and_score`
+- ✓ `test_deception_on_clean_change_reports_caution`
+- ✓ `test_deception_on_content_caution_reports_destructive`
+- ✓ `test_l3_fields_keep_their_values`
+- ✓ `test_missing_description_reports_review`
+- ✓ `test_raise_keeps_a_score_already_in_band`
+- ✓ `test_raise_lifts_score_to_lowest_score_of_new_band`
+- ✓ `test_semantic_escalation_across_signal_grid`
 
 ## test_analyzer.py — TestPayloadAnalyzerInit
 
@@ -306,6 +331,7 @@ Regenerate this file: `python tools/gen_test_registry.py`
 - ✓ `test_custom_trusted_oidc_consumer_via_config`
 - ✓ `test_decode_error_does_not_crash`
 - ✓ `test_deleted_workflow_not_scanned`
+- ✓ `test_dormant_trigger_detected_in_every_yaml_layout`
 - ✓ `test_dormant_trigger_with_shell_exec`
 - ✓ `test_dormant_trigger_without_shell_is_safe`
 - ✓ `test_flag_text_appears_in_verdict`
@@ -326,9 +352,11 @@ Regenerate this file: `python tools/gen_test_registry.py`
 - ✓ `test_oidc_elevation_without_consumer`
 - ✓ `test_pull_request_target_alone_is_detected`
 - ✓ `test_pull_request_target_with_write_permissions_is_critical`
+- ✓ `test_push_only_trigger_is_not_dormant`
 - ✓ `test_typosquat_detection_patterns`
 - ✓ `test_typosquatted_oidc_action_detected_as_critical`
 - ✓ `test_typosquatted_oidc_action_fails_legitimacy_check`
+- ✓ `test_unparseable_workflow_keeps_line_pattern_detection`
 - ✓ `test_yaml_folded_block_base64_detected`
 - ✓ `test_yaml_literal_block_base64_detected`
 
@@ -412,8 +440,10 @@ Regenerate this file: `python tools/gen_test_registry.py`
 
 ## test_analyzer.py — TestPolicyReadFromTargetBranch
 
+- ✓ `test_advisory_review_carries_review_recommendation`
 - ✓ `test_cli_flag_takes_precedence_over_env_mode`
 - ✓ `test_control_destructive_change_blocks_under_base_policy`
+- ✓ `test_enforce_block_reports_destructive_fields`
 - ✓ `test_env_mode_still_overrides_policy_file`
 - ✓ `test_legitimate_change_passes_under_base_policy`
 - ✓ `test_load_config_ref_reads_commit_not_working_tree`
@@ -449,6 +479,7 @@ Regenerate this file: `python tools/gen_test_registry.py`
 - ✓ `test_crosshair_assess_consequence_contracts`
 - ✓ `test_crosshair_temporal_drift_contracts`
 - ✓ `test_temporal_contract_excludes_non_finite_velocity`
+- ✓ `test_consequence_model_matches_production_and_contracts`
 - ✓ `test_crosshair_structural_drift_contracts`
 - ✓ `test_crosshair_semantic_mci_contracts`
 
@@ -467,3 +498,8 @@ Regenerate this file: `python tools/gen_test_registry.py`
 - ✓ `test_p9_bound_depends_on_signal_caps`
 - ✓ `test_p9_model_matches_assess_consequence`
 - ✓ `test_p10_empty_signal_set_always_safe`
+- ✓ `test_p11_branch_age_never_decides_destructive`
+- ✓ `test_p11_age_never_lowers_score_and_adds_at_most_its_tier`
+- ✓ `test_p11_age_still_raises_score_below_destructive`
+- ✓ `test_p11_depends_on_age_cap`
+- ✓ `test_p11_model_matches_assess_consequence`

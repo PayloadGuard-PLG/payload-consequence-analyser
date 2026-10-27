@@ -2,7 +2,12 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch state:** `main` at `041b411`. **v1.6.0 released** from `6c3df91`: tag `v1.6.0` on the PR #110 merge commit (tree identical to the verified tree `f4477970…`; #110 checks passed); "Publish to PyPI" run 40350394223 succeeded; `pip install payloadguard-plg==1.6.0` from PyPI verified in a fresh virtualenv. PR #108 was closed without merging (no-op). The six fix/docs branches of this work are deleted. §V8 merged via PR #111 (`28345bc`); its branch is deleted. Documentation pass merged via PR #112 (`19215fd`); harness history and §H1–§H3 via PRs #113/#114 (`a214166`); §H3 closed via PR #115 (`4c2b606`). §H1 merged via PR #116 (`101126b`) and §H2 via PR #117 (`b2d7436`); the harness workflow pins `40b27dc` (harness PRs #81 and #82, merged; RTA01 expects CAUTION). Handover sync merged via PR #118 (`58a9e28`); §V12 via PR #119 (`041b411`). The merged branches of this work are deleted. Active: `docs/handover-after-v12` (this handover sync); not merged.
+- **Branch state:** `main` at `0c3482c`. **v1.6.0 released** from `6c3df91`: tag `v1.6.0` on the PR #110 merge commit (tree identical to the verified tree `f4477970…`; #110 checks passed); "Publish to PyPI" run 40350394223 succeeded; `pip install payloadguard-plg==1.6.0` from PyPI verified in a fresh virtualenv. PR #108 was closed without merging (no-op). The six fix/docs branches of this work are deleted. §V8 merged via PR #111 (`28345bc`); its branch is deleted. Documentation pass merged via PR #112 (`19215fd`); harness history and §H1–§H3 via PRs #113/#114 (`a214166`); §H3 closed via PR #115 (`4c2b606`). §H1 merged via PR #116 (`101126b`) and §H2 via PR #117 (`b2d7436`); the harness workflow pins `40b27dc` (harness PRs #81 and #82, merged; RTA01 expects CAUTION). Handover sync merged via PR #118 (`58a9e28`); §V12 via PR #119 (`041b411`); the following handover sync via PR #120 (`0c3482c`). The merged branches of this work are deleted. Active: `docs/readme-changelog-devlog-split` (documentation restructure); not merged.
+- **Documentation restructure (2026-10-27, branch `docs/readme-changelog-devlog-split`):**
+  - `README.md` rewritten around functionality: verdicts and scoring, layers, detections, consequence engine, Action inputs and outputs, CLI, configuration defaults, reports, limitations, verification scope. It no longer carries release notes, test or proof counts, or audit status. The Action inputs it omitted (`app-id`, `private-key`, `installation-id`, `auto-remediate`, `runtime-mode`) are documented; the SARIF note is corrected (CLI only).
+  - New `CHANGELOG.md` (user-visible changes, 1.0.0 to Unreleased). New `DEVLOG.md` opens with the state at the cut-over; the former log (1,356 lines) is the closed archive `docs/devlog/DEVLOG-2026-04-22_to_2026-10-27.md`, moved with history.
+  - Corrected: INC-3 was fixed on 2026-05-25 (PR #42) but listed open (AUDIT_LOG, this file); stale test and proof counts in SYSTEM_BLUEPRINT, PROOFS and VERIFICATION (now 418 / 397 + 21 skipped; `tests/proofs/` 25); `TEST_REGISTRY.md` regenerated.
+  - Left for a decision (listed in DEVLOG 2026-10-27): `AGENTS.md` (describes a research branch), `VERIFICATION_SPEC.md` §6 versus `VERIFICATION.md` on L4/L5a, scratch and R&D files in the repository root. No code changed.
 - **§V12 escalated verdict fields (2026-10-27, branch `fix/v12-escalated-verdict-fields`):**
   - Fixed (`529014e`): the L5b escalations changed only `verdict["status"]`. A deceptive description on a change with no signals reported CAUTION with severity LOW, score 0 and "✓ Proceed with normal review process"; on a content CAUTION it reported DESTRUCTIVE (exit 2) with severity HIGH, score 4 and "REVIEW CAREFULLY". Advisory mode raised SAFE to REVIEW but kept SAFE's recommendation. `_raise_verdict()` now performs every escalation after L3 (consequence policy, L5b): severity and recommendation follow the new status, the score rises to the lowest score of its band (REVIEW 1, CAUTION 3, DESTRUCTIVE 5), and `escalation_score` records the points added: severity_score = content score + `branch_age_score` + `escalation_score`. `_assess_consequence()` reads severity and recommendation from the same table (`_VERDICT_BANDS`); a deception escalation names the description in its recommendation; the L5b block is now `_apply_semantic_transparency()`. Statuses and exit codes are unchanged.
   - Harness, offline against `main` `c801635`: all 38 fixtures are identical before and after in status, severity, score, recommendation and exit code (no fixture escalates). Oracle 41/41; mutation suite 16/16.
@@ -82,7 +87,7 @@ everse_sql, empty/missing downgrade() or down() functions, or missing/empty roll
   - `tests/proofs/test_z3_properties.py`: `_MAX_OTHER_SCORE` 19→24.
   - 16 new tests in `TestAIToolingConfigPoisoning` (8 unit, 8 integration; 3 FP-anchor safe cases).
   - Test suite: **274 pass, 0 fail** (`test_analyzer.py` alone; Z3/CrossHair require external install).
-- **Next:** After each live sweep (`regression.yml`), run `collect_history.py` and commit `regression-reports/`. Decide whether D08 on AW04 (SAFE-expected) should block in enforce mode. Consumer repositories pin `40b27dc` (§H1 and §H2 fixes, no release yet) and start in shadow mode. Release when ready: the tag push publishes to PyPI; the GitHub Release must be published in the web UI with the Marketplace option (v1.6.0 has no Release, so Marketplace still shows v1.5.0). Decide §V13. Then Sprint 2 (L1-ext: executable magic bytes + compound large-blob detector) and Sprint 3 (harness WS08/WS09/WS10).
+- **Next:** After each live sweep (`regression.yml`), run `collect_history.py` and commit `regression-reports/`. Decide whether D08 on AW04 (SAFE-expected) should block in enforce mode. Consumer repositories pin `40b27dc` (§H1 and §H2 fixes, no release yet) and start in shadow mode. Release when ready: the tag push publishes to PyPI; the GitHub Release must be published in the web UI with the Marketplace option (v1.6.0 has no Release, so Marketplace still shows v1.5.0). Decide §V13 and the documentation items listed in DEVLOG 2026-10-27. Then Sprint 2 (L1-ext: executable magic bytes + compound large-blob detector) and Sprint 3 (harness WS08/WS09/WS10).
 - **CI:** `trigger-regression.yml` manual-only (`workflow_dispatch`). Harness `regression.yml` also manual-only.
 - **Harness regression — last verified 2026-06-01 (analyser SHA fe68338, v1.3.0) — 34/34 PASS.**
   - Sprint 1 adds a new detection layer; re-regression required after merge to confirm no regressions on existing 34 cases.
@@ -116,7 +121,7 @@ everse_sql, empty/missing downgrade() or down() functions, or missing/empty roll
 - **Phase 2 Stage 2 (Z3 proofs):** `tests/proofs/test_z3_properties.py`: P1–P10. `_MAX_OTHER_SCORE` updated 19→24 (Sprint 1).
 - **Phase 2 Stage 1 (auto-remediation):** `remediate.py` `WorkflowRemediator` operational.
 - **Test suite:** `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` → **397 passed, 21 skipped** without Z3/CrossHair; **418 passed** with them installed (`tests/proofs/` 25 tests) (2026-10-27).
-- **Open findings:** INC-3 (direct push to main), §2.3 (detached HEAD), §V13 (L5b section directive); see the Open Findings table.
+- **Open findings:** §2.3 (detached HEAD), §V13 (L5b section directive); see the Open Findings table.
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
 - **Blockers:** None.
@@ -173,7 +178,8 @@ allowlist.yml        — SCA package allowlist (user-created, read from the targ
 payloadguard.yml     — per-repo threshold and consequence-mode config (user-created, read from the target branch, not in repo by default)
 AUDIT_LOG.md         — architectural review findings + incident reports
 WHITEPAPER.md        — full technical specification
-DEVLOG.md           — chronological session log
+CHANGELOG.md        — user-visible changes per release
+DEVLOG.md           — engineering log from 2026-10-27 (earlier entries: docs/devlog/)
 ```
 
 ### Scoring
@@ -287,14 +293,14 @@ consequence:
 
 | ID | Description | Severity | Priority |
 |---|---|---|---|
-| INC-3 | Direct push to main -> L5b returns UNVERIFIED but raises no flag | MEDIUM | Backlog |
+| INC-3 | Direct push to main -> L5b returns UNVERIFIED but raises no flag | MEDIUM | **RESOLVED** (2026-05-25, PR #42) — UNVERIFIED raises SAFE to REVIEW; tests in `test_analyzer.py` |
 | §2.3 | Single-branch clone / detached HEAD raises BadName exception | MEDIUM | Backlog |
 | §V12 | L5b escalations change only the verdict status; severity, score and recommendation stay at their L3 values (e.g. DESTRUCTIVE [HIGH], score 4, "REVIEW CAREFULLY") | LOW | **RESOLVED** — every escalation after L3 sets severity, recommendation and a score in the new band (`_raise_verdict()`) |
 | §V13 | The L5b report section prints its own "❌ DO NOT MERGE" directive for every DECEPTIVE_PAYLOAD result, also when the verdict is CAUTION (exit 0) | LOW | Open — decision needed |
 | §H1 | Harness fixture aging: six CAUTION-expected stable cases reach DESTRUCTIVE for branch age alone against a harness `main` commit dated from 2026-11-22 | MEDIUM | **RESOLVED** in the analyser — branch age never decides DESTRUCTIVE; the harness pin must move to a commit with the fix |
 | §H2 | RTA01 expected REVIEW from a content-scan signal removed in v1.2.0; its inline `on: workflow_dispatch` also evaded the L2c dormant-trigger check | LOW | **RESOLVED** — triggers read from parsed YAML; RTA01 expects CAUTION |
 | §H3 | Harness `REGRESSION_PAT` returned 401; live regression could not run | MEDIUM | **RESOLVED** — secret replaced 2026-10-26; run #27 attempt 3 succeeded |
-| WS03 | workflow-security/dormant-trigger: expected DESTRUCTIVE, getting CAUTION (score=3) | MEDIUM | **RESOLVED** — test expectation corrected (see DEVLOG 2026-05-31) |
+| WS03 | workflow-security/dormant-trigger: expected DESTRUCTIVE, getting CAUTION (score=3) | MEDIUM | **RESOLVED** — test expectation corrected (see the devlog archive, `docs/devlog/`, 2026-05-31) |
 
 ## Vericoding Plan (from `payloadguard-vericoding-plan.md` on main)
 
@@ -374,6 +380,7 @@ broad checks and belong in CI.
 - **Read CLAUDE.md at session start and verify every section is current before touching code.**
 - **Tests:** Run `python -m pytest test_analyzer.py -v` before every commit -- must stay green
 - **Commit style:** Imperative, specific, with test count in body. See git log for examples.
+- **README describes function only.** `README.md` states what the tool does and how to use and configure it: no release notes, test or proof counts, run dates or audit status. User-visible changes go in `CHANGELOG.md`, engineering entries in `DEVLOG.md`, findings in `AUDIT_LOG.md`, counts and run records in `TEST_REPORT.md` and `PROOFS.md`.
 - **Documentation style:** Professional and concise throughout. No informal, casual, or whimsical language in any documentation, commit messages, comments, or README content. State facts directly. Every sentence must earn its place.
 
 ---
