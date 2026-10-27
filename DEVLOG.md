@@ -2,6 +2,14 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-27 — Dormant workflow triggers detected in any YAML layout (AUDIT_LOG §H2 fixed)
+
+**Fix (`1d2c719`):** The L2c dormant-trigger composite (workflow_dispatch or schedule plus a shell execution pattern → HIGH) matched the trigger by line layout: only a block mapping with `workflow_dispatch` as the first key under `on:`, or `on:` followed by `schedule`. The same `curl … | bash` workflow carried the signal in 1 of 7 layouts (block mapping, trigger first); inline `on: workflow_dispatch`, flow list, flow map, quoted `"on"` key and the trigger listed after another event read SAFE. `_has_dormant_trigger()` now reads the events from the parsed `on:` field and keeps the line patterns as a fallback.
+
+**RTA01:** a probe of the L2 content scanner (v1.2.0 stopped applying it to workflow files) whose inline trigger also evaded L2c. It now reads CAUTION from content (L2c HIGH 3); the harness expectation moves from REVIEW to CAUTION. Offline, only RTA01 changes across the 38 fixtures, at today's `main` and at 2026-11-30, and all exit codes match. Oracle 41/41; mutation suite 16/16. The fixture tables in WHITEPAPER also had stale A03, A06, WS03 and AW03 rows, now matched to the manifest.
+
+**Tests:** 408 passed with Z3/CrossHair (`test_analyzer.py` 322); 387 passed, 21 skipped without.
+
 ## 2026-10-27 — Branch age never decides DESTRUCTIVE (AUDIT_LOG §H1 fixed)
 
 **Fix (`2bd08af`):** branch age measures staleness, not consequence. `_assess_consequence()` applies it after every content signal: in full when the content score is already ≥ 5, otherwise capped so the total stays at the CAUTION ceiling (4). The verdict reports `branch_age_score`. The L5b deception escalation raises CAUTION to DESTRUCTIVE only when the content score alone reaches CAUTION.

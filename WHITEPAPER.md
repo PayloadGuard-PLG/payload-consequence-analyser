@@ -189,7 +189,7 @@ git.Repo(workspace)
 | `action.yml` | Composite GitHub Action definition |
 | `agent/` | eBPF runtime defence agent (Go + cilium/ebpf) |
 | `agent/bpf/probe.c` | 4 tracepoint probes + block mode BPF maps |
-| `test_analyzer.py` | 319-test unit, integration, policy, Action-path and packaging suite |
+| `test_analyzer.py` | 322-test unit, integration, policy, Action-path and packaging suite |
 | `test_consequence_engine.py` | 61-test SCG Consequence Engine unit & integration suite |
 | `tests/proofs/` | Z3 SMT proofs (P1–P11, 18 tests) + CrossHair pytest wrappers (5) + temporal contract regression (1) + L3 model parity (1) |
 | `verification/` | CrossHair pure extraction modules — consequence, structural, temporal, semantic — and Dafny specifications (`verification/dafny/`) |
@@ -289,7 +289,7 @@ Any unverified package adds +3 points once, regardless of how many are listed, s
 | `base64_payload` | CRITICAL | +5 | Base64 string piped to a shell interpreter |
 | `credential_harvest` | CRITICAL | +5 | AWS/GCP metadata endpoint, secret grep, env dump to curl |
 | `pull_request_target_with_write_permissions` | CRITICAL | +5 | `pull_request_target` trigger + any write permission declared |
-| `dormant_trigger_with_payload` | HIGH | +3 | `workflow_dispatch` or `schedule` + shell execution in same file |
+| `dormant_trigger_with_payload` | HIGH | +3 | `workflow_dispatch` or `schedule` among the parsed `on:` triggers (any YAML layout) + shell execution in the same file |
 | `forged_bot_author` | HIGH | +3 | `git config user.name/email` set to a known bot identity |
 | `oidc_elevation_typosquatted` | CRITICAL | +5 | `id-token: write` + consumer action resembles a safe prefix but isn't (`aws-actions-unofficial/`, `google-github-actions-fork/`, etc.) |
 | `oidc_elevation_no_consumer` | HIGH | +3 | `id-token: write` with no legitimate OIDC consumer in the same file |
@@ -772,10 +772,10 @@ The harness CI pins the analyser by commit SHA (currently `6c3df91389be550457d50
 | T11 | multilang/structural-js-ts-go | multilang | DESTRUCTIVE | Structural deletions across JS/TS/Go |
 | A01 | adversarial/keyword-evasion | adversarial | DESTRUCTIVE | Destructive diff without benign trigger keywords |
 | A02 | adversarial/rename-smuggling | adversarial | DESTRUCTIVE | auth.py renamed to identity.py, contents gutted |
-| A03 | adversarial/slow-deletion | adversarial | DESTRUCTIVE | 1 function removed from each of 5 files |
+| A03 | adversarial/slow-deletion | adversarial | SAFE | 1 function removed from each of 5 files — below the L3 thresholds; the consequence engine flags it in `enforce` mode |
 | A04 | adversarial/addition-camouflage | adversarial | DESTRUCTIVE | 300-line api.js addition + auth.py deleted |
 | A05 | adversarial/nested-gutting | adversarial | DESTRUCTIVE | Auth class shell preserved, all methods deleted |
-| A06 | adversarial/threshold-gaming | adversarial | DESTRUCTIVE | Every metric just below individual threshold |
+| A06 | adversarial/threshold-gaming | adversarial | SAFE | Every metric just below individual threshold — the consequence engine flags it in `enforce` mode |
 | A07 | adversarial/new-file-replacement | adversarial | DESTRUCTIVE | auth.py deleted + auth_v2.py stub added |
 | A09 | adversarial/config-only-deletion | adversarial | DESTRUCTIVE | settings.yml + requirements.txt deleted |
 | A10 | adversarial/unicode-payload | adversarial | SAFE | Hostile Unicode in comments, +4/-1 lines |
@@ -786,7 +786,7 @@ The harness CI pins the analyser by commit SHA (currently `6c3df91389be550457d50
 |---|---|---|---|---|
 | WS01 | workflow-security/base64-payload | workflow-security | DESTRUCTIVE | `base64_payload` CRITICAL |
 | WS02 | workflow-security/credential-harvest | workflow-security | DESTRUCTIVE | `credential_harvest` CRITICAL |
-| WS03 | workflow-security/dormant-trigger | workflow-security | DESTRUCTIVE | `dormant_trigger_with_payload` HIGH + L2b shell pattern |
+| WS03 | workflow-security/dormant-trigger | workflow-security | CAUTION | `dormant_trigger_with_payload` HIGH |
 | WS04 | workflow-security/forged-bot-author | workflow-security | CAUTION | `forged_bot_author` HIGH |
 | WS05 | workflow-security/oidc-elevation | workflow-security | CAUTION | `oidc_elevation_no_consumer` HIGH |
 | WS06 | workflow-security/prt-write-permissions | workflow-security | DESTRUCTIVE | `pull_request_target_with_write_permissions` CRITICAL |
@@ -798,7 +798,7 @@ The harness CI pins the analyser by commit SHA (currently `6c3df91389be550457d50
 |---|---|---|---|---|
 | AW01 | adversarial/workflow-yaml-folded-block | adversarial | DESTRUCTIVE | Folded block base64 → `base64_payload` CRITICAL |
 | AW02 | adversarial/workflow-prt-only | adversarial | CAUTION | `dangerous_trigger_pull_request_target` HIGH only |
-| AW03 | adversarial/workflow-typosquatted-oidc | adversarial | CAUTION | Typosquat rejected; `oidc_elevation_no_consumer` HIGH |
+| AW03 | adversarial/workflow-typosquatted-oidc | adversarial | DESTRUCTIVE | Typosquatted consumer → `oidc_elevation_typosquatted` CRITICAL |
 | AW04 | adversarial/workflow-legitimate-oidc | adversarial | SAFE | Exact-match allowlist passes — no false positive |
 | AW05 | adversarial/workflow-modified-poison | adversarial | DESTRUCTIVE | M-type diff scanned; `credential_harvest` CRITICAL |
 
@@ -806,7 +806,7 @@ The harness CI pins the analyser by commit SHA (currently `6c3df91389be550457d50
 
 | ID | Branch | Category | Expected | Signal / Notes |
 |---|---|---|---|---|
-| RTA01 | rta/push-rm-rf | red-team | REVIEW | `rm -rf` in workflow — caught by L2 content scanner |
+| RTA01 | rta/push-rm-rf | red-team | CAUTION | Inline `on: workflow_dispatch` + `rm -rf` → `dormant_trigger_with_payload` HIGH. REVIEW through the L2 content scanner until v1.2.0 made L2c the only workflow scanner; the inline trigger was missed until §H2 |
 | RTA02 | rta/schedule-curl-exfil | red-team | DESTRUCTIVE | **Fixed** — `_normalize_yaml_content()` now applied to credential_harvest loop; backslash-continuation lines collapse to spaces before matching |
 | RTA03 | rta/prt-untrusted-checkout | red-team | CAUTION | `pull_request_target` + untrusted `head.sha` checkout — caught by L2c `dangerous_trigger_pull_request_target` HIGH |
 | RTA04 | rta/github-env-injection | red-team | CAUTION | PATH/LD_PRELOAD/NODE_OPTIONS poisoning via `$GITHUB_ENV` — caught by L2c Signal 7 (`github_env_injection`) HIGH |

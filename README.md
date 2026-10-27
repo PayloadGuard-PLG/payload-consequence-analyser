@@ -331,10 +331,10 @@ PayloadGuard's consequence and scoring logic is mathematically proven to elimina
 ```bash
 # Run the complete suite, including the proof tests (needs z3-solver and crosshair-tool from requirements.txt)
 python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q
-# 405 passed
+# 408 passed
 ```
 
-- **Test suite:** **405 passed, 0 failed** (`test_analyzer.py` 319, `test_consequence_engine.py` 61, `tests/proofs/` 25). Without Z3 and CrossHair installed: 384 passed, 21 skipped.
+- **Test suite:** **408 passed, 0 failed** (`test_analyzer.py` 322, `test_consequence_engine.py` 61, `tests/proofs/` 25). Without Z3 and CrossHair installed: 387 passed, 21 skipped.
 - **Mutation Suite:** **16 / 16 passed** with **0 False Positives and 0 False Negatives** ([`run_mutation_suite.py`](https://github.com/PayloadGuard-PLG/payloadguard-test-harness/blob/main/tools/run_mutation_suite.py)).
 - **Harness Manifest Oracle:** **41 / 41 passed** across schema validations and Consequence Engine v1 assertions ([`validate_manifest.py`](https://github.com/PayloadGuard-PLG/payloadguard-test-harness/blob/main/tools/validate_manifest.py)).
 
@@ -345,6 +345,7 @@ Detailed specifications and mathematical proofs are documented in [`VERIFICATION
 ## Unreleased
 
 1. **Branch age never decides DESTRUCTIVE** (`AUDIT_LOG.md` §H1): branch age, measured against the current target commit, still raises the verdict to REVIEW or CAUTION, but a DESTRUCTIVE verdict (exit code `2`) now requires evidence from the change itself. A deceptive PR description escalates CAUTION to DESTRUCTIVE only when that CAUTION does not depend on branch age. The JSON verdict reports `branch_age_score`.
+2. **Dormant workflow triggers detected in any YAML layout** (`AUDIT_LOG.md` §H2): the L2c check for a `workflow_dispatch` or `schedule` workflow running shell commands read the trigger by line layout, so `on: workflow_dispatch`, `on: [push, workflow_dispatch]` or a trigger listed second went undetected. Triggers are now read from the parsed workflow.
 
 ## What's New in v1.6.0
 
