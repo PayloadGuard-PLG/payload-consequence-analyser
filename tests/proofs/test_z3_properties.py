@@ -1,7 +1,7 @@
 """
 PayloadGuard Stage 2 — Z3 SMT safety proofs.
 
-Ten named properties covering L2c signal classification and L3 scoring.
+Eleven named properties covering L2c signal classification and L3 scoring.
 All proofs must return `unsat` within 5 seconds. `unknown` is a hard failure.
 
 Run with:  pytest tests/proofs/ -m proof -v --timeout=30
@@ -247,12 +247,15 @@ def test_p8_typosquat_cannot_yield_safe_verdict():
 _MAX_SCORE = 36
 
 
-def _assess_score_model(s, cap_content=True):
+def _assess_score_model(s, cap_content=True, cap_age=True):
     """
-    Total score as the sum of _assess_consequence()'s per-signal contributions, each
-    constrained to the values the code can produce. AUDIT_LOG §V8: the previous P9
-    asserted the bound as a constraint and checked its negation, so it held for any
-    bound; this model derives the score from the signals instead.
+    Score of _assess_consequence() built from its per-signal contributions, each
+    constrained to the values the code can produce. Returns (content, age, total):
+    content is every signal except branch age; total adds branch age, which counts in
+    full only when content reaches DESTRUCTIVE and otherwise lifts the total at most to
+    the CAUTION ceiling (AUDIT_LOG §H1). AUDIT_LOG §V8: the previous P9 asserted the
+    bound as a constraint and checked its negation, so it held for any bound; this
+    model derives the score from the signals instead.
     """
     age = Int("age")                                    # +1 / +2 / +3 by branch age
     s.add(Or(age == 0, age == 1, age == 2, age == 3))
@@ -273,18 +276,23 @@ def _assess_score_model(s, cap_content=True):
         s.add(n >= 0)
     structural_critical, actions_critical, ai_critical = Bool("structural_critical"), Bool("actions_critical"), Bool("ai_critical")
 
-    content = If(2 * content_flags > 4, 4, 2 * content_flags) if cap_content else 2 * content_flags
-    return Sum([
-        age,
+    content_flags_score = If(2 * content_flags > 4, 4, 2 * content_flags) if cap_content else 2 * content_flags
+    content = Sum([
         deletion_dim,
         If(structural_critical, 5, 0),
         If(critical_paths > 0, 2, 0),
         If(security_files > 0, 5, 0),
         If(unverified > 0, 3, 0),
-        content,
+        content_flags_score,
         If(actions_critical, _CRITICAL_SCORE, If(actions_flags > 0, _HIGH_SCORE, 0)),
         If(ai_critical, _CRITICAL_SCORE, If(ai_flags > 0, _HIGH_SCORE, 0)),
     ])
+    uncapped = content + age
+    if not cap_age:
+        return content, age, uncapped
+    ceiling = _DESTRUCTIVE_THRESHOLD - 1
+    total = If(content >= _DESTRUCTIVE_THRESHOLD, uncapped, If(uncapped > ceiling, ceiling, uncapped))
+    return content, age, total
 
 
 @_skip
@@ -292,7 +300,7 @@ def test_p9_score_upper_bound_is_sum_of_signal_maxima():
     """P9: no combination of signals makes the total exceed MAX_SCORE (36)."""
     s = Solver()
     s.set("timeout", 5000)
-    score = _assess_score_model(s)
+    _, _, score = _assess_score_model(s)
     s.add(score > _MAX_SCORE)
     _check(s)
 
@@ -302,7 +310,7 @@ def test_p9_bound_is_attained():
     """P9 is not vacuous: MAX_SCORE itself is reachable."""
     s = Solver()
     s.set("timeout", 5000)
-    score = _assess_score_model(s)
+    _, _, score = _assess_score_model(s)
     s.add(score == _MAX_SCORE)
     assert s.check() == sat, "MAX_SCORE is not reachable — the model or the bound is wrong"
 
@@ -312,7 +320,7 @@ def test_p9_bound_depends_on_signal_caps():
     """P9 exercises the model: without the content-flag cap (min(4, 2n)) the bound fails."""
     s = Solver()
     s.set("timeout", 5000)
-    score = _assess_score_model(s, cap_content=False)
+    _, _, score = _assess_score_model(s, cap_content=False)
     s.add(score > _MAX_SCORE)
     assert s.check() == sat
 
@@ -354,3 +362,59 @@ def test_p10_empty_signal_set_always_safe():
     s.add(num_signals == 0, Not(is_safe))
 
     _check(s)
+
+
+# ── P11 ───────────────────────────────────────────────────────────────────────
+
+@_skip
+def test_p11_branch_age_never_decides_destructive():
+    """P11: a DESTRUCTIVE total implies the signals other than branch age reach DESTRUCTIVE alone."""
+    s = Solver()
+    s.set("timeout", 5000)
+    content, _, score = _assess_score_model(s)
+    s.add(score >= _DESTRUCTIVE_THRESHOLD, content < _DESTRUCTIVE_THRESHOLD)
+    _check(s)
+
+
+@_skip
+def test_p11_age_never_lowers_score_and_adds_at_most_its_tier():
+    """P11 (POST-16): content <= total <= content + age for every combination of signals."""
+    s = Solver()
+    s.set("timeout", 5000)
+    content, age, score = _assess_score_model(s)
+    s.add(Or(score < content, score > content + age))
+    _check(s)
+
+
+@_skip
+def test_p11_age_still_raises_score_below_destructive():
+    """P11 is not vacuous: branch age still lifts a non-DESTRUCTIVE score, up to CAUTION."""
+    s = Solver()
+    s.set("timeout", 5000)
+    content, _, score = _assess_score_model(s)
+    s.add(content < _CAUTION_THRESHOLD, score >= _CAUTION_THRESHOLD)
+    assert s.check() == sat, "branch age no longer raises any score — the model is wrong"
+
+
+@_skip
+def test_p11_depends_on_age_cap():
+    """P11 exercises the model: adding branch age uncapped (before §H1) lets age decide DESTRUCTIVE."""
+    s = Solver()
+    s.set("timeout", 5000)
+    content, _, score = _assess_score_model(s, cap_age=False)
+    s.add(score >= _DESTRUCTIVE_THRESHOLD, content < _DESTRUCTIVE_THRESHOLD)
+    assert s.check() == sat
+
+
+def test_p11_model_matches_assess_consequence():
+    """The production scorer caps an age-lifted score at 4: Actions HIGH (+3) on a 400-day branch."""
+    from unittest.mock import patch
+
+    import analyze
+
+    with patch("git.Repo"):
+        analyzer = analyze.PayloadAnalyzer("/fake/repo", "feature", "main")
+    verdict = analyzer._assess_consequence(
+        files_deleted=0, lines_deleted=0, days_old=400, deletion_ratio=0.0, actions_poisoning_flags=1,
+    )
+    assert (verdict["status"], verdict["severity_score"], verdict["branch_age_score"]) == ("CAUTION", 4, 1)

@@ -76,6 +76,12 @@ POST-13:  The internal deletion_dim value ∈ [0, 4] for all inputs
 
 POST-14:  Monotonicity — for any single signal parameter p, holding all other
           parameters constant: increasing p never decreases result["severity_score"]
+
+POST-15:  result["status"] == "DESTRUCTIVE" → content_score ≥ 5
+          (branch age never decides DESTRUCTIVE; content_score is defined in Section 4)
+
+POST-16:  content_score ≤ result["severity_score"] ≤ content_score + age_score(days_old)
+          (branch age never lowers the score and adds at most its tier)
 ```
 
 **POST-4 through POST-7 are exhaustive and mutually exclusive.** Every possible score maps to exactly one verdict. There is no score for which the verdict is undefined.
@@ -151,7 +157,7 @@ structural_score  = 5   if structural_severity == "CRITICAL"   else 0
 crit_file_score   = 2   if critical_file_deletions > 0         else 0
 sec_file_score    = 5   if security_file_deletions > 0         else 0
 sca_score         = 3   if unverified_dependencies > 0         else 0
-content_score     = min(4, content_flags * 2)   if content_flags > 0   else 0
+content_flag_score = min(4, content_flags * 2)   if content_flags > 0   else 0
 
 actions_score     = 5   if actions_poisoning_critical
                   = 3   if (not actions_poisoning_critical) and actions_poisoning_flags > 0
@@ -164,15 +170,18 @@ ai_config_score   = 5   if ai_config_poisoning_critical
 
 ### Total Score and Verdict
 ```
-severity_score = age_score
-               + deletion_dim
+content_score  = deletion_dim
                + structural_score
                + crit_file_score
                + sec_file_score
                + sca_score
-               + content_score
+               + content_flag_score
                + actions_score
                + ai_config_score
+
+severity_score = content_score + age_score             if content_score ≥ 5
+               = min(content_score + age_score, 4)     otherwise
+               (branch age raises the verdict at most to CAUTION; AUDIT_LOG §H1)
 
 verdict(severity_score):
   "DESTRUCTIVE"   if severity_score ≥ 5

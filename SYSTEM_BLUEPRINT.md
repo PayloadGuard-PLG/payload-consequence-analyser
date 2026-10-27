@@ -49,20 +49,20 @@ payload-consequence-analyser/
 │   └── proofs/
 │       ├── __init__.py
 │       ├── test_crosshair_contracts.py   # pytest wrapper: runs CrossHair on all 4 pure modules
-│       └── test_z3_properties.py         # Z3 SMT proofs: P1–P10 over L3 scoring
+│       └── test_z3_properties.py         # Z3 SMT proofs: P1–P11 over L3 scoring
 │
 ├── tools/
 │   └── gen_test_registry.py          # generates TEST_REGISTRY.md from harness test metadata
 │
 ├── verification/
 │   ├── __init__.py
-│   ├── consequence_pure.py           # L3: CrossHair contracts C1–C12 (score bounds, verdict bijection)
+│   ├── consequence_pure.py           # L3: CrossHair contracts C-01–C-15 (score bounds, verdict bijection, branch age)
 │   ├── temporal_pure.py              # L5a: CrossHair contracts T1–T7 (drift score, status bijection)
 │   ├── structural_pure.py            # L4: CrossHair contracts S1–S7 (dual-gate biconditional)
 │   ├── semantic_pure.py              # L5b: CrossHair contracts M1–M9 (mci_score bounds, DECEPTIVE ↔ ≥0.5)
 │   └── dafny/
 │       ├── assess_consequence.dfy    # L3: Dafny POST-1–12 (machine-checked over entire input domain)
-│       ├── assess_consequence_verify.log  # dafny verify output for all three files (CI run #16, 2026-10-26)
+│       ├── assess_consequence_verify.log  # dafny verify output for all three files (CI run #19, 2026-10-27)
 │       ├── structural_drift.dfy      # L4: Dafny S1–S7 dual-gate biconditional
 │       └── temporal_drift.dfy        # L5a: Dafny T1–T8 linear drift, zero-input guarantees
 │
@@ -117,7 +117,7 @@ payload-consequence-analyser/
 
 | Module | Layer | Method | Contracts |
 |---|---|---|---|
-| `verification/consequence_pure.py` | L3 Consequence | CrossHair PEP316 | C1–C12 + POST-12 |
+| `verification/consequence_pure.py` | L3 Consequence | CrossHair PEP316 | C-01–C-15 (incl. POST-15/16) |
 | `verification/temporal_pure.py` | L5a Temporal | CrossHair PEP316 | T1–T7 (finite-velocity precondition) |
 | `verification/structural_pure.py` | L4 Structural | CrossHair PEP316 | S1–S7 |
 | `verification/semantic_pure.py` | L5b Semantic | CrossHair PEP316 | M1–M9 |
@@ -125,7 +125,7 @@ payload-consequence-analyser/
 | `verification/dafny/structural_drift.dfy` | L4 Structural | Dafny 4.x | S1–S7 |
 | `verification/dafny/temporal_drift.dfy` | L5a Temporal | Dafny 4.x | T1–T8 |
 | `tests/proofs/test_crosshair_contracts.py` | All 4 layers | pytest wrapper | invokes CrossHair |
-| `tests/proofs/test_z3_properties.py` | L3 Consequence | Z3 SMT | P1–P10 (P9: score bound from the per-signal model) |
+| `tests/proofs/test_z3_properties.py` | L3 Consequence | Z3 SMT | P1–P11 (P9: score bound from the per-signal model; P11: branch age never decides DESTRUCTIVE) |
 
 ### eBPF agent (Go — L5c runtime)
 
@@ -152,8 +152,8 @@ payload-consequence-analyser/
 | `PyJWT[crypto] >= 2.8.0` | RS256 JWT signing for GitHub App authentication |
 | `requests >= 2.31.0` | HTTP calls to GitHub API (Check Runs, remediation PRs) |
 | `pytest >= 7.0` | Test runner |
-| `z3-solver >= 4.12.0` | Z3 SMT solver for P1–P10 proof tests |
-| `crosshair-tool >= 0.0.104` | CrossHair symbolic execution for C1–C12, T1–T7, S1–S7, M1–M9 |
+| `z3-solver >= 4.12.0` | Z3 SMT solver for P1–P11 proof tests |
+| `crosshair-tool >= 0.0.104` | CrossHair symbolic execution for C-01–C-15, T1–T7, S1–S7, M1–M9 |
 | `pytest-timeout >= 2.0` | Per-test timeout enforcement in proof suite |
 | `tree-sitter >= 0.21.0` | Core tree-sitter library (L4 structural parser) |
 | `tree-sitter-python >= 0.21.0` | Python grammar |
@@ -397,7 +397,7 @@ PayloadAnalyzer.analyze()
       unverified_dependencies, content_flags,
       actions_poisoning_flags, actions_poisoning_critical,
       ai_config_poisoning_flags, ai_config_poisoning_critical
-  ) → {status, severity_score}
+  ) → {status, severity_score, branch_age_score}
 
   Scoring (MAX_SCORE = 36):
   ┌─────────────────────────────────────────────────────┬────────┐
@@ -419,6 +419,9 @@ PayloadAnalyzer.analyze()
   │ AI config poisoning CRITICAL signal                 │    +5  │
   │ AI config poisoning HIGH signal                     │    +3  │
   └─────────────────────────────────────────────────────┴────────┘
+
+  Branch age is applied last: in full when the other signals total ≥ 5, otherwise
+  capped so the total stays ≤ 4. Branch age never decides DESTRUCTIVE (POST-15/16, Z3 P11).
 
   Verdict thresholds:
     score = 0        → SAFE        exit 0
@@ -547,9 +550,9 @@ PayloadAnalyzer.analyze()
 
 | Method | Coverage | Last result | Run command |
 |---|---|---|---|
-| CrossHair | C1–C12 + POST-12 (L3), S1–S7 (L4), T1–T7 (L5a), M1–M9 (L5b) — 36 postconditions | 0 counterexamples | `cd verification && crosshair check <module> --analysis_kind PEP316 --per_condition_timeout 30` |
-| Z3 SMT | P1–P10 (L3, L2c) | 13 tests passed | `pytest tests/proofs/test_z3_properties.py -v` |
-| Dafny | POST-1–12 (L3), S1–S7 (L4), T1–T8 (L5a) | 9 verified, 0 errors (CI run #16) | `dafny verify verification/dafny/assess_consequence.dfy` |
+| CrossHair | C-01–C-15 (L3), S1–S7 (L4), T1–T7 (L5a), M1–M9 (L5b) — 40 postconditions | 0 counterexamples | `cd verification && crosshair check <module> --analysis_kind PEP316 --per_condition_timeout 30` |
+| Z3 SMT | P1–P11 (L3, L2c) | 18 tests passed | `pytest tests/proofs/test_z3_properties.py -v` |
+| Dafny | POST-1–12, POST-15/16 (L3), S1–S7 (L4), T1–T8 (L5a) | 11 verified, 0 errors (CI run #19) | `dafny verify verification/dafny/assess_consequence.dfy` |
 | pytest (unit, integration, SCG) | all layers, `consequence.v1`, Action path, packaging | 372 passed | `python -m pytest test_analyzer.py test_consequence_engine.py -v` |
 | pytest (proofs) | Z3 properties, CrossHair wrappers, temporal contract regression | 19 passed | `python -m pytest tests/proofs/ -v` |
 

@@ -59,6 +59,8 @@ _REVIEW_THRESHOLD: int = 1
 #   critical_file_deletions +2, security_file_deletions +5,
 #   unverified_dependencies +3, content_flags +4, actions_poisoning_critical +5,
 #   ai_config_poisoning_critical +5
+# Branch age counts in full only when the other signals reach DESTRUCTIVE on their own;
+# below that it lifts the score at most to the CAUTION ceiling (4).
 _MAX_SCORE: int = 36
 
 
@@ -116,6 +118,74 @@ def _compute_deletion_dim(
 
     nonzero_dims = sum(1 for s in (files_score, ratio_score, lines_score) if s > 0)
     return min(4, max(files_score, ratio_score, lines_score) + (1 if nonzero_dims >= 2 else 0))
+
+
+# ---------------------------------------------------------------------------
+# Helpers: content score and branch age score
+# ---------------------------------------------------------------------------
+
+
+def _content_score(
+    files_deleted: int,
+    lines_deleted: int,
+    deletion_ratio: float,
+    structural_severity: str,
+    critical_file_deletions: int,
+    security_file_deletions: int,
+    unverified_dependencies: int,
+    content_flags: int,
+    actions_poisoning_flags: int,
+    actions_poisoning_critical: bool,
+    ai_config_poisoning_flags: int,
+    ai_config_poisoning_critical: bool,
+) -> int:
+    """
+    Score of every signal except branch age: the evidence drawn from the change itself.
+
+    pre: files_deleted >= 0
+    pre: lines_deleted >= 0
+    pre: 0.0 <= deletion_ratio <= 100.0
+    pre: critical_file_deletions >= 0
+    pre: content_flags >= 0
+    pre: actions_poisoning_flags >= 0
+    pre: ai_config_poisoning_flags >= 0
+    post: 0 <= __return__ <= 33
+    """
+    score = _compute_deletion_dim(files_deleted, lines_deleted, deletion_ratio, critical_file_deletions)
+    if structural_severity == "CRITICAL":
+        score += 5
+    if critical_file_deletions > 0:
+        score += 2
+    if security_file_deletions > 0:
+        score += 5
+    if unverified_dependencies > 0:
+        score += 3
+    if content_flags > 0:
+        score += min(4, content_flags * 2)
+    if actions_poisoning_critical:
+        score += _CRITICAL_SIGNAL_SCORE
+    elif actions_poisoning_flags > 0:
+        score += _HIGH_SIGNAL_SCORE
+    if ai_config_poisoning_critical:
+        score += _CRITICAL_SIGNAL_SCORE
+    elif ai_config_poisoning_flags > 0:
+        score += _HIGH_SIGNAL_SCORE
+    return score
+
+
+def _age_score(days_old: float) -> int:
+    """
+    Branch age tier: +1 beyond 90 days, +2 beyond 180, +3 beyond 365.
+
+    post: 0 <= __return__ <= 3
+    """
+    if days_old > _AGE_T3:
+        return 3
+    if days_old > _AGE_T2:
+        return 2
+    if days_old > _AGE_T1:
+        return 1
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -215,54 +285,29 @@ def assess_consequence_pure(
 
     Empty-input guarantee:
     post: implies(_no_signals(files_deleted, lines_deleted, days_old, deletion_ratio, structural_severity, critical_file_deletions, security_file_deletions, unverified_dependencies, content_flags, actions_poisoning_flags, actions_poisoning_critical, ai_config_poisoning_flags, ai_config_poisoning_critical), __return__["status"] == "SAFE")
+
+    Branch age never decides DESTRUCTIVE (POST-15, AUDIT_LOG §H1):
+    post: implies(__return__["status"] == "DESTRUCTIVE", _content_score(files_deleted, lines_deleted, deletion_ratio, structural_severity, critical_file_deletions, security_file_deletions, unverified_dependencies, content_flags, actions_poisoning_flags, actions_poisoning_critical, ai_config_poisoning_flags, ai_config_poisoning_critical) >= 5)
+
+    Branch age never lowers the score and adds at most its tier (POST-16):
+    post: _content_score(files_deleted, lines_deleted, deletion_ratio, structural_severity, critical_file_deletions, security_file_deletions, unverified_dependencies, content_flags, actions_poisoning_flags, actions_poisoning_critical, ai_config_poisoning_flags, ai_config_poisoning_critical) <= __return__["severity_score"] <= _content_score(files_deleted, lines_deleted, deletion_ratio, structural_severity, critical_file_deletions, security_file_deletions, unverified_dependencies, content_flags, actions_poisoning_flags, actions_poisoning_critical, ai_config_poisoning_flags, ai_config_poisoning_critical) + _age_score(days_old)
     """
-    severity_score: int = 0
-
-    # Step 1: Branch age (tiered)
-    if days_old > _AGE_T3:
-        severity_score += 3
-    elif days_old > _AGE_T2:
-        severity_score += 2
-    elif days_old > _AGE_T1:
-        severity_score += 1
-
-    # Step 2: Deletion dimension (correlated sub-scores, capped at 4)
-    deletion_dim = _compute_deletion_dim(
-        files_deleted, lines_deleted, deletion_ratio, critical_file_deletions
+    # Steps 1-8: every signal except branch age (deletion dimension, structural, critical
+    # and security file deletions, SCA, added-file content, Actions and AI config poisoning)
+    content_score = _content_score(
+        files_deleted, lines_deleted, deletion_ratio, structural_severity,
+        critical_file_deletions, security_file_deletions, unverified_dependencies,
+        content_flags, actions_poisoning_flags, actions_poisoning_critical,
+        ai_config_poisoning_flags, ai_config_poisoning_critical,
     )
-    severity_score += deletion_dim
 
-    # Step 3: Structural severity
-    if structural_severity == "CRITICAL":
-        severity_score += 5
-
-    # Step 4: Critical file deletions
-    if critical_file_deletions > 0:
-        severity_score += 2
-
-    # Step 5: Security file deletions
-    if security_file_deletions > 0:
-        severity_score += 5
-
-    # Step 6: Unverified dependencies (SCA)
-    if unverified_dependencies > 0:
-        severity_score += 3
-
-    # Step 7: Added-file content flags (CI triggers / shell patterns)
-    if content_flags > 0:
-        severity_score += min(4, content_flags * 2)
-
-    # Step 8: Actions poisoning (CRITICAL takes priority over HIGH)
-    if actions_poisoning_critical:
-        severity_score += _CRITICAL_SIGNAL_SCORE
-    elif actions_poisoning_flags > 0:
-        severity_score += _HIGH_SIGNAL_SCORE
-
-    # Step 9: AI tooling config poisoning (CRITICAL takes priority over HIGH)
-    if ai_config_poisoning_critical:
-        severity_score += _CRITICAL_SIGNAL_SCORE
-    elif ai_config_poisoning_flags > 0:
-        severity_score += _HIGH_SIGNAL_SCORE
+    # Step 9: Branch age raises the verdict at most to CAUTION. DESTRUCTIVE requires the
+    # content score alone to reach the threshold; below it the total is capped at 4.
+    age_score = _age_score(days_old)
+    if content_score >= _DESTRUCTIVE_THRESHOLD:
+        severity_score = content_score + age_score
+    else:
+        severity_score = min(content_score + age_score, _DESTRUCTIVE_THRESHOLD - 1)
 
     # Step 10: Verdict
     if severity_score >= _DESTRUCTIVE_THRESHOLD:

@@ -55,7 +55,7 @@ Wire PayloadGuard to your branch protection rules, and catastrophic pull request
 | **Destructive Migration Drop** | `D10_MIGRATION_PERSISTENCE_LOSS` | Dropping persistent table or column in forward migration (with working rollback procedure) | `REVIEW` |
 | **Workflow Actions Poisoning & OIDC** | `L2c` | Workflow files modified to exfiltrate secrets, steal OIDC tokens, or forge CI identities | `BLOCK` |
 | **AI Tooling Config Poisoning** | `L2d` | Malicious `.claude/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, or lifecycle scripts executing on folder open | `BLOCK` |
-| **Deceptive PR Descriptions** | `L5b` | PR description says *"minor copy fix"* while the diff alters authentication or drops database tables | Escalates the verdict one level (SAFE/REVIEW → CAUTION, CAUTION → DESTRUCTIVE) |
+| **Deceptive PR Descriptions** | `L5b` | PR description says *"minor copy fix"* while the diff alters authentication or drops database tables | Escalates the verdict one level (SAFE/REVIEW → CAUTION, CAUTION → DESTRUCTIVE when the content evidence alone reaches CAUTION) |
 
 The policy column is each finding's recommendation. Consequence-detector (`Dxx`) findings change the verdict and exit code only in `advisory` or `enforce` mode; the default mode is `shadow` (see [Consequence Modes](#3-consequence-modes)).
 
@@ -270,7 +270,7 @@ consequence:
 
 # Structural & Deletion Thresholds
 thresholds:
-  branch_age_days: [90, 180, 365]     # days → +1/+2/+3 score
+  branch_age_days: [90, 180, 365]     # days → +1/+2/+3 score; age alone never makes a PR DESTRUCTIVE
   files_deleted:   [10, 20, 50]       # files → +1/+2/+3 score
   lines_deleted:   [5000, 10000, 50000]
   temporal:
@@ -322,25 +322,29 @@ PayloadGuard's consequence and scoring logic is mathematically proven to elimina
 
 | Method | Specification & Tool | What is Proven |
 |---|---|---|
-| **SMT Prover** | **Z3** | Typosquat floor and severity ordering for Actions signals, score monotonicity, SAFE ↔ score below the review threshold, the score upper bound derived from the per-signal model, and the empty-input guarantee (P1–P10). |
-| **Symbolic Execution** | **CrossHair** | Postcondition contracts across consequence scoring, structural drift, temporal drift, and semantic transparency (C1–C12, S1–S7, T1–T7, M1–M9). |
-| **Machine-Checked Proofs** | **Dafny** | Full input domain coverage and 12 machine-checked postconditions verified with zero verification errors (POST-1–12). |
+| **SMT Prover** | **Z3** | Typosquat floor and severity ordering for Actions signals, score monotonicity, SAFE ↔ score below the review threshold, the score upper bound derived from the per-signal model, the empty-input guarantee, and that branch age never decides DESTRUCTIVE (P1–P11). |
+| **Symbolic Execution** | **CrossHair** | Postcondition contracts across consequence scoring, structural drift, temporal drift, and semantic transparency (C-01–C-15, S1–S7, T1–T7, M1–M9). |
+| **Machine-Checked Proofs** | **Dafny** | Full input domain coverage and 14 machine-checked postconditions (POST-1–12, POST-15/16), including that branch age never decides DESTRUCTIVE. |
 
 ### Test Metrics
 
 ```bash
 # Run the complete suite, including the proof tests (needs z3-solver and crosshair-tool from requirements.txt)
 python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q
-# 391 passed
+# 405 passed
 ```
 
-- **Test suite:** **391 passed, 0 failed** (`test_analyzer.py` 311, `test_consequence_engine.py` 61, `tests/proofs/` 19). Without Z3 and CrossHair installed: 374 passed, 17 skipped.
+- **Test suite:** **405 passed, 0 failed** (`test_analyzer.py` 319, `test_consequence_engine.py` 61, `tests/proofs/` 25). Without Z3 and CrossHair installed: 384 passed, 21 skipped.
 - **Mutation Suite:** **16 / 16 passed** with **0 False Positives and 0 False Negatives** ([`run_mutation_suite.py`](https://github.com/PayloadGuard-PLG/payloadguard-test-harness/blob/main/tools/run_mutation_suite.py)).
 - **Harness Manifest Oracle:** **41 / 41 passed** across schema validations and Consequence Engine v1 assertions ([`validate_manifest.py`](https://github.com/PayloadGuard-PLG/payloadguard-test-harness/blob/main/tools/validate_manifest.py)).
 
 Detailed specifications and mathematical proofs are documented in [`VERIFICATION.md`](VERIFICATION.md) and [`PROOFS.md`](PROOFS.md).
 
 ---
+
+## Unreleased
+
+1. **Branch age never decides DESTRUCTIVE** (`AUDIT_LOG.md` §H1): branch age, measured against the current target commit, still raises the verdict to REVIEW or CAUTION, but a DESTRUCTIVE verdict (exit code `2`) now requires evidence from the change itself. A deceptive PR description escalates CAUTION to DESTRUCTIVE only when that CAUTION does not depend on branch age. The JSON verdict reports `branch_age_score`.
 
 ## What's New in v1.6.0
 

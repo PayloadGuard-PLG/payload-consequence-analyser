@@ -2,7 +2,7 @@
 
 Three orthogonal verification methods cover the pure scoring logic across four analysis layers.
 
-**Last runs (2026-10-26):** Dafny 9 verified, 0 errors (GitHub Actions run #16); CrossHair 36 postconditions, 0 counterexamples; Z3 13 tests passed. Results and environments: [`PROOFS.md`](PROOFS.md).
+**Last runs (2026-10-27):** Dafny 11 verified, 0 errors (GitHub Actions run #19, after the §H1 fix); CrossHair 40 postconditions, 0 counterexamples (`consequence_pure` re-run 2026-10-27 after the §H1 fix); Z3 18 tests passed (2026-10-27). Results and environments: [`PROOFS.md`](PROOFS.md).
 
 ### CrossHair Symbolic Execution (Phase 2)
 
@@ -17,13 +17,13 @@ Three orthogonal verification methods cover the pure scoring logic across four a
 
 | Method | Tool | File | What it proves |
 |--------|------|------|----------------|
-| SMT proof | Z3 Solver | `tests/proofs/test_z3_properties.py` | P1–P10: signal→score→verdict properties (monotonicity, ordering, bijection) |
+| SMT proof | Z3 Solver | `tests/proofs/test_z3_properties.py` | P1–P11: signal→score→verdict properties (monotonicity, ordering, bijection; branch age never decides DESTRUCTIVE) |
 
 ### Dafny Machine-Checked Proofs (Phase 4)
 
 | Layer | Dafny method | File | Postconditions |
 |-------|-------------|------|----------------|
-| L3 Consequence | `AssessConsequence` | `verification/dafny/assess_consequence.dfy` | POST-1–12 (score bounds, verdict bijection, safety implications, empty-input guarantee) |
+| L3 Consequence | `AssessConsequence` | `verification/dafny/assess_consequence.dfy` | POST-1–12, POST-15/16 (score bounds, verdict bijection, safety implications, empty-input guarantee, branch age never decides DESTRUCTIVE) |
 | L4 Structural | `AssessStructuralDrift` | `verification/dafny/structural_drift.dfy` | S1–S7 (dual-gate biconditional) |
 | L5a Temporal | `AnalyzeTemporalDrift` | `verification/dafny/temporal_drift.dfy` | T1–T8 (linear drift, zero-input guarantees) |
 
@@ -84,6 +84,10 @@ no GitPython, no AST parsing, no file I/O.
 | C-11 | `all-zero inputs -> SAFE` | Empty PRs never produce a false positive |
 | C-12 | `deletion_dim in [0, 4]` | Aggregated deletion dimension always capped at 4 |
 | C-13 | `ai_config_poisoning_critical -> DESTRUCTIVE` | Critical AI config poisoning → DESTRUCTIVE |
+| C-14 | `DESTRUCTIVE -> content_score >= 5` (POST-15) | Branch age never decides DESTRUCTIVE (§H1) |
+| C-15 | `content_score <= severity_score <= content_score + age_score` (POST-16) | Branch age never lowers the score and adds at most its tier |
+
+`content_score` is every signal except branch age (`_content_score()`); `age_score` is the branch age tier (`_age_score()`).
 
 ---
 

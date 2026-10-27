@@ -1,21 +1,21 @@
 # Dafny verification log
-# Generated: 2026-10-26T12:19:20Z
-# Source: GitHub Actions "Dafny Verification" run #16 (workflow_dispatch)
-#         https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/runs/40321614747
-# Commit: 9e83cce0a32d9573433c2320cbc07a28b2048a31 (main)
+# Generated: 2026-10-27T09:47:59Z
+# Source: GitHub Actions "Dafny Verification" run #19 (pull_request, PR #116)
+#         https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/runs/40483503319
+# Commit: fe24c59e01e63b46f330c6ac186413149cd792f5 (fix/age-cannot-decide-destructive)
 # Dafny: 4.9.1 release zip (dafny-4.9.1-x64-ubuntu-20.04.zip), Boogie + Z3 4.12.1 (bundled)
 # Platform: ubuntu-24.04 (GitHub Actions runner image 20261012.334.1)
-# Previous log: 2026-05-28T19:46:34Z, which predated the 2026-06-11 change to assess_consequence.dfy
+# Previous log: run #16, 2026-10-26T12:19:20Z (7 + 1 + 1 verified), before the §H1 change to assess_consequence.dfy
 
 ## assess_consequence.dfy
 
-# Verifies: AssessConsequence (main method, 12 postconditions POST-1–12, incl. POST-11a)
-#           + AgeScore, FilesScore, LinesScore, RatioScore, DeletionDim,
-#             ContentFlagsScore (6 pure helper functions with bounds ensures)
-# Includes the Sprint 1 change (257d1f3): MAX_SCORE 36, POST-12 (AI config poisoning CRITICAL)
-# Total verified units: 7 (6 helpers + 1 method)
+# Declares: AssessConsequence (main method, 14 postconditions: POST-1–12 incl. POST-11a, POST-15, POST-16)
+#           + AgeScore, FilesScore, LinesScore, RatioScore, DeletionDim, ContentFlagsScore,
+#             ContentScore (7 pure helper functions with bounds ensures)
+# Includes the §H1 change (2bd08af): branch age is applied after the content score and never
+# decides DESTRUCTIVE (POST-15); content score <= severity_score <= content score + age tier (POST-16)
 
-Dafny program verifier finished with 7 verified, 0 errors
+Dafny program verifier finished with 9 verified, 0 errors
 
 ## structural_drift.dfy
 
@@ -35,5 +35,5 @@ Dafny program verifier finished with 1 verified, 0 errors
 
 ## Summary
 
-9 total verified (7 + 1 + 1), 0 errors across all three files.
+11 total verified (9 + 1 + 1), 0 errors across all three files.
 All postconditions discharged over the entire input domain.
