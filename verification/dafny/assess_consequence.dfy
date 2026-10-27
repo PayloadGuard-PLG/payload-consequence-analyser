@@ -1,7 +1,7 @@
 // verification/dafny/assess_consequence.dfy
 //
 // Machine-checked verification of PayloadGuard L3 consequence scoring.
-// Postconditions POST-1 through POST-12 from VERIFICATION_SPEC.md §5.
+// Postconditions POST-1 through POST-12, POST-15 and POST-16 from VERIFICATION_SPEC.md §5.
 //
 // Tool:    Dafny 4.x — discharges verification conditions via Boogie + Z3
 // Install: dotnet tool install --global dafny
@@ -92,6 +92,37 @@ function ContentFlagsScore(content_flags: nat): (r: int)
     else content_flags * 2
 }
 
+// Content score: every signal except branch age — the evidence drawn from the change
+// itself. Maximum 33 (4 + 5 + 2 + 5 + 3 + 4 + 5 + 5).
+function ContentScore(
+    files_deleted:             nat,
+    lines_deleted:             nat,
+    deletion_ratio:            real,
+    structural_severity:       string,
+    critical_file_deletions:   nat,
+    security_file_deletions:   nat,
+    unverified_dependencies:   nat,
+    content_flags:             nat,
+    actions_poisoning_flags:   nat,
+    actions_poisoning_critical: bool,
+    ai_config_poisoning_flags:  nat,
+    ai_config_poisoning_critical: bool
+): (r: int)
+    requires 0.0 <= deletion_ratio <= 100.0
+    ensures 0 <= r <= MAX_SCORE - 3
+{
+    DeletionDim(FilesScore(files_deleted),
+                RatioScore(deletion_ratio, lines_deleted, critical_file_deletions),
+                LinesScore(lines_deleted))
+    + (if structural_severity == "CRITICAL" then 5 else 0)
+    + (if critical_file_deletions > 0 then 2 else 0)
+    + (if security_file_deletions > 0 then 5 else 0)
+    + (if unverified_dependencies > 0 then 3 else 0)
+    + ContentFlagsScore(content_flags)
+    + (if actions_poisoning_critical then 5 else if actions_poisoning_flags > 0 then 3 else 0)
+    + (if ai_config_poisoning_critical then 5 else if ai_config_poisoning_flags > 0 then 3 else 0)
+}
+
 // ── Main consequence assessment ───────────────────────────────────────────────
 
 method AssessConsequence(
@@ -150,56 +181,38 @@ method AssessConsequence(
             actions_poisoning_flags == 0 && !actions_poisoning_critical &&
             ai_config_poisoning_flags == 0 && !ai_config_poisoning_critical
             ==> status == "SAFE"
+
+    // POST-15: branch age never decides DESTRUCTIVE (AUDIT_LOG §H1) — a DESTRUCTIVE
+    // verdict requires the content score alone to reach the threshold
+    ensures status == "DESTRUCTIVE" ==>
+            ContentScore(files_deleted, lines_deleted, deletion_ratio, structural_severity,
+                         critical_file_deletions, security_file_deletions, unverified_dependencies,
+                         content_flags, actions_poisoning_flags, actions_poisoning_critical,
+                         ai_config_poisoning_flags, ai_config_poisoning_critical) >= DESTRUCTIVE_THRESHOLD
+
+    // POST-16: branch age never lowers the score and adds at most its tier
+    ensures var c := ContentScore(files_deleted, lines_deleted, deletion_ratio, structural_severity,
+                                  critical_file_deletions, security_file_deletions, unverified_dependencies,
+                                  content_flags, actions_poisoning_flags, actions_poisoning_critical,
+                                  ai_config_poisoning_flags, ai_config_poisoning_critical);
+            c <= severity_score <= c + AgeScore(days_old)
 {
-    var s: int := 0;
+    // Every signal except branch age: 0–33 points
+    var content := ContentScore(files_deleted, lines_deleted, deletion_ratio, structural_severity,
+                                critical_file_deletions, security_file_deletions, unverified_dependencies,
+                                content_flags, actions_poisoning_flags, actions_poisoning_critical,
+                                ai_config_poisoning_flags, ai_config_poisoning_critical);
 
-    // Branch age: 0–3 points
+    // Branch age: 0–3 points. It counts in full only when the content score reaches
+    // DESTRUCTIVE; below that it lifts the score at most to the CAUTION ceiling.
     var age_s := AgeScore(days_old);
-    s := s + age_s;
-
-    // Deletion dimension: three correlated signals collapsed to 0–4 points
-    var fs  := FilesScore(files_deleted);
-    var rs  := RatioScore(deletion_ratio, lines_deleted, critical_file_deletions);
-    var ls  := LinesScore(lines_deleted);
-    var dim := DeletionDim(fs, rs, ls);
-    s := s + dim;
-
-    // Structural CRITICAL (AST-level gutting): 0 or +5
-    if structural_severity == "CRITICAL" { s := s + 5; }
-
-    // Critical file deletions (security/auth/config paths): 0 or +2
-    if critical_file_deletions > 0 { s := s + 2; }
-
-    // Security file deletions: 0 or +5 (forces DESTRUCTIVE alone)
-    if security_file_deletions > 0 { s := s + 5; }
-
-    // Unverified dependencies (SCA): 0 or +3
-    if unverified_dependencies > 0 { s := s + 3; }
-
-    // Content flags (CI triggers / shell execution): 0–4 points
-    var cf_s := ContentFlagsScore(content_flags);
-    s := s + cf_s;
-
-    // Actions poisoning: CRITICAL = +5, HIGH = +3, none = 0
-    if actions_poisoning_critical {
-        s := s + 5;
-    } else if actions_poisoning_flags > 0 {
-        s := s + 3;
+    if content >= DESTRUCTIVE_THRESHOLD {
+        severity_score := content + age_s;
+    } else if content + age_s >= DESTRUCTIVE_THRESHOLD {
+        severity_score := DESTRUCTIVE_THRESHOLD - 1;
+    } else {
+        severity_score := content + age_s;
     }
-
-    // AI tooling config poisoning: CRITICAL = +5, HIGH = +3, none = 0
-    if ai_config_poisoning_critical {
-        s := s + 5;
-    } else if ai_config_poisoning_flags > 0 {
-        s := s + 3;
-    }
-
-    // Explicit bound assertion: sum of all component maximums = 36.
-    // Each addend is bounded by its helper function's postcondition.
-    // This assists the verifier in discharging POST-3.
-    assert s <= 3 + 4 + 5 + 2 + 5 + 3 + 4 + 5 + 5;
-
-    severity_score := s;
 
     // Verdict assignment by threshold
     if      severity_score >= DESTRUCTIVE_THRESHOLD { status := "DESTRUCTIVE"; }

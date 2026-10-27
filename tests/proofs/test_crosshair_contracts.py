@@ -16,7 +16,7 @@ Run the CLI directly for deeper analysis (longer timeouts):
         --max_uninteresting_iterations 10
 
 Modules covered:
-    consequence_pure  -- Layer 3 consequence scoring (C1-C12)
+    consequence_pure  -- Layer 3 consequence scoring (C-01 to C-15)
     temporal_pure     -- Layer 5a temporal drift (T1-T7)
     structural_pure   -- Layer 4 structural dual-gate (S1-S7)
     semantic_pure     -- Layer 5b MCI cross-correlation (M1-M9)
@@ -105,9 +105,10 @@ def test_crosshair_deletion_dim_contracts():
 @_skip_no_verification
 def test_crosshair_assess_consequence_contracts():
     """
-    assess_consequence_pure(): C1-C12 all hold.
-    verdict in {SAFE,REVIEW,CAUTION,DESTRUCTIVE}, score in [0,31],
-    bijection, safety-critical implications, empty-input guarantee.
+    assess_consequence_pure(): C-01 to C-15 all hold.
+    verdict in {SAFE,REVIEW,CAUTION,DESTRUCTIVE}, score in [0,36],
+    bijection, safety-critical implications, empty-input guarantee,
+    branch age never decides DESTRUCTIVE (POST-15) and adds at most its tier (POST-16).
     """
     _assert_crosshair(
         _run_crosshair("consequence_pure.assess_consequence_pure", per_condition_timeout=10),
@@ -170,6 +171,49 @@ def test_temporal_contract_excludes_non_finite_velocity():
                     warning_threshold=0.25, critical_threshold=0.5)
         assert all(_pep316_holds(func, temporal_pure, "pre", args)), args
         assert all(_pep316_holds(func, temporal_pure, "post", args, func(**args))), args
+
+
+@_skip_no_verification
+def test_consequence_model_matches_production_and_contracts():
+    """
+    The CrossHair model of Layer 3 must score exactly as _assess_consequence() does, or
+    its proofs say nothing about production. Over a grid spanning every signal tier and
+    each branch age boundary, the model's verdict and score equal production's and every
+    postcondition of assess_consequence_pure (including POST-15/16, AUDIT_LOG §H1) holds.
+    Deterministic: does not need crosshair-tool.
+    """
+    import itertools
+    from unittest.mock import patch
+
+    import analyze
+
+    sys.path.insert(0, str(_VERIFICATION_DIR))
+    try:
+        import consequence_pure
+    finally:
+        sys.path.remove(str(_VERIFICATION_DIR))
+    model = consequence_pure.assess_consequence_pure
+    with patch("git.Repo"):
+        analyzer = analyze.PayloadAnalyzer("/fake/repo", "feature", "main")
+
+    grid = itertools.product(
+        (0, 11, 51),                                              # files_deleted
+        ((0, 0.0), (50, 95.0), (150, 80.0), (10001, 95.0)),       # (lines_deleted, deletion_ratio)
+        ("LOW", "CRITICAL"), (0, 1), (0, 1), (0, 1), (0, 1, 2),   # structural, critical, security, SCA, content
+        ((0, False), (1, False), (1, True)),                      # Actions poisoning
+        ((0, False), (1, False), (1, True)),                      # AI config poisoning
+        (0, 91, 181, 366),                                        # days_old: each age tier
+    )
+    for files, (lines, ratio), st, crit, sec, unv, cf, (af, ac), (aif, aic), days in grid:
+        args = dict(files_deleted=files, lines_deleted=lines, days_old=days, deletion_ratio=ratio,
+                    structural_severity=st, critical_file_deletions=crit, security_file_deletions=sec,
+                    unverified_dependencies=unv, content_flags=cf, actions_poisoning_flags=af,
+                    actions_poisoning_critical=ac, ai_config_poisoning_flags=aif,
+                    ai_config_poisoning_critical=aic)
+        expected = analyzer._assess_consequence(**args)
+        got = model(**args)
+        assert (got["status"], got["severity_score"]) == (expected["status"], expected["severity_score"]), args
+        assert all(_pep316_holds(model, consequence_pure, "post", args, got)), args
 
 
 # ---------------------------------------------------------------------------

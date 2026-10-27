@@ -1435,7 +1435,13 @@ class PayloadAnalyzer:
                 )
                 _escalate = {"SAFE": "CAUTION", "REVIEW": "CAUTION", "CAUTION": "DESTRUCTIVE"}
                 if verdict["status"] in _escalate:
-                    verdict["status"] = _escalate[verdict["status"]]
+                    escalated = _escalate[verdict["status"]]
+                    # Branch age cannot decide DESTRUCTIVE (AUDIT_LOG §H1): a CAUTION that
+                    # depends on branch age escalates no further than CAUTION.
+                    content_score = verdict["severity_score"] - verdict.get("branch_age_score", 0)
+                    if escalated == "DESTRUCTIVE" and content_score < 3:
+                        escalated = "CAUTION"
+                    verdict["status"] = escalated
             elif semantic["status"] == "CAUTION_MISMATCH":
                 verdict["flags"].append(
                     f"Partial semantic mismatch — manual review advised "
@@ -1550,7 +1556,8 @@ class PayloadAnalyzer:
         """
         Layer 3 consequence scoring -- assigns a severity verdict to the PR's deletion profile.
 
-        Returns a dict with keys: status, severity, severity_score, flags, recommendation.
+        Returns a dict with keys: status, severity, severity_score, branch_age_score, flags,
+        recommendation. branch_age_score is the part of severity_score contributed by branch age.
 
         Formal contracts are maintained in verification/consequence_pure.py and verified by
         CrossHair. Invariants proven there:
@@ -1562,6 +1569,7 @@ class PayloadAnalyzer:
           - actions_poisoning_critical -> DESTRUCTIVE
           - ai_config_poisoning_critical -> DESTRUCTIVE
           - all-zero inputs -> SAFE
+          - DESTRUCTIVE -> the score without branch age is >= 5 (age never decides DESTRUCTIVE)
 
         Run: cd verification && crosshair check consequence_pure
         """
@@ -1573,15 +1581,17 @@ class PayloadAnalyzer:
         files_th = th["files_deleted"]     # [10, 20, 50]
         lines_th = th["lines_deleted"]     # [5000, 10000, 50000]
 
+        # Branch age is applied after every content signal (see below).
+        age_score = 0
         if days_old > age_th[2]:
             flags.append(f"Branch is {days_old} days old (1+ year)")
-            severity_score += 3
+            age_score = 3
         elif days_old > age_th[1]:
             flags.append(f"Branch is {days_old} days old (6+ months)")
-            severity_score += 2
+            age_score = 2
         elif days_old > age_th[0]:
             flags.append(f"Branch is {days_old} days old (3+ months)")
-            severity_score += 1
+            age_score = 1
 
         # Three deletion dimensions are highly correlated — score independently
         # then cap to prevent double-counting: max of the three + 1 bonus if ≥2 fire.
@@ -1679,6 +1689,15 @@ class PayloadAnalyzer:
             )
             severity_score += actions_cfg.get("high_signal_score", 3)
 
+        # Branch age measures staleness, not consequence (AUDIT_LOG §H1). It raises the
+        # verdict up to CAUTION; DESTRUCTIVE requires the content signals alone to reach 5.
+        # Below that, age lifts the score at most to the CAUTION ceiling of 4.
+        if severity_score >= 5:
+            branch_age_score = age_score
+        else:
+            branch_age_score = max(0, min(age_score, 4 - severity_score))
+        severity_score += branch_age_score
+
         if severity_score >= 5:
             return {
                 "status": "DESTRUCTIVE",
@@ -1686,6 +1705,7 @@ class PayloadAnalyzer:
                 "flags": flags,
                 "recommendation": "❌ DO NOT MERGE — This would catastrophically alter the codebase",
                 "severity_score": severity_score,
+                "branch_age_score": branch_age_score,
             }
         elif severity_score >= 3:
             return {
@@ -1694,6 +1714,7 @@ class PayloadAnalyzer:
                 "flags": flags,
                 "recommendation": "⚠️  REVIEW CAREFULLY — Significant destructive changes detected",
                 "severity_score": severity_score,
+                "branch_age_score": branch_age_score,
             }
         elif severity_score >= 1:
             return {
@@ -1702,6 +1723,7 @@ class PayloadAnalyzer:
                 "flags": flags if flags else ["Some changes detected"],
                 "recommendation": "→ Proceed with normal review process, but note the flags above",
                 "severity_score": severity_score,
+                "branch_age_score": branch_age_score,
             }
         else:
             return {
@@ -1710,6 +1732,7 @@ class PayloadAnalyzer:
                 "flags": flags if flags else ["No major red flags detected"],
                 "recommendation": "✓ Proceed with normal review process",
                 "severity_score": severity_score,
+                "branch_age_score": branch_age_score,
             }
 
     def _scan_added_file_content(self, diffs):
