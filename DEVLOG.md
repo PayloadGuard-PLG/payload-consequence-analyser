@@ -2,6 +2,12 @@
 
 Reverse-chronological. Most recent entry first.
 
+## 2026-10-26 — Harness REGRESSION_PAT replaced (AUDIT_LOG §H3 fixed)
+
+Run #27 attempt 3 (20:27 UTC) completed through `regression.yml`: 34 fixture PRs reopened, scanned on v1.6.0 and closed, no failures. Identical to the 16:45 browser sweep (34/34 exit codes, 27/34 verdicts, seven age-only SAFE→REVIEW mismatches). Harness history: 491 scans, 19 sweeps.
+
+**Tests:** `test_analyzer.py` 311 passed (no code changed).
+
 ## 2026-10-26 — Harness scan history; live regression blocked; fixture aging (AUDIT_LOG §H1–§H3)
 
 **Scan history:** workflow artifacts expire after 90 days, so the April–May `results.db` cannot be rebuilt. Harness `tools/collect_history.py` (branch `data/scan-history`) records the `PayloadGuard` check run of every scan on the fixture PRs' head commits in `regression-reports/scan_history.jsonl`, with the analyser commit and version resolved from the workflow pin at each report's target commit. 423 scans, 2026-04-24 to 2026-05-31, 17 sweeps; the last sweep (`fe68338`) matches 34/34 exit codes and 33/34 verdicts against the current manifest.
