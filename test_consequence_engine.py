@@ -2356,6 +2356,49 @@ class TestRound3RenameActivation:
         assert _active_base_source(modified, watched) == "a"
 
 
+class TestRound3SemanticChurn:
+    """SEM-01/SEM-04: the L5b diff profiler measures the real patch, not zero churn."""
+
+    _GUIDE = "# Guide\n\nIntro.\n"
+
+    def _repo(self, tmp_path):
+        added = "".join(f"Step {i}: configure item {i}.\n" for i in range(120))
+        return _r3_repo(
+            tmp_path,
+            {"docs/guide.md": self._GUIDE},
+            lambda repo, root: _r3_stage(repo, root, {"docs/guide.md": self._GUIDE + added}),
+        )
+
+    def test_micro_claim_on_large_change_is_deceptive(self, tmp_path):
+        root = self._repo(tmp_path)
+        for mode in ("shadow", "advisory", "enforce"):
+            rep = _r3_analyze(root, mode, "minor typo fix")
+            sem = rep["semantic"]
+            assert sem["diff_reality"]["total_churn"] == rep["lines"]["added"] + rep["lines"]["deleted"] == 120
+            assert sem["status"] == "DECEPTIVE_PAYLOAD"
+            assert "scope_understated" in sem["signals"]
+            assert rep["verdict"]["status"] == "CAUTION"
+
+    def test_accurate_description_is_transparent(self, tmp_path):
+        root = self._repo(tmp_path)
+        rep = _r3_analyze(root, "shadow", "Add a 120-step configuration walkthrough to the guide")
+        assert rep["semantic"]["diff_reality"]["total_churn"] == 120
+        assert rep["semantic"]["status"] == "TRANSPARENT"
+        assert rep["verdict"]["status"] == "SAFE"
+
+    def test_added_declarations_are_counted(self, tmp_path):
+        base = '"""Report utilities."""\n'
+        head = base + "".join(f"\ndef report_{i}():\n    return {i}\n" for i in range(3))
+        root = _r3_repo(
+            tmp_path,
+            {"reporting.py": base},
+            lambda repo, root: _r3_stage(repo, root, {"reporting.py": head}),
+        )
+        rep = _r3_analyze(root, "shadow", "minor typo fix")
+        assert rep["semantic"]["diff_reality"]["structural_alterations"] == 3
+        assert "operation_mutation" in rep["semantic"]["signals"]
+
+
 class TestRound3PackageManifest:
     """BUILD-07 and FP-01: an approved npm dependency on an active allowlist is not a finding."""
 

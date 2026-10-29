@@ -1607,9 +1607,16 @@ class PayloadAnalyzer:
             ).analyze_drift()
 
             # LAYER 5b: SEMANTIC TRANSPARENCY (v2 — PR-MCI heuristic engine)
+            # The diff profiler reads patch text, which `diffs` does not carry: without it every
+            # change measured zero churn and no added declarations (AUDIT_LOG SEM-01). The patch
+            # diffs are used here only; GitPython leaves their change_type unset.
+            try:
+                patch_diffs = merge_base[0].diff(branch_ref, create_patch=True)
+            except Exception:
+                patch_diffs = diffs
             semantic = SemanticTransparencyAnalyzer(
                 pr_description=pr_description,
-                diffs=diffs,
+                diffs=patch_diffs,
                 config=self.config.semantic,
             ).analyze_transparency()
             _apply_semantic_transparency(verdict, semantic)
