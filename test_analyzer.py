@@ -36,6 +36,8 @@ from analyze import (
     _is_oidc_consumer_typosquatted,
     _load_allowlist,
     _parse_added_packages,
+    _npm_added_packages,
+    _HIDDEN_UNICODE_RE,
     _raise_verdict,
     _read_file_at_ref,
     format_markdown_report,
@@ -1592,6 +1594,40 @@ class TestSCAAnalysis(unittest.TestCase):
         pkgs = _parse_added_packages(diff, "npm")
         self.assertIn("lodash", pkgs)
         self.assertNotIn("version", pkgs)
+
+    def test_parse_npm_section_key_is_not_a_package(self):
+        # AUDIT_LOG BUILD-07: the diff-line fallback read "dependencies" as a package name.
+        diff = '+  "dependencies": {\n+    "approved": "^1.0.0"\n+  },\n+  "files": [\n'
+        self.assertEqual(_parse_added_packages(diff, "npm"), ["approved"])
+
+    def test_npm_added_packages_reads_dependency_sections_only(self):
+        base = json.dumps({"name": "demo", "scripts": {"test": "jest"}})
+        head = json.dumps({
+            "name": "demo",
+            "scripts": {"test": "jest", "build": "tsc"},
+            "dependencies": {"approved": "^1.0.0"},
+            "devDependencies": {"jest": "^29.0.0"},
+        }, indent=2)
+        self.assertEqual(_npm_added_packages(base, head), ["approved", "jest"])
+
+    def test_npm_added_packages_compares_entries(self):
+        base = json.dumps({"dependencies": {"keep": "1.0.0", "bump": "1.0.0"}})
+        head = json.dumps({"dependencies": {"keep": "1.0.0", "bump": "2.0.0", "new": "1.0.0"}})
+        self.assertEqual(_npm_added_packages(base, head), ["bump", "new"])
+        self.assertEqual(_npm_added_packages(base, base), [])
+        # Compact single-line JSON is parsed like formatted JSON.
+        self.assertEqual(_npm_added_packages("", '{"dependencies":{"evil":"1.0.0"}}'), ["evil"])
+
+    def test_npm_added_packages_overrides_and_resolutions(self):
+        head = json.dumps({
+            "overrides": {"foo": {".": "1.0.0", "bar": "2.0.0"}, "@s/baz@^1": "1.2.0"},
+            "resolutions": {"**/lodash": "4.17.21", "a/@s/qux": "1.0.0"},
+        })
+        self.assertEqual(_npm_added_packages("{}", head), ["@s/baz", "@s/qux", "bar", "foo", "lodash"])
+
+    def test_npm_added_packages_returns_none_when_unparseable(self):
+        self.assertIsNone(_npm_added_packages("{}", '{"dependencies": {'))
+        self.assertIsNone(_npm_added_packages("{}", "[1, 2]"))
 
     def test_parse_go_package(self):
         diff = "+github.com/gin-gonic/gin v1.9.0\n"
@@ -3320,6 +3356,37 @@ class TestAIToolingConfigPoisoning(unittest.TestCase):
                                   ai_config_poisoning_critical=False)
         self.assertEqual(v["status"], "SAFE")
         self.assertEqual(v["severity_score"], 0)
+
+    # ── Hidden Unicode (AUDIT_LOG FP-01) ─────────────────────────────────────
+
+    def _hidden_unicode_signals(self, content, path="package.json"):
+        a = _make_analyzer()
+        flags = a._scan_ai_tooling_configs([self._build_diff(path, content)])
+        return [s for fl in flags for s in fl["signals"] if s["type"] == "hidden_unicode"]
+
+    def test_plain_ascii_is_not_hidden_unicode(self):
+        content = json.dumps({"name": "demo", "description": "Plain ASCII 0-9 a-z A-Z ~!@#"}, indent=2)
+        self.assertEqual(self._hidden_unicode_signals(content), [])
+        self.assertEqual(self._hidden_unicode_signals(json.dumps({"permissions": {}}),
+                                                      ".claude/settings.json"), [])
+
+    def test_regex_matches_only_the_intended_code_points(self):
+        printable = "".join(chr(c) for c in range(0x20, 0x7F)) + "\t\n\r" + "é€中 "
+        self.assertIsNone(_HIDDEN_UNICODE_RE.search(printable))
+        for cp in (0x200B, 0x200C, 0x200D, 0x202A, 0x202E, 0x2066, 0x2069, 0xFEFF, 0xE0000, 0xE0041, 0xE007F):
+            self.assertIsNotNone(_HIDDEN_UNICODE_RE.search(f"a{chr(cp)}b"), hex(cp))
+        for cp in (0x200A, 0x200E, 0x2065, 0x206A, 0xE007, 0xE080, 0xE0080):
+            self.assertIsNone(_HIDDEN_UNICODE_RE.search(f"a{chr(cp)}b"), hex(cp))
+
+    def test_hidden_characters_are_flagged(self):
+        for ch in ("​", "‮", "\U000e0041"):
+            content = json.dumps({"description": f"safe{ch}text"}, ensure_ascii=False)
+            self.assertEqual(len(self._hidden_unicode_signals(content)), 1, repr(ch))
+
+    def test_leading_byte_order_mark_is_not_flagged(self):
+        content = "﻿" + json.dumps({"name": "demo"})
+        self.assertEqual(self._hidden_unicode_signals(content), [])
+        self.assertEqual(len(self._hidden_unicode_signals(json.dumps({"a": "x"}) + "﻿")), 1)
 
 
 # ==============================================================================

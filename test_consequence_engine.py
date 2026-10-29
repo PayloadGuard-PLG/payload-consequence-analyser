@@ -2332,6 +2332,16 @@ class TestRound3RenameActivation:
         rep = _r3_analyze(root, "enforce", "Add migration")
         assert _r3_findings(rep, DETECTOR_D10_MIGRATION)
 
+    def test_npm_manifest_renamed_from_template_is_scanned_in_full(self, tmp_path):
+        pkg = json.dumps({"name": "demo", "dependencies": {"unapproved": "1.0.0"}}, indent=2)
+        root = _r3_repo(
+            tmp_path,
+            {"allowlist.yml": "npm:\n  - approved\n", "templates/package.json.tmpl": pkg},
+            lambda repo, root: _r3_move(repo, root, "templates/package.json.tmpl", "package.json"),
+        )
+        rep = _r3_analyze(root, "shadow", "Use the template manifest")
+        assert [p["package"] for p in rep["sca"]["unverified_packages"]] == ["unapproved"]
+
     def test_active_base_source_rules(self):
         from consequence_engine import _active_base_source
 
@@ -2344,3 +2354,40 @@ class TestRound3RenameActivation:
         assert _active_base_source(moved_in, watched) == ""
         assert _active_base_source(moved_within, watched) == "DROP TABLE t;"
         assert _active_base_source(modified, watched) == "a"
+
+
+class TestRound3PackageManifest:
+    """BUILD-07 and FP-01: an approved npm dependency on an active allowlist is not a finding."""
+
+    _BASE = json.dumps({"name": "demo", "version": "1.0.0", "description": "Plain ASCII package"}, indent=2) + "\n"
+
+    def test_approved_dependency_is_clean_and_safe(self, tmp_path):
+        head = json.dumps({
+            "name": "demo", "version": "1.0.0", "description": "Plain ASCII package",
+            "dependencies": {"approved": "^1.0.0"},
+        }, indent=2) + "\n"
+        root = _r3_repo(
+            tmp_path,
+            {"allowlist.yml": "npm:\n  - approved\n", "package.json": self._BASE},
+            lambda repo, root: _r3_stage(repo, root, {"package.json": head, "package-lock.json": "{}\n"}),
+        )
+        for mode in ("shadow", "advisory", "enforce"):
+            rep = _r3_analyze(root, mode, "Add the approved dependency")
+            assert rep["sca"]["status"] == "CLEAN"
+            assert rep["ai_config_poisoning"]["total"] == 0
+            assert rep["verdict"]["status"] == "SAFE"
+
+    def test_unapproved_dependency_is_the_only_flag(self, tmp_path):
+        head = json.dumps({
+            "name": "demo", "version": "1.0.0", "description": "Plain ASCII package",
+            "scripts": {"build": "tsc"},
+            "dependencies": {"approved": "^1.0.0", "unapproved": "^2.0.0"},
+        }, indent=2) + "\n"
+        root = _r3_repo(
+            tmp_path,
+            {"allowlist.yml": "npm:\n  - approved\n", "package.json": self._BASE},
+            lambda repo, root: _r3_stage(repo, root, {"package.json": head, "package-lock.json": "{}\n"}),
+        )
+        rep = _r3_analyze(root, "shadow", "Add dependencies")
+        assert [p["package"] for p in rep["sca"]["unverified_packages"]] == ["unapproved"]
+        assert rep["verdict"]["status"] == "CAUTION"

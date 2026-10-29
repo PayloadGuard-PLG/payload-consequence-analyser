@@ -351,9 +351,11 @@ _AI_HOOK_CRITICAL_CMDS = re.compile(
     re.IGNORECASE,
 )
 
-# Hidden Unicode: zero-width chars, bidi controls, invisible tag block.
+# Hidden Unicode: zero-width chars, bidi controls and isolates, BOM, invisible tag block
+# (U+E0000-U+E007F). Written as escapes: the former literal class contained the range
+# '0'-U+E007, which matched ordinary ASCII text (AUDIT_LOG FP-01).
 _HIDDEN_UNICODE_RE = re.compile(
-    r'[​-‍‪-‮⁦-⁩﻿0-f]'
+    '[\u200b-\u200d\u202a-\u202e\u2066-\u2069\ufeff\U000e0000-\U000e007f]'
 )
 
 # Gemfile top-level execution primitives.
@@ -410,6 +412,24 @@ _MANIFEST_ALLOWLIST_KEY = {
     "npm": "npm", "go": "go", "cargo": "rust",
 }
 
+
+def _manifest_type(path: str):
+    """SCA manifest type of ``path`` ('pip', 'npm', ...), or None."""
+    return next((mt for pat, mt in _MANIFEST_PATTERNS.items() if re.search(pat, path)), None)
+
+
+def _blob_text(blob):
+    """UTF-8 text of a Git blob, or None when the blob is absent or unreadable."""
+    if blob is None:
+        return None
+    try:
+        data = blob.data_stream.read()
+    except Exception:
+        return None
+    if not isinstance(data, (bytes, bytearray)):
+        return None
+    return bytes(data).decode('utf-8', errors='replace')
+
 _TOML_SKIP_KEYS = {"name", "version", "edition", "authors", "description", "license", "readme", "build"}
 _JSON_SKIP_KEYS = {
     "version", "description", "name", "main", "scripts", "keywords",
@@ -435,8 +455,10 @@ def _parse_added_packages(diff_text: str, manifest_type: str) -> list:
                 if pkg not in _TOML_SKIP_KEYS:
                     packages.append(pkg)
         elif manifest_type == "npm":
-            m = re.match(r'^"([^"]+)"\s*:', content)
-            if m:
+            # A key whose value opens an object or array names a section, not a package
+            # (AUDIT_LOG BUILD-07). Used only when package.json does not parse as JSON.
+            m = re.match(r'^"([^"]+)"\s*:\s*([{\[])?', content)
+            if m and not m.group(2):
                 pkg = m.group(1)
                 if pkg not in _JSON_SKIP_KEYS:
                     packages.append(pkg)
@@ -451,6 +473,61 @@ def _parse_added_packages(diff_text: str, manifest_type: str) -> list:
                 if pkg not in _TOML_SKIP_KEYS:
                     packages.append(pkg)
     return packages
+
+
+_NPM_DEPENDENCY_SECTIONS = (
+    "dependencies", "devDependencies", "peerDependencies", "optionalDependencies",
+)
+_NPM_OVERRIDE_SECTIONS = ("overrides", "resolutions")
+
+
+def _npm_package_name(key: str) -> str:
+    """Package name from an overrides/resolutions key: 'a/**/@s/b@^1' -> '@s/b'."""
+    segments = [s for s in key.split("/") if s and s != "**"]
+    if not segments:
+        return key
+    name = "/".join(segments[-2:]) if len(segments) >= 2 and segments[-2].startswith("@") else segments[-1]
+    at = name.rfind("@")
+    return name[:at] if at > 0 else name
+
+
+def _npm_dependency_entries(text: str):
+    """Set of (section, package, spec) entries in a package.json, or None when it is not a JSON object."""
+    data = json.loads(text) if text.strip() else {}
+    if not isinstance(data, dict):
+        return None
+    entries = set()
+    for section in _NPM_DEPENDENCY_SECTIONS:
+        deps = data.get(section)
+        if isinstance(deps, dict):
+            for name, spec in deps.items():
+                entries.add((section, name, json.dumps(spec, sort_keys=True)))
+
+    def _walk_overrides(section, node):
+        for key, value in node.items():
+            if key != ".":
+                entries.add((section, _npm_package_name(key), json.dumps(value, sort_keys=True)))
+            if isinstance(value, dict):
+                _walk_overrides(section, value)
+
+    for section in _NPM_OVERRIDE_SECTIONS:
+        if isinstance(data.get(section), dict):
+            _walk_overrides(section, data[section])
+    return entries
+
+
+def _npm_added_packages(base_text: str, head_text: str):
+    """Packages added or re-specified in a package.json's dependency, overrides and resolutions
+    sections (AUDIT_LOG BUILD-07). Returns None when either side does not parse, so the caller
+    falls back to the diff-line parser."""
+    try:
+        base = _npm_dependency_entries(base_text)
+        head = _npm_dependency_entries(head_text)
+    except (ValueError, TypeError):
+        return None
+    if base is None or head is None:
+        return None
+    return sorted({name for _section, name, _spec in head - base})
 
 
 def _normalize_yaml_content(content: str) -> str:
@@ -1334,21 +1411,35 @@ class PayloadAnalyzer:
             sca_manifests_scanned: list = []
             if allowlist is not None:
                 for d in diffs:
-                    if d.change_type not in ('A', 'M'):
+                    if d.change_type not in _ACTIVATING_CHANGE_TYPES:
                         continue
                     path = d.b_path or d.a_path or ''
-                    manifest_type = next(
-                        (mt for pat, mt in _MANIFEST_PATTERNS.items() if re.search(pat, path)),
-                        None,
-                    )
+                    manifest_type = _manifest_type(path)
                     if manifest_type is None:
                         continue
                     sca_manifests_scanned.append(path)
                     allowlist_key = _MANIFEST_ALLOWLIST_KEY.get(manifest_type, manifest_type)
                     allowed = allowlist.get(allowlist_key, set())
+                    # A manifest renamed from a path of another type is new in full (AUDIT_LOG MOVE-01).
+                    old_path = d.a_path if d.change_type in ('R', 'C') else None
+                    activated = d.change_type == 'A' or (
+                        old_path is not None and _manifest_type(old_path) != manifest_type
+                    )
                     try:
-                        diff_text = self.repo.git.diff(merge_base[0].hexsha, branch_ref, '--', path)
-                        added_pkgs = _parse_added_packages(diff_text, manifest_type)
+                        added_pkgs = None
+                        if manifest_type == "npm":
+                            head_text = _blob_text(d.b_blob)
+                            base_text = "" if activated else _blob_text(d.a_blob)
+                            if head_text is not None and base_text is not None:
+                                added_pkgs = _npm_added_packages(base_text, head_text)
+                        if added_pkgs is None:
+                            if old_path is not None and not activated:
+                                diff_text = self.repo.git.diff(
+                                    '-M', merge_base[0].hexsha, branch_ref, '--', old_path, path
+                                )
+                            else:
+                                diff_text = self.repo.git.diff(merge_base[0].hexsha, branch_ref, '--', path)
+                            added_pkgs = _parse_added_packages(diff_text, manifest_type)
                         seen = set()
                         for pkg in added_pkgs:
                             if pkg not in allowed and pkg not in seen:
@@ -1864,7 +1955,8 @@ class PayloadAnalyzer:
             elif filename == 'mcp.json':
                 signals.extend(_check_mcp_json(content))
 
-            if _HIDDEN_UNICODE_RE.search(content):
+            # A byte order mark at the start of the file is encoding metadata, not hidden text.
+            if _HIDDEN_UNICODE_RE.search(content.removeprefix('﻿')):
                 signals.append({'type': 'hidden_unicode', 'pattern': 'non-printing Unicode character'})
 
             if signals:
