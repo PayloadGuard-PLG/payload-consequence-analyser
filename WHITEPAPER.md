@@ -441,7 +441,7 @@ Branch age is clamped to `max(0, days)` — a branch newer than the target commi
 
 Sanitises markdown (strips code fences, inline code, link syntax, formatting characters), tokenises to lowercase alphanumeric tokens, applies a Lovins-inspired suffix stemmer (longest-first, minimum 3-character candidate). Classifies two dimensions:
 
-- **Scope:** `micro` if any token matches `_SEMANTIC_MICRO_SCOPE` (minor, typo, cleanup, whitespace, cosmetic, etc.); `macro` if any matches `_SEMANTIC_MACRO_SCOPE` (overhaul, architectural, rewrite, comprehensive, etc.); `unspecified` otherwise.
+- **Scope:** `micro` if any token matches `_SEMANTIC_MICRO_SCOPE` (minor, typo, trivial, whitespace, cosmetic, etc.); otherwise `macro` if any matches `_SEMANTIC_MACRO_SCOPE` (overhaul, architectural, rewrite, comprehensive, etc.); otherwise `docs` if any matches `_SEMANTIC_DOCS_SCOPE` (docs, readme, changelog); `unspecified` otherwise. A `docs` claim is a micro claim about the files outside documentation (`_SEMANTIC_DOC_FILE_RE`: `.md`, `.mdx`, `.rst`, `.adoc`, images, README/CHANGELOG/LICENSE-style files), so Phase 3 measures only those files (`diff_reality.outside_documentation`). "grammar", "cleanup" and "complete" are not scope words: in real descriptions they named features (AUDIT_LOG SEM-02).
 - **Dominant operation:** checked in priority order — `remedial` (fix, patch, resolve, revert), `destructive` (remove, delete, drop, deprecate), `additive` (add, implement, create, build), `mutative` (update, refactor, migrate, replace).
 
 **Phase 2 — Diff Profiler** (`_profile_diff`):
@@ -459,7 +459,7 @@ Five independent signals, each contributing to `mci_score`:
 | `scope_understated` | scope == micro AND total_churn > churn_limit (default 50) | +0.4 |
 | `operation_mutation` | scope == micro AND structural_alterations > 0 | +0.3 |
 | `hidden_component_modification` | scope == micro AND sensitive file in diff not named in description | +0.3 |
-| `phantom_additions` | dominant_op == remedial AND insertion_ratio > ir_threshold (default 0.9) | +0.4 |
+| `phantom_additions` | scope == micro AND dominant_op == remedial AND total_churn > churn_limit AND insertion_ratio > ir_threshold (default 0.9) | +0.4 |
 | `cross_stack_micro_claim` | scope == micro AND distinct_file_extensions >= 3 | +0.2 |
 | `macro_scope_manual_review` | scope == macro | advisory only — no MCI contribution |
 
@@ -695,7 +695,7 @@ external tools run the checks.
 | Method | Tool | Scope | What it proves |
 |--------|------|-------|----------------|
 | SMT proof | Z3 Solver | L3, L2c | P1–P11: abstract symbolic properties of the scoring model (P9 derives the score bound from the per-signal model; P11 proves branch age never decides DESTRUCTIVE) |
-| Contract verification | CrossHair | L3, L4, L5a, L5b | C-01–C-15, S1–S7, T1–T7, M1–M9: pre/post conditions on pure-Python mirrors of the scoring code |
+| Contract verification | CrossHair | L3, L4, L5a, L5b | C-01–C-15, S1–S7, T1–T7, M1–M11: pre/post conditions on pure-Python mirrors of the scoring code |
 | Machine-checked proof | Dafny 4.9.1 | L3, L4, L5a | POST-1–12, POST-15/16, S1–S7, T1–T8 over the entire input domain |
 
 **Z3 proofs** (`tests/proofs/test_z3_properties.py`) encode the L3 scoring logic as integer
@@ -974,9 +974,9 @@ For repositories with complex merge histories, `merge_base()` may return multipl
 
 Layer 5b v2 uses structural heuristics rather than keyword lists, but coverage remains bounded by what can be inferred from description text and diff structure alone.
 
-*Unspecified scope descriptions* ("updates config", "changes handler behaviour") produce no micro or macro scope classification. None of the five MCI signals fire without a scope classification (V_s, V_o, V_f, V_e all require micro scope; V_r requires a remedial operation claim). A sufficiently vague description yields TRANSPARENT regardless of diff severity — the layer cannot penalise what it cannot classify.
+*Unspecified scope descriptions* ("updates config", "changes handler behaviour") produce no micro or macro scope classification. None of the five MCI signals fire without a micro or documentation claim (all five require it; V_r also requires a remedial operation claim and churn above the limit). A sufficiently vague description yields TRANSPARENT regardless of diff severity — the layer cannot penalise what it cannot classify.
 
-*V_r false positives on greenfield additions* — a PR claiming "fix" that adds a new module from scratch will have a high insertion ratio and trigger `phantom_additions`. This may be a valid description ("fix the gap by adding X") rather than deception. The signal is advisory at mci_score 0.4 (CAUTION_MISMATCH) unless combined with another signal.
+*V_r scope* — `phantom_additions` fires only with a micro claim and churn above the limit, so it always accompanies `scope_understated` and lifts a "minor fix" that adds a large amount of code to DECEPTIVE_PAYLOAD. Without the micro requirement it fired on ordinary bug fixes that add code (17 of 294 real commits; AUDIT_LOG SEM-02).
 
 *V_f acknowledgement check* uses the last two path components (e.g. `auth_handler.py` for `src/auth_handler.py`). The full filename including extension must appear in the description to suppress the signal — stem-only references ("auth_handler" without ".py") are not recognised as acknowledgement.
 

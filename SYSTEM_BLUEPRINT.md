@@ -59,7 +59,7 @@ payload-consequence-analyser/
 │   ├── consequence_pure.py           # L3: CrossHair contracts C-01–C-15 (score bounds, verdict bijection, branch age)
 │   ├── temporal_pure.py              # L5a: CrossHair contracts T1–T7 (drift score, status bijection)
 │   ├── structural_pure.py            # L4: CrossHair contracts S1–S7 (dual-gate biconditional)
-│   ├── semantic_pure.py              # L5b: CrossHair contracts M1–M9 (mci_score bounds, DECEPTIVE ↔ ≥0.5)
+│   ├── semantic_pure.py              # L5b: CrossHair contracts M1–M11 (mci_score bounds, DECEPTIVE ↔ ≥0.5, micro claim required)
 │   └── dafny/
 │       ├── assess_consequence.dfy    # L3: Dafny POST-1–12, POST-15/16 (machine-checked over entire input domain)
 │       ├── assess_consequence_verify.log  # dafny verify output for all three files (CI run #19, 2026-10-27)
@@ -122,7 +122,7 @@ payload-consequence-analyser/
 | `verification/consequence_pure.py` | L3 Consequence | CrossHair PEP316 | C-01–C-15 (incl. POST-15/16) |
 | `verification/temporal_pure.py` | L5a Temporal | CrossHair PEP316 | T1–T7 (finite-velocity precondition) |
 | `verification/structural_pure.py` | L4 Structural | CrossHair PEP316 | S1–S7 |
-| `verification/semantic_pure.py` | L5b Semantic | CrossHair PEP316 | M1–M9 |
+| `verification/semantic_pure.py` | L5b Semantic | CrossHair PEP316 | M1–M11 |
 | `verification/dafny/assess_consequence.dfy` | L3 Consequence | Dafny 4.x / Boogie + Z3 | POST-1–12, POST-15/16 |
 | `verification/dafny/structural_drift.dfy` | L4 Structural | Dafny 4.x | S1–S7 |
 | `verification/dafny/temporal_drift.dfy` | L5a Temporal | Dafny 4.x | T1–T8 |
@@ -155,7 +155,7 @@ payload-consequence-analyser/
 | `requests >= 2.31.0` | HTTP calls to GitHub API (Check Runs, remediation PRs) |
 | `pytest >= 7.0` | Test runner |
 | `z3-solver >= 4.12.0` | Z3 SMT solver for P1–P11 proof tests |
-| `crosshair-tool >= 0.0.104` | CrossHair symbolic execution for C-01–C-15, T1–T7, S1–S7, M1–M9 |
+| `crosshair-tool >= 0.0.104` | CrossHair symbolic execution for C-01–C-15, T1–T7, S1–S7, M1–M11 |
 | `pytest-timeout >= 2.0` | Per-test timeout enforcement in proof suite |
 | `tree-sitter >= 0.21.0` | Core tree-sitter library (L4 structural parser) |
 | `tree-sitter-python >= 0.21.0` | Python grammar |
@@ -360,14 +360,15 @@ PayloadAnalyzer.analyze()
 ```
   SemanticTransparencyAnalyzer.analyze_transparency()
   ├── Phase 1 — Linguistic Lexer
-  │   └── classifies PR description: micro-scope language (fix/patch/update/minor/cleanup/typo…)
+  │   └── classifies PR description: micro (minor/typo/trivial…), else macro (overhaul/rewrite…), else docs
+  │       (docs/readme/changelog: a micro claim measured on the files outside documentation)
   ├── Phase 2 — Diff Profiler (patch diff: merge_base.diff(branch, create_patch=True))
   │   └── computes: churn, insertion_ratio, structural_additions, sensitive_files_touched, file_type_count
   └── Phase 3 — Cross-Correlation → mci_score ∈ [0,1]
         V_s: scope_understated       +0.4  micro-scope language + churn > 50 lines
         V_o: operation_mutation      +0.3  micro-scope language + structural additions in diff
         V_f: hidden_component_modification  +0.3  micro-scope language + sensitive file not named in description
-        V_r: phantom_additions       +0.4  remedial claim + insertion ratio > 90%
+        V_r: phantom_additions       +0.4  micro remedial claim + churn > 50 lines + insertion ratio > 90%
         V_e: cross_stack_micro_claim +0.2  micro-scope language + ≥3 distinct file types
       mci_score ≥ 0.5 → DECEPTIVE_PAYLOAD (escalates verdict; see Step 8)
       mci_score > 0   → CAUTION_MISMATCH
@@ -568,7 +569,7 @@ PayloadAnalyzer.analyze()
        ↓
   Fix in: analyze.py (the relevant layer or signal)
        ↓
-  Verify: python -m pytest test_analyzer.py test_consequence_engine.py tests/proofs/ -q  (483 pass, 21 skip without Z3/CrossHair; 504 pass with them)
+  Verify: python -m pytest test_analyzer.py test_consequence_engine.py tests/proofs/ -q  (492 pass, 21 skip without Z3/CrossHair; 513 pass with them)
        ↓
   Update: AUDIT_LOG.md (RESOLVED), CLAUDE.md (remove from Open Findings), DEVLOG.md (session entry)
 ```
@@ -577,14 +578,14 @@ PayloadAnalyzer.analyze()
 
 ## Formal Verification Summary
 
-504 tests pass with Z3 and CrossHair installed (`test_analyzer.py` 341, `test_consequence_engine.py` 138, `tests/proofs/` 25); without them 483 pass and 21 of the 25 proof tests skip. Last proof runs: 2026-10-27 (see `PROOFS.md`).
+513 tests pass with Z3 and CrossHair installed (`test_analyzer.py` 349, `test_consequence_engine.py` 138, `tests/proofs/` 26); without them 492 pass and 21 of the 26 proof tests skip. Last proof runs: 2026-10-29 (`semantic_pure`), 2026-10-27 (others; see `PROOFS.md`).
 
 | Method | Coverage | Last result | Run command |
 |---|---|---|---|
-| CrossHair | C-01–C-15 (L3), S1–S7 (L4), T1–T7 (L5a), M1–M9 (L5b) — 40 postconditions | 0 counterexamples | `cd verification && crosshair check <module> --analysis_kind PEP316 --per_condition_timeout 30` |
+| CrossHair | C-01–C-15 (L3), S1–S7 (L4), T1–T7 (L5a), M1–M11 (L5b) — 42 postconditions | 0 counterexamples | `cd verification && crosshair check <module> --analysis_kind PEP316 --per_condition_timeout 30` |
 | Z3 SMT | P1–P11 (L3, L2c) | 18 tests passed | `pytest tests/proofs/test_z3_properties.py -v` |
 | Dafny | POST-1–12, POST-15/16 (L3), S1–S7 (L4), T1–T8 (L5a) | 11 verified, 0 errors (CI run #19) | `dafny verify verification/dafny/assess_consequence.dfy` |
-| pytest (unit, integration, SCG) | all layers, `consequence.v1`, Action path, packaging | 479 passed | `python -m pytest test_analyzer.py test_consequence_engine.py -v` |
-| pytest (proofs) | Z3 properties (18), CrossHair wrappers (5), temporal contract regression, L3 model parity | 25 passed | `python -m pytest tests/proofs/ -v` |
+| pytest (unit, integration, SCG) | all layers, `consequence.v1`, Action path, packaging | 487 passed | `python -m pytest test_analyzer.py test_consequence_engine.py -v` |
+| pytest (proofs) | Z3 properties (18), CrossHair wrappers (5), temporal contract regression, L3 and L5b model parity | 26 passed | `python -m pytest tests/proofs/ -v` |
 
-Skips occur only when the proof tools are missing: 21 of the 25 proof tests.
+Skips occur only when the proof tools are missing: 21 of the 26 proof tests.

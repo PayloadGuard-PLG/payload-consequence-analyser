@@ -16,7 +16,26 @@ Reverse-chronological: most recent entry first. This log starts on 2026-10-27. E
 - **Harness:** the live regression workflow pins analyser commit `40b27dc`, which predates §V12; §V12 changes no status or exit code, so the harness results are unaffected.
 - **Tests at the §V12 fix (`529014e`):** 418 passed with Z3 and CrossHair; 397 passed and 21 skipped without them. Harness oracle 41/41; mutation suite 16/16.
 
-## 2026-10-29 — Round-3 adversarial evaluation fixes (branch `fix/round3-audit`)
+## 2026-10-29 — L5b calibration (SEM-02) and README as tool documentation (branch `fix/sem02-l5b-calibration`)
+
+**Method.** Every L5b input (description, claim tokens, diff profile, changed paths) was extracted from the analyser reports of the round-3 replays: 294 real commits (this repository 74, harness 20, The-Node 200; commit subject as description), the 38 harness fixtures with their live PR bodies, and the 67 campaign cases. Candidate rule sets were scored offline against that dataset, then the chosen one was implemented and replayed against merged `main` `6e46dcf`.
+
+| Candidate | Real-commit raises | Deceptive cases (SEM-01, SEM-04, T04) | SEM-02 |
+|---|---|---|---|
+| Before (documented rules) | 31 | DECEPTIVE ×3 | REVIEW |
+| V_r requires a micro claim and churn > limit | 15 | DECEPTIVE ×3 | TRANSPARENT |
+| + drop "grammar", "cleanup" | 10 | DECEPTIVE ×3 | TRANSPARENT |
+| + documentation claims measured outside documentation, drop macro "complete" (chosen) | 4 | DECEPTIVE ×3 | TRANSPARENT |
+
+The four that remain are claims the descriptions make: two "rewrite" and one "architectural" macro advisory, and a "docs(eval)" commit that adds 9,000 lines including CLI code. The documentation-file pattern excludes `.txt` (`requirements.txt`) and code under `docs/`; a first version that counted `docs/` paths as documentation would have hidden a 47-line JavaScript change in a `docs:` commit.
+
+**Evidence.** Implementation replayed against `6e46dcf`: 10 of 80 commits here and 18 of 200 in The-Node lose an L5b raise; two keep REVIEW from the deletion-ratio signal; harness history unchanged. Harness fixtures with live PR bodies: no verdict or exit-code change in shadow, advisory or enforce mode. Oracle 41/41; mutation suite 16/16. CrossHair `semantic_pure`: exit 0, M-01–M-10 confirmed over all paths, M-11 not confirmed within 30 s, 12 s total; the previous V_r rule is refuted by both M-10 and M-11. Tests 513 / 492 + 21 skipped.
+
+**Harness modes.** For the decision on running the detectors active in testing: in `advisory` mode all 38 fixture exit codes still match the manifest; in `enforce` mode A03 and A06 become DESTRUCTIVE/2 (their `security_desired_outcome`) against manifest SAFE/0. No other fixture changes exit code.
+
+**README.** Rewritten as tool documentation: what it catches, quick start, verdicts, policy modes, detections grouped by area, analysis stages, configuration, Action and CLI reference, limitations. Layer codes, symbol-matching internals and audit references were moved out or dropped (WHITEPAPER keeps the internals). Checked against the code: the lockfile-mismatch finding is `WARN` (the previous README said `REVIEW`).
+
+## 2026-10-29 — Round-3 adversarial evaluation fixes (branch `fix/round3-audit`, PR #123)
 
 Source: `ROUND3_REPORT.md` (external evaluation of `main` `ce44e3e`). Findings, severities and commits are in the AUDIT_LOG register "Adversarial Evaluation Round 3"; this entry records method and evidence. Fixed in order of consequence, one commit per group:
 
@@ -37,7 +56,7 @@ Source: `ROUND3_REPORT.md` (external evaluation of `main` `ce44e3e`). Findings, 
 - Tests: 504 passed with Z3/CrossHair; 483 passed, 21 skipped without (`test_analyzer.py` 341, `test_consequence_engine.py` 138). Each group's new tests were run against the unfixed source and failed there, except the controls.
 
 **Open, for a decision:**
-- SEM-02: with real patch text, V_r (`phantom_additions`) fires on add-heavy "fix" PRs with no churn floor, and the micro-scope lexicon matches domain words ("grammar", "cleanup"). Calibrating L5b changes the modelled behaviour in `verification/semantic_pure.py` (M1–M9).
+- SEM-02: with real patch text, V_r (`phantom_additions`) fires on add-heavy "fix" PRs with no churn floor, and the micro-scope lexicon matches domain words ("grammar", "cleanup"). Calibrated in the entry above.
 - The six SEC rules use execution facts produced by the Python frontend only; TypeScript and other languages get helper delegation but not the new checks.
 - Not in the reported priorities and not addressed: SEC17, SEC22, BOOK01, TF01, and the first- and second-round findings other than FP-01 (SCA-03, compact JSON, is resolved by the BUILD-07 change).
 

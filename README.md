@@ -4,39 +4,39 @@
 [![Dafny Verification](https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml/badge.svg)](https://github.com/PayloadGuard-PLG/payload-consequence-analyser/actions/workflows/verify-dafny.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-PayloadGuard analyses a pull request before it merges and reports whether the change would destroy, disable or hide something important. It runs as a GitHub Action or from the command line, compares the branch with its target using git alone, and returns one of four verdicts (`SAFE`, `REVIEW`, `CAUTION`, `DESTRUCTIVE`) with an exit code that a branch protection rule can enforce.
+PayloadGuard checks a pull request before it merges and reports whether the change would destroy, disable or hide something important. It runs as a GitHub Action or from the command line, compares the branch with its target using Git alone, and returns a verdict (`SAFE`, `REVIEW`, `CAUTION` or `DESTRUCTIVE`) with an exit code that branch protection can enforce.
 
-It targets changes that pass ordinary review and CI:
+It looks for changes that get past ordinary review and CI:
 
 - a long-lived branch merged as a "minor fix" that deletes most of the code base;
-- tests whose assertions were replaced by tautologies, or that were silently skipped;
+- an authentication check removed, inverted, swallowed in a `try` block, or moved after the write it protects;
+- tests whose assertions were replaced by tautologies, or that were skipped;
 - migrations that drop data with no working rollback;
-- workflows that run untrusted pull request input, or that exfiltrate secrets;
-- security guards disabled with `and False`, removed decorators or inverted conditions;
-- AI tooling configuration that executes commands when a folder is opened;
-- a PR description that contradicts what the diff does.
+- workflows that run untrusted pull request input or exfiltrate secrets;
+- build scripts, npm lifecycle scripts and AI tooling configuration that execute commands;
+- a pull request description that understates what the diff does.
 
-The analysis is deterministic and local. It calls no LLM and no third-party service, and repository source does not leave the runner.
+The analysis is deterministic and runs on the runner: no LLM, no external service, and the repository's code does not leave the machine.
 
 ## Contents
 
 - [Quick start](#quick-start)
-- [Verdicts and scoring](#verdicts-and-scoring)
-- [Analysis layers](#analysis-layers)
+- [How a verdict is reached](#how-a-verdict-is-reached)
+- [Policy modes](#policy-modes)
 - [What it detects](#what-it-detects)
-- [Consequence engine](#consequence-engine)
-- [GitHub Action](#github-action)
-- [Command line](#command-line)
+- [How it analyses a change](#how-it-analyses-a-change)
 - [Configuration](#configuration)
+- [GitHub Action reference](#github-action-reference)
+- [Command line](#command-line)
 - [Reports](#reports)
 - [Limitations](#limitations)
-- [Formal verification](#formal-verification)
+- [Verification](#verification)
 - [Development](#development)
 - [Documentation](#documentation)
 
 ## Quick start
 
-Create `.github/workflows/payloadguard.yml`:
+Add `.github/workflows/payloadguard.yml`:
 
 ```yaml
 name: PayloadGuard
@@ -64,6 +64,7 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           pr-description: ${{ github.event.pull_request.body }}
+          consequence-mode: advisory   # optional: shadow (default) | advisory | enforce
 
       - name: Apply verdict
         if: always()
@@ -74,143 +75,193 @@ jobs:
           if [ "$EXIT_CODE" = "1" ]; then echo "::error::analysis error"; exit 1; fi
 ```
 
-Pin a release tag or a commit SHA. `@main` tracks changes that are not yet released ([`CHANGELOG.md`](CHANGELOG.md)).
+Then:
 
-To block merges, add the job (`PayloadGuard` above) under **Settings → Branches → Branch protection rules → Require status checks to pass before merging**.
+1. **Block merges:** add the `PayloadGuard` check under **Settings → Branches → Branch protection rules → Require status checks to pass before merging**.
+2. **Pin a version:** use a release tag or a commit SHA. `@main` includes changes not yet released (see [`CHANGELOG.md`](CHANGELOG.md), *Unreleased*).
+3. **Pass the PR description:** without `pr-description` the description check cannot run, and a change that would otherwise be `SAFE` is reported as `REVIEW`.
 
-Always pass `pr-description`. Without it the semantic layer cannot check the description, and a change that would otherwise be `SAFE` is reported as `REVIEW` (see [L5b](#analysis-layers)).
+Each run posts or updates one comment on the pull request with the verdict, the signals that produced it and the findings with their evidence.
 
-## Verdicts and scoring
+## How a verdict is reached
 
-Each layer contributes points; the total decides the verdict.
-
-| Score | Verdict | Severity | Exit code |
+| Verdict | Score | Severity | Exit code |
 |---|---|---|---|
-| 0 | `SAFE` | LOW | `0` |
-| 1–2 | `REVIEW` | MEDIUM | `0` |
-| 3–4 | `CAUTION` | HIGH | `0` |
-| 5 or more | `DESTRUCTIVE` | CRITICAL | `2` |
+| `SAFE` | 0 | LOW | `0` |
+| `REVIEW` | 1–2 | MEDIUM | `0` |
+| `CAUTION` | 3–4 | HIGH | `0` |
+| `DESTRUCTIVE` | 5 or more | CRITICAL | `2` |
 
-Exit code `1` means the analysis failed. Only `DESTRUCTIVE` fails a check by default.
+Exit code `1` means the analysis failed. By default only `DESTRUCTIVE` fails the check.
 
-| Signal | Points |
+PayloadGuard combines two kinds of analysis:
+
+- **Scored checks** add points for evidence in the change. They apply in every mode.
+- **Consequence detectors** (`D01`–`D10`) compare the code of the base and the head symbol by symbol and recommend `BLOCK`, `REVIEW` or `WARN`. Whether a recommendation changes the verdict depends on the [policy mode](#policy-modes).
+
+| Scored signal | Points |
 |---|---|
-| Structural deletion severity CRITICAL (L4) | +5 |
+| Classes, functions or constants deleted beyond the structural thresholds | +5 |
 | Security-critical file deleted (auth, security, permissions) | +5 |
-| GitHub Actions poisoning, CRITICAL / HIGH signal (L2c) | +5 / +3 |
-| AI tooling config poisoning, CRITICAL / HIGH signal (L2d) | +5 / +3 |
-| Dependency not in `allowlist.yml` (L2b) | +3, once, however many packages |
+| Poisoned GitHub Actions workflow: critical / high signal | +5 / +3 |
+| Poisoned AI tooling configuration: critical / high signal | +5 / +3 |
+| Dependency not in `allowlist.yml` | +3, once, however many packages |
 | Critical-path file deleted (tests, CI and workflow files, Dockerfiles, dependency and build manifests, package `__init__.py`, core directories) | +2 |
-| Added non-code file with CI triggers or shell execution patterns | +2 per match, at most +4 |
+| Added non-code file containing CI triggers or shell execution | +2 per match, at most +4 |
 | Files deleted, lines deleted and deletion ratio (thresholds in [Configuration](#configuration)); the ratio counts from 100 deleted lines, or when a critical-path file is deleted | each 0–3; combined as the highest, +1 when two or more fire, at most +4 |
-| Branch age: more than 90 / 180 / 365 days | +1 / +2 / +3 (see below) |
+| Branch age above 90 / 180 / 365 days | +1 / +2 / +3 (see below) |
 
 Rules that shape the result:
 
-- **Branch age never decides `DESTRUCTIVE`.** It is applied after every other signal. It adds in full only when the other signals already total 5 or more; otherwise it raises the score to at most 4. An old branch can therefore reach `REVIEW` or `CAUTION` on age alone, but a `DESTRUCTIVE` verdict needs evidence from the change itself. The verdict reports `branch_age_score`.
-- **Safety floors.** A deleted security-critical file, a CRITICAL structural result, or a CRITICAL Actions or AI-config signal is `DESTRUCTIVE` regardless of other signals.
-- **Escalation after scoring.** The semantic layer (L5b) and the consequence policy (`advisory`, `enforce`) can raise a verdict. The raised verdict takes its own severity and recommendation, and the score rises to the lowest score of its band (1, 3 or 5); the JSON verdict reports the points added as `escalation_score`.
-- The maximum score is 36.
+- **Branch age alone never makes a change `DESTRUCTIVE`.** Age is added after every other signal. It adds in full when the other signals already total 5 or more; otherwise it raises the score to at most 4.
+- **Safety floors:** a deleted security-critical file, a critical structural deletion, or a critical workflow or AI-config signal is `DESTRUCTIVE` whatever else the change contains.
+- **Raised verdicts:** the description check and the `advisory` and `enforce` modes can raise a verdict after scoring. The raised verdict takes its own severity and recommendation, and its score rises to the lowest score of its band (1, 3 or 5).
 
-## Analysis layers
+## Policy modes
 
-| Layer | Function | Effect on the verdict |
-|---|---|---|
-| **L1 Surface** | File and line counts, permission changes, symlinks and submodules. | Counts feed L3; permission and symlink changes are reported. |
-| **L2 Forensic** | Deleted critical-path and security-critical files; content scan of added non-code files for CI triggers and shell execution patterns. | Scored. |
-| **L2b Dependencies** | Packages added to `requirements*.txt`, `pyproject.toml`, `package.json`, `go.mod` and `Cargo.toml` (including manifests renamed into place), checked against `allowlist.yml`. `package.json` is parsed as JSON: entries added or changed in `dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies`, `overrides` and `resolutions`. Runs only when `allowlist.yml` exists on the target branch. | Scored. |
-| **L2c Actions poisoning** | Workflow files added, modified, or renamed or copied into `.github/workflows/`: base64 payloads, credential harvesting, dormant `workflow_dispatch` / `schedule` triggers that run shell commands (any YAML layout), forged bot authors, OIDC token elevation, typosquatted action consumers, `pull_request_target` misuse. | Scored. |
-| **L2d AI config poisoning** | AI tooling configuration added, modified, or renamed or copied into place: `.claude/settings.json`, `.gemini/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, `package.json` lifecycle scripts, `composer.json`, `Gemfile`, `binding.gyp`, `mcp.json`. Also reports zero-width, bidirectional-control, byte-order-mark (not at the start of the file) and Unicode tag characters. | Scored. |
-| **L3 Consequence** | Combines the signals above into the score and verdict. | Decides the verdict. |
-| **L4 Structural** | AST comparison: deleted classes, functions and constants, per file and across files. Fires when the deleted share reaches `thresholds.structural.deletion_ratio` and the count reaches `min_deleted_nodes`. Also reports McCabe complexity of newly added Python functions (advisory). | CRITICAL result scores +5. |
-| **L5a Temporal** | Drift score from branch age and commit velocity on the target, classified `CURRENT` (below 250), `STALE` (250–1,000) or `DANGEROUS` (1,000 and above). | Reported. Branch age itself is scored in L3. |
-| **L5b Semantic** | Heuristic comparison of the PR description with the profile of the patch (lines added and removed, new declarations, file types, sensitive paths; no LLM). Results: `TRANSPARENT`, `CAUTION_MISMATCH`, `DECEPTIVE_PAYLOAD`, `UNVERIFIED` (no description). | `UNVERIFIED` and `CAUTION_MISMATCH` raise `SAFE` to `REVIEW`. `DECEPTIVE_PAYLOAD` raises `SAFE` or `REVIEW` to `CAUTION`, and `CAUTION` to `DESTRUCTIVE` only when the content score alone is at least 3. |
-| **L5c Runtime** | Optional eBPF agent for the CI runner: `execve`, outbound connections, `ptrace` and process-memory access, in audit or block mode with an egress allowlist. | Events are listed in the JSON report; no score. |
-| **Consequence engine** | Differential detectors `D01`–`D10` ([below](#consequence-engine)). | Findings; verdict only in `advisory` or `enforce` mode. |
+| Mode | Effect of consequence detector findings |
+|---|---|
+| `shadow` *(default)* | Reported only. The verdict and exit code come from the scored checks. |
+| `advisory` | `BLOCK` and `REVIEW` findings are added to the verdict flags and raise `SAFE` to `REVIEW`. The exit code never becomes `2`. |
+| `enforce` | Any `BLOCK` finding makes the verdict `DESTRUCTIVE` (exit code `2`); `REVIEW` findings raise `SAFE` to `REVIEW`. |
+
+`WARN` findings are reported in every mode and never change the verdict. `advisory` shows the detectors' results in the verdict without failing checks; `enforce` fails a check on any `BLOCK` finding.
+
+Set the mode with the Action's `consequence-mode` input or `--consequence-mode`, the `PAYLOADGUARD_CONSEQUENCE_MODE` environment variable, or `consequence.mode` in `payloadguard.yml`, in that order of precedence.
 
 ## What it detects
 
-| Threat | Detector | Example | Policy |
+| Area | What is reported | Check | Recommendation |
 |---|---|---|---|
-| Mass deletion presented as a refactor | L1, L2, L4 | A long-lived branch described as a "minor syntax fix" deletes 60 files and 11,967 lines. | scored |
-| Gutted functions | `D02` | A security or authentication method is reduced to `pass`, `...` or `return None`, in place or after a rename. | `BLOCK` |
-| Distributed loss and threshold gaming | `D03` | One security function removed per file across five files; deleted methods padded with trivial getters. | `BLOCK` |
-| Broken callers and API breaks | `D04` | An exported function is deleted or its required parameters change while callers, including aliased imports, still use the old contract. | `BLOCK` |
-| Build wrapper tampering | `D05` | `curl … \| sh` or a reverse shell added to, or uncommented in, `mvnw`, `gradlew`, `Makefile` or `build.sh`, or such a file renamed into place. | `BLOCK` |
-| Lifecycle script change | `D05` | An npm script that runs without being named (`preinstall`, `install`, `postinstall`, `dependencies`, `prepare`, `prepack`, `postpack`, `prepublish`, `prepublishOnly`, `publish`, `postpublish`) is added or changed. | `REVIEW` |
-| Dependency drift | `D05` | A dependency is added to a manifest without a lockfile update. | `REVIEW` |
-| Source replaced by a symlink | `D02` | `auth.py` becomes a symlink to another implementation; the target's content is analysed. | `REVIEW` |
-| Security guard regression | `D06` | `@require_auth` removed, `self._rollback()` dropped, `if not verify()` inverted, `and False` or `\|\| true` inserted. Python also: the guard's exception swallowed, a write moved before the guard, the guard made conditional or placed in a generator that never runs, `or` changed to `and` in a denial, a verifier's result ignored. A guard moved into a helper that still enforces it is not reported. | `BLOCK` |
-| Untrusted expression injection | `D08` | `${{ github.event.pull_request.title }}` interpolated into a `run:` block. | `BLOCK` |
-| Pull request checkout with privileges | `D08` | `pull_request_target` combined with a checkout of the pull request head. | `BLOCK` |
-| Action pin downgrade | `D08` | A 40-character commit SHA replaced by a tag or branch (`@v4`, `@main`). | `REVIEW` |
-| CI gate weakening | `D08` | `continue-on-error: true` on required steps, or `permissions: write-all`. | `REVIEW` |
-| Privileged artifact use | `D08` | A `workflow_run` workflow unpacks artifacts from an untrusted run. | `REVIEW` |
-| Test assertion erosion | `D09` | Assertions replaced by `assert True` or `expect(true).toBe(true)`. | `BLOCK` |
-| Newly skipped tests | `D09` | `@pytest.mark.skip`, `@pytest.mark.xfail`, `it.skip`, `pytest.skip()`, `t.Skip()`. | `REVIEW` |
-| Data wipe-out | `D10` | A migration runs `TRUNCATE` or `DROP DATABASE` / `DROP SCHEMA`. | `BLOCK` |
-| Irreversible schema drop | `D10` | A table or column is dropped with an empty or missing `downgrade()`, a Rails `change` drop, or Django `RunSQL` without `reverse_sql`. | `BLOCK` |
-| Reversible schema drop | `D10` | A table or column is dropped in a forward migration that has a working rollback. | `REVIEW` |
-| Workflow poisoning, OIDC theft | L2c | A workflow is changed to exfiltrate secrets, steal OIDC tokens or forge a CI identity. | scored |
-| AI tooling config poisoning | L2d | A `SessionStart` hook or folder-open task in `.claude/settings.json` or `.vscode/tasks.json` runs a command. | scored |
-| Deceptive PR description | L5b | The description says "minor copy fix"; the diff alters authentication or drops tables. | raises the verdict |
+| **Deletion** | Mass deletion of files, lines or code symbols; a long-lived branch described as a small fix. | scored | — |
+| | Security or authentication function reduced to `pass`, `...` or `return None`, in place or after a rename. | `D02` | `BLOCK` |
+| | One security function removed per file across many files; deletions padded with trivial getters to stay under thresholds. | `D03` | `BLOCK` |
+| | Source file replaced by a symlink to other code (the target is analysed). | `D02` | `REVIEW` |
+| **Security guards** | Guard decorator removed, guard or rollback call dropped, condition inverted, `and False` / `\|\| true` inserted, unconditional early return. | `D06` | `BLOCK` |
+| | Python: guard exception caught and ignored; guard made conditional or skippable by an earlier return; guard placed in a generator or lambda that never runs; a write moved ahead of the guard; a verifier called but its result ignored; a denial condition that now allows a case it denied (for example `or` changed to `and`). | `D06` | `BLOCK` |
+| **APIs** | Exported function deleted, or its required parameters changed, while callers (including aliased imports) still use the old form. | `D04` | `BLOCK` / `REVIEW` |
+| **Tests** | Assertions replaced by `assert True` or `expect(true).toBe(true)`. | `D09` | `BLOCK` |
+| | Tests newly skipped (`@pytest.mark.skip`, `it.skip`, `t.Skip()`, …). | `D09` | `REVIEW` |
+| **Migrations** | `TRUNCATE`, `DROP DATABASE` or `DROP SCHEMA`. | `D10` | `BLOCK` |
+| | Table or column dropped without a working rollback. | `D10` | `BLOCK` |
+| | Table or column dropped with a working rollback. | `D10` | `REVIEW` |
+| **Build and dependencies** | `curl … \| sh`, a reverse shell or a binary payload added to or uncommented in `mvnw`, `gradlew`, `Makefile` or `build.sh`. | `D05` | `BLOCK` |
+| | npm script that runs without being invoked (`preinstall`, `install`, `postinstall`, `dependencies`, `prepare`, `prepack`, `postpack`, `prepublish`, `prepublishOnly`, `publish`, `postpublish`) added or changed. | `D05` | `REVIEW` |
+| | Dependency manifest changed without a lockfile update. | `D05` | `WARN` |
+| | Package not on the allowlist. | scored | — |
+| **CI workflows** | Untrusted expression such as `${{ github.event.pull_request.title }}` in a `run:` block; `pull_request_target` with a checkout of the PR head. | `D08` | `BLOCK` |
+| | Action pinned to a SHA changed to a tag or branch; `continue-on-error: true` or `permissions: write-all`; `workflow_run` unpacking untrusted artifacts. | `D08` | `REVIEW` |
+| | Secret exfiltration, cloud-metadata access, base64 payloads piped to a shell, OIDC token elevation, typosquatted actions, `pull_request_target` misuse, dormant `workflow_dispatch` / `schedule` triggers that run shell commands, forged bot authors. | scored | — |
+| **AI tooling configuration** | Commands run by a `SessionStart` hook, a folder-open task, an npm or Composer lifecycle script, a Gemfile, `binding.gyp` or an MCP server definition; execute-imperatives in always-applied Cursor rules; hidden Unicode characters. | scored | — |
+| **PR description** | A description that claims a small or documentation-only change for a diff that is large, adds new declarations, touches files of many types or alters sensitive files it does not name. | scored (raises the verdict) | — |
 
-The policy column is each finding's recommendation. `Dxx` findings change the verdict and exit code only in `advisory` or `enforce` mode; the default is `shadow` ([Consequence modes](#consequence-modes)).
+A file renamed or copied into a workflow, AI-config, build-script, dependency-manifest or migration path from a path that is not checked is treated as newly added there.
 
-## Consequence engine
+## How it analyses a change
 
-`consequence_engine.py` compares the symbols of the base and the head of the pull request. It parses Python, JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`), Go, Rust and Java. Changed source in any other language is reported by `D01` as incomplete coverage; a missing parser is never read as absence of risk.
+| Stage | What it does |
+|---|---|
+| Surface | File and line counts, permission changes, symlinks and submodules. |
+| Forensic | Deleted critical-path and security-critical files; content of added non-code files. |
+| Dependencies | Packages added to `requirements*.txt`, `pyproject.toml`, `package.json`, `go.mod` and `Cargo.toml`, checked against `allowlist.yml` (only when the file exists on the target branch). `package.json` is read as JSON: entries added or changed in `dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies`, `overrides` and `resolutions`. |
+| Workflows | Workflow files, scanned for the patterns in the table above; triggers are read from the parsed YAML. |
+| AI tooling configuration | `.claude/settings.json`, `.gemini/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, `package.json` lifecycle scripts, `composer.json`, `Gemfile`, `binding.gyp`, `mcp.json`. |
+| Structure | Deleted classes, functions and constants per file and across files; complexity of new Python functions (advisory). |
+| Branch drift | Branch age and commit velocity on the target, classified `CURRENT`, `STALE` or `DANGEROUS` (reported; age itself is scored). |
+| Description | Compares the PR description with the diff. It flags only descriptions that claim a small change ("minor", "typo", "trivial", …) or a documentation change ("docs", "readme", "changelog"; then only the files outside documentation are measured). A description that announces a large change ("major", "overhaul", "rewrite", …) gets a review advisory. Results: `TRANSPARENT`, `CAUTION_MISMATCH` (raises `SAFE` to `REVIEW`), `DECEPTIVE_PAYLOAD` (raises `SAFE` or `REVIEW` to `CAUTION`, and `CAUTION` to `DESTRUCTIVE` only when the change alone scores at least 3), `UNVERIFIED` (no description; raises `SAFE` to `REVIEW`). |
+| Consequence engine | Parses base and head, matches each symbol across renames and moves, and runs detectors `D01`–`D10`. |
+| Runtime (optional) | eBPF agent on the CI runner recording process starts, outbound connections, `ptrace` and process-memory access, in audit or block mode with an egress allowlist. Reported, not scored. |
 
-Symbols are matched in five stages:
+The consequence engine parses Python, JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`), Go, Rust and Java:
 
-1. **Exact:** same file, qualified name and kind.
-2. **Renamed file:** same qualified name and kind in a file git reports as renamed.
-3. **Cross-file move:** same qualified name, or same name with matching signature or body hash, in another changed file.
-4. **Container and body-hash rename:** classes or structs matched by member overlap; functions renamed with an identical body hash and signature; same-scope replacement by a no-op stub.
-5. **Residual:** unmatched symbols are `REMOVED` or `ADDED`.
+- **Coverage is reported.** Changed source in other languages, files that do not parse, invalid encodings and symlinks that point outside the repository are reported by `D01` as incomplete analysis; a missing parser is never read as absence of risk.
+- **Symlinks** are resolved inside the repository and analysed as the content they point to.
+- **Callers across files:** files that mention a changed symbol are indexed first, then other files, up to `max_repo_files`. The report states how many source files the index covered, and an API finding that found no breaking caller says when coverage was incomplete.
 
-Each symbol ends in one transition: `UNCHANGED`, `MODIFIED`, `GUTTED`, `MOVED`, `MOVED_AND_GUTTED`, `RENAMED`, `RENAMED_AND_GUTTED`, `AMBIGUOUS`, `REMOVED` or `ADDED`. A body counts as gutted when a non-stub symbol becomes a no-op stub, or when three or more statements with calls collapse to at most one statement without calls.
-
-| Detector | Consequence classes | Policy |
+| Detector | Consequence classes | Recommendation |
 |---|---|---|
-| `D01_PARSER_INCOMPLETE` | `ANALYSIS_INCOMPLETE`: syntax errors, missing grammar, unsupported extension, invalid encoding, unresolvable symlink, unparsable files in the caller index | `WARN` / `REVIEW` |
+| `D01_PARSER_INCOMPLETE` | `ANALYSIS_INCOMPLETE` | `WARN` / `REVIEW` |
 | `D02_BODY_WEAKENING` | `BODY_GUTTED`, `RENAME_WITH_BODY_WEAKENING`, `AMBIGUOUS_REFACTOR` | `BLOCK` / `WARN` |
 | `D02_STRUCTURAL_DELTA` | `SOURCE_REPLACED_BY_SYMLINK` | `REVIEW` |
 | `D03_COMPOUND_LOSS` | `DISTRIBUTED_SYMBOL_LOSS`, `THRESHOLD_GAMING_DELETION` | `BLOCK` / `REVIEW` |
-| `D04_PUBLIC_API_BREAK` | `UNRESOLVED_CALLER`, `PUBLIC_API_REMOVAL`, `PUBLIC_API_SIGNATURE_BREAK` | `BLOCK` / `REVIEW` |
-| `D05_BUILD_DEPENDENCY_DELTA` | `BUILD_WRAPPER_TAMPERING`, `BUILD_SCRIPT_MODIFICATION`, `DEPENDENCY_LOCKFILE_MISMATCH` | `BLOCK` / `REVIEW` |
+| `D04_PUBLIC_API_BREAK` | `UNRESOLVED_CALLER`, `PUBLIC_API_REMOVAL`, `PUBLIC_API_SIGNATURE_BREAK` | `BLOCK` / `REVIEW` / `WARN` |
+| `D05_BUILD_DEPENDENCY_DELTA` | `BUILD_WRAPPER_TAMPERING`, `BUILD_SCRIPT_MODIFICATION`, `DEPENDENCY_LOCKFILE_MISMATCH` | `BLOCK` / `REVIEW` / `WARN` |
 | `D06_GUARD_REGRESSION` | `SECURITY_GUARD_REMOVED`, `SECURITY_GUARD_WEAKENED` | `BLOCK` |
 | `D08_WORKFLOW_INTEGRITY` | `UNTRUSTED_WORKFLOW_EXPRESSION_INJECTION`, `PULL_REQUEST_TARGET_UNTRUSTED_CHECKOUT`, `ACTION_PIN_DOWNGRADE`, `CI_GATE_WEAKENED`, `WORKFLOW_RUN_UNTRUSTED_ARTIFACT`, `ACTION_PIN_UNPINNED` | `BLOCK` / `REVIEW` / `WARN` |
 | `D09_TEST_EROSION` | `TEST_ASSERTION_EROSION`, `TEST_SKIPPED_NEWLY` | `BLOCK` / `REVIEW` |
 | `D10_MIGRATION_PERSISTENCE_LOSS` | `CATASTROPHIC_DATA_WIPEOUT`, `IRREVERSIBLE_PERSISTENCE_DROP`, `DESTRUCTIVE_PERSISTENCE_MIGRATION` | `BLOCK` / `REVIEW` |
 
-Every finding carries the file, line, source snippet, affected symbols and a remediation.
+Every finding carries the file, line, affected symbols, evidence and a remediation. [`WHITEPAPER.md`](WHITEPAPER.md) describes each stage and detector in detail.
 
-Symlinks are resolved inside the repository and analysed as the content they point to. Source is decoded as its language reads it (Python by its coding declaration, otherwise UTF-8); bytes invalid in that encoding are kept and the file is reported as incompletely analysed. To verify callers across files, the engine indexes head files that mention a changed symbol first, then other files, up to `max_repo_files`; `graph_summary.caller_index` reports how many source files were indexed, and a `D04` finding that found no breaking caller says when the index was incomplete.
+## Configuration
 
-### Consequence modes
+`payloadguard.yml` is optional and read from the **target branch**. Every key is optional; the values shown are the defaults.
 
-| Mode | Behaviour |
-|---|---|
-| `shadow` *(default)* | All detectors run and their findings appear in the reports. The verdict and exit code are unchanged. |
-| `advisory` | `BLOCK` and `REVIEW` findings are added to the verdict flags and raise a `SAFE` verdict to `REVIEW`. The exit code never becomes `2`. `WARN` findings are reported only. |
-| `enforce` | Any `BLOCK` finding sets the verdict to `DESTRUCTIVE` (exit code `2`). `REVIEW` findings raise `SAFE` to `REVIEW`. |
+```yaml
+consequence:
+  enabled: true
+  mode: shadow                        # shadow | advisory | enforce
+  max_repo_files: 200                 # head files indexed to find callers of changed code
 
-Precedence: the `consequence-mode` input or `--consequence-mode`, then the `PAYLOADGUARD_CONSEQUENCE_MODE` environment variable, then `consequence.mode` in `payloadguard.yml`.
+thresholds:
+  branch_age_days: [90, 180, 365]     # +1 / +2 / +3
+  files_deleted:   [10, 20, 50]       # +1 / +2 / +3
+  lines_deleted:   [5000, 10000, 50000]
+  temporal:
+    stale:     250.0                  # drift score for STALE
+    dangerous: 1000.0                 # drift score for DANGEROUS
+  structural:
+    deletion_ratio:       0.20        # share of symbols deleted for a critical result
+    min_deleted_nodes:    3
+    complexity_threshold: 15          # complexity advisory for new Python functions
 
-## GitHub Action
+sca:
+  fail_on_unknown: true               # unlisted package adds +3 (needs allowlist.yml)
+
+actions:
+  enabled: true
+  critical_signal_score: 5
+  high_signal_score: 3
+  trusted_oidc_consumers: []          # e.g. my-org/deploy-action
+
+semantic:
+  enabled: true
+  micro_scope_churn_limit: 50         # lines a "small change" claim may cover
+  insertion_ratio_fix_threshold: 0.9  # share of additions that makes a small "fix" suspicious
+```
+
+### Dependency allowlist (`allowlist.yml`)
+
+The dependency check runs only when `allowlist.yml` exists in the repository root of the target branch. A package added to a manifest and absent from the list for its ecosystem adds +3.
+
+```yaml
+python:          # requirements*.txt, pyproject.toml
+  - requests
+npm:             # package.json
+  - express
+go:              # go.mod
+  - github.com/spf13/cobra
+rust:            # Cargo.toml
+  - serde
+```
+
+### Trust boundary
+
+`payloadguard.yml` and `allowlist.yml` are read from the target branch, so a pull request cannot change the policy its own scan runs under; edits take effect once merged. The `consequence-mode` input is only as trusted as the workflow file, which on `pull_request` events comes from the pull request itself: protect it with required workflows or CODEOWNERS. The Action scans the pull request's head commit, so pull requests from forks are scanned correctly.
+
+## GitHub Action reference
 
 ### Inputs
 
 | Input | Default | Purpose |
 |---|---|---|
 | `repo-token` | `github.token` | Token for the PR comment. |
-| `pr-description` | empty | Pull request body, for L5b. Pass `github.event.pull_request.body`. |
+| `pr-description` | empty | Pull request body for the description check. Pass `github.event.pull_request.body`. |
 | `consequence-mode` | empty | `shadow`, `advisory` or `enforce`. Empty uses `payloadguard.yml`, then `shadow`. Any other value fails the step with exit code `1`. |
 | `save-markdown` | `payloadguard-report.md` | File name of the Markdown report. |
 | `app-id`, `private-key`, `installation-id` | empty | GitHub App credentials. When set, the result is also posted as a Check Run. |
-| `auto-remediate` | `false` | Opens a new pull request that replaces mutable action tags with commit SHAs. Never commits to the scanned branch. Needs `pull-requests: write`. |
-| `runtime-mode` | `disabled` | `audit` or `block` starts the eBPF agent on the runner (needs `CONFIG_KPROBES` and `CONFIG_FTRACE`; exits cleanly on unsupported kernels). Reads `payloadguard-policy.yaml` from the workspace. |
+| `auto-remediate` | `false` | Opens a separate pull request that replaces mutable action tags with commit SHAs. Never commits to the scanned branch. Needs `pull-requests: write`. |
+| `runtime-mode` | `disabled` | `audit` or `block` starts the eBPF agent (needs `CONFIG_KPROBES` and `CONFIG_FTRACE`; exits cleanly on unsupported kernels). Reads `payloadguard-policy.yaml` from the workspace. |
 
 ### Outputs
 
@@ -221,30 +272,7 @@ Precedence: the `consequence-mode` input or `--consequence-mode`, then the `PAYL
 | `report-path`, `json-report-path` | Absolute paths of the Markdown and JSON reports. |
 | `runtime-events-path` | `pg-runtime-events.json`, when `runtime-mode` is not `disabled`. |
 
-The PR comment is created once and updated in place on each push.
-
-### Enforcing a mode
-
-```yaml
-      - uses: PayloadGuard-PLG/payload-consequence-analyser@v1.6.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          pr-description: ${{ github.event.pull_request.body }}
-          consequence-mode: enforce
-```
-
-or in `payloadguard.yml` on the default branch:
-
-```yaml
-consequence:
-  mode: enforce
-```
-
-### Trust boundary
-
-`payloadguard.yml` and `allowlist.yml` are read from the **target branch**, not from the branch being scanned, so a pull request cannot change the policy its own scan runs under; edits take effect once merged. The `consequence-mode` input is only as trusted as the workflow file. On `pull_request` events that file comes from the pull request, so protect it with required workflows or CODEOWNERS.
-
-The Action scans the pull request head commit, so pull requests from forks are scanned correctly.
+[`examples/payloadguard.yml`](examples/payloadguard.yml) is a complete workflow that also posts a Check Run.
 
 ## Command line
 
@@ -258,112 +286,50 @@ or from source: `git clone https://github.com/PayloadGuard-PLG/payload-consequen
 # analyse a branch against main
 payloadguard . feature/my-branch main
 
-# add the PR description for the semantic layer
+# include the PR description
 payloadguard . feature/my-branch main --pr-description "Add profile endpoint and migrate session table"
 
-# enforce consequence findings and write all report formats
+# apply consequence findings and write every report format
 payloadguard . feature/my-branch main --consequence-mode enforce \
     --save-json scan.json --save-markdown scan.md --save-sarif scan.sarif
 ```
 
-Arguments: `repo_path`, `branch` (a branch name or commit), and optionally `target` (default `main`).
+Arguments: `repo_path`, `branch` (a branch name or commit) and optionally `target` (default `main`).
 
 | Option | Purpose |
 |---|---|
-| `--pr-description TEXT` | PR description for L5b. |
-| `--consequence-mode {shadow,advisory,enforce}` | Consequence policy. |
+| `--pr-description TEXT` | PR description for the description check. |
+| `--consequence-mode {shadow,advisory,enforce}` | Policy mode. |
 | `--save-json [PATH]` | JSON report (default `consequence_report.json`). |
 | `--save-markdown [PATH]` | Markdown report (default `payloadguard-report.md`). |
 | `--save-sarif [PATH]` | SARIF 2.1.0 report (default `payloadguard.sarif`). |
 
-Exit codes: `0` for `SAFE`, `REVIEW` and `CAUTION`; `1` for an analysis error; `2` for `DESTRUCTIVE`. A command-line usage error (for example an invalid `--consequence-mode`) also exits `2`, as argparse does; check that the command is well-formed before treating `2` as a verdict.
-
-## Configuration
-
-`payloadguard.yml` is optional and read from the target branch. Every key is optional; the values shown are the defaults.
-
-```yaml
-consequence:
-  enabled: true
-  mode: shadow                        # shadow | advisory | enforce
-  max_repo_files: 200                 # head files indexed to verify callers (files naming a changed symbol first)
-
-thresholds:
-  branch_age_days: [90, 180, 365]     # +1 / +2 / +3
-  files_deleted:   [10, 20, 50]       # +1 / +2 / +3
-  lines_deleted:   [5000, 10000, 50000]
-  temporal:
-    stale:     250.0                  # L5a drift score for STALE
-    dangerous: 1000.0                 # L5a drift score for DANGEROUS
-  structural:
-    deletion_ratio:       0.20        # share of symbols deleted for CRITICAL
-    min_deleted_nodes:    3
-    complexity_threshold: 15          # McCabe advisory for new Python functions
-
-sca:
-  fail_on_unknown: true               # unlisted package adds +3 (needs allowlist.yml)
-
-actions:
-  enabled: true
-  critical_signal_score: 5
-  high_signal_score: 3
-  trusted_oidc_consumers: []          # e.g. my-org/deploy-action
-
-semantic:
-  enabled: true
-  micro_scope_churn_limit: 50
-  insertion_ratio_fix_threshold: 0.9
-```
-
-[`examples/payloadguard.yml`](examples/payloadguard.yml) is a complete workflow that also posts a Check Run.
-
-### Dependency allowlist (`allowlist.yml`)
-
-L2b runs only when `allowlist.yml` exists in the repository root of the target branch. A package added to a manifest and absent from the list for its ecosystem adds +3.
-
-```yaml
-python:          # requirements*.txt, pyproject.toml
-  - requests
-npm:             # package.json
-  - express
-go:              # go.mod
-  - github.com/spf13/cobra
-rust:            # Cargo.toml
-  - serde
-```
+Exit codes: `0` for `SAFE`, `REVIEW` and `CAUTION`; `1` for an analysis error; `2` for `DESTRUCTIVE`. A usage error (for example an invalid `--consequence-mode`) also exits `2`, as argparse does, so check the command is well formed before treating `2` as a verdict.
 
 ## Reports
 
 | Format | Produced by | Content |
 |---|---|---|
-| Console | CLI | Layer-by-layer summary, verdict and recommendation. |
-| Markdown | Action, `--save-markdown` | PR comment; consequence findings in collapsible evidence and remediation sections. |
-| JSON | Action, `--save-json` | Complete result: `verdict` (including `status`, `severity`, `severity_score`, `branch_age_score`, `escalation_score`, `flags`, `recommendation`), per-layer analysis, `consequence_analysis` (`consequence.v1`) and `runtime_events`. |
+| Console | CLI | Summary per analysis stage, verdict and recommendation. |
+| Markdown | Action, `--save-markdown` | PR comment, with each finding's evidence and remediation in a collapsible section. |
+| JSON | Action, `--save-json` | Complete result: the verdict (`status`, `severity`, `severity_score`, `branch_age_score`, `escalation_score`, `flags`, `recommendation`), each stage's results, the consequence analysis (`consequence.v1`: findings, parser completeness, caller-index coverage) and runtime events. |
 | SARIF 2.1.0 | CLI, `--save-sarif` | Consequence findings for GitHub code scanning; upload with `github/codeql-action/upload-sarif`. |
-| Check Run | Action with GitHub App credentials | The Markdown report as a check on the pull request head commit. |
+| Check Run | Action with GitHub App credentials | The Markdown report as a check on the pull request's head commit. |
 
 ## Limitations
 
-- **Structural coverage:** Python, JavaScript, TypeScript, Go, Rust and Java. Other source languages are reported as incomplete (`D01`), not analysed. The `D06` checks for swallowed, reordered, conditional, deferred and ignored guards and for weakened denial conditions use control-flow facts the Python parser produces; other languages get the remaining `D06` checks.
-- **No dataflow analysis:** values are not tracked between statements, so, for example, request data reaching a SQL string is not detected, and an `assert` used as a guard is treated as enforced although `python -O` removes it.
-- **Shadow by default:** consequence findings do not change the verdict until `advisory` or `enforce` is set. The layers outside the consequence engine score in every mode.
-- **Heuristics:** L5b and the content scans are pattern based. They raise the cost of hiding a payload; they do not prove intent. L5b needs a PR description to say anything.
-- **History required:** the comparison needs the merge base, so the checkout must be a full clone (`fetch-depth: 0`). A single-branch clone or detached HEAD can raise a `BadName` error (open finding §2.3).
-- **L5c** needs a Linux runner with BPF support and is advisory.
+- **Languages:** the consequence engine parses Python, JavaScript, TypeScript, Go, Rust and Java; other languages are reported as incompletely analysed. The guard checks for swallowed, reordered, conditional, deferred and ignored guards and for weakened denial conditions are available for Python only.
+- **No dataflow analysis:** values are not followed between statements, so request data reaching a SQL string is not detected, and an `assert` used as a guard counts as enforced although `python -O` removes it.
+- **Shadow by default:** consequence findings change the verdict only in `advisory` or `enforce` mode. The scored checks apply in every mode.
+- **Heuristics:** the description check and the content scans are pattern based. They make hiding a payload harder; they do not prove intent, and the description check needs a description.
+- **Full history:** the comparison needs the merge base, so check out with `fetch-depth: 0`. A single-branch clone or a detached HEAD can fail with a `BadName` error.
+- **Runtime agent:** needs a Linux runner with BPF support and is advisory.
 
-Open issues and their status are tracked in [`AUDIT_LOG.md`](AUDIT_LOG.md).
+Known issues are tracked in [`AUDIT_LOG.md`](AUDIT_LOG.md).
 
-## Formal verification
+## Verification
 
-The scoring rules are checked with three independent tools:
-
-| Tool | Checks |
-|---|---|
-| **CrossHair** (symbolic execution) | Contracts on models of consequence scoring (C-01–C-15), structural drift (S1–S7), temporal drift (T1–T7) and semantic score bounds (M1–M9). |
-| **Z3** (SMT) | Properties P1–P11 of the score-to-verdict mapping, including that branch age never decides `DESTRUCTIVE`. |
-| **Dafny** | Machine-checked postconditions over the whole input domain for L3 (POST-1–12, POST-15/16), L4 (S1–S7) and L5a (T1–T8). Runs in CI on changes to `verification/dafny/`. |
-
-What is verified is the transformation from signal values to a verdict, on models of the production functions; a test checks that the L3 model scores exactly as `analyze.py` does. Signal extraction (git, regular expressions, AST and YAML parsing), the consequence detectors and the escalation after L3 are covered by the test suite, not by these proofs. Results, run dates and environments: [`PROOFS.md`](PROOFS.md); specification and scope: [`VERIFICATION.md`](VERIFICATION.md), [`VERIFICATION_SPEC.md`](VERIFICATION_SPEC.md).
+The mapping from signals to verdict is checked with three independent tools: CrossHair contracts and Z3 properties on models of the scoring functions, and Dafny proofs of the scoring, structural and drift rules over their whole input domain. Tests confirm that the models of the scoring and of the description check score as the production code does. Signal extraction (Git, parsing, pattern matching) and the consequence detectors are covered by the test suite and the [test harness](https://github.com/PayloadGuard-PLG/payloadguard-test-harness), not by the proofs. Details: [`VERIFICATION.md`](VERIFICATION.md); run records: [`PROOFS.md`](PROOFS.md).
 
 ## Development
 
@@ -374,21 +340,21 @@ pip install -r requirements.txt          # includes z3-solver and crosshair-tool
 python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q
 ```
 
-Without `z3-solver` and `crosshair-tool` the proof tests skip and the rest pass. Latest run: [`TEST_REPORT.md`](TEST_REPORT.md).
+Without `z3-solver` and `crosshair-tool` the proof tests are skipped and the rest run.
 
-Integration against real pull requests is in a separate repository, [`payloadguard-test-harness`](https://github.com/PayloadGuard-PLG/payloadguard-test-harness): fixture pull requests with expected verdicts, a manifest oracle and a mutation suite. A new detector needs positive and negative cases in [`test_consequence_engine.py`](test_consequence_engine.py).
+End-to-end behaviour on real pull requests is tested in [`payloadguard-test-harness`](https://github.com/PayloadGuard-PLG/payloadguard-test-harness): fixture pull requests with expected verdicts, a manifest oracle and a mutation suite. A new detector needs positive and negative cases in [`test_consequence_engine.py`](test_consequence_engine.py).
 
 ## Documentation
 
 | Document | Content |
 |---|---|
 | [`CHANGELOG.md`](CHANGELOG.md) | Changes per release. |
-| [`WHITEPAPER.md`](WHITEPAPER.md) | Technical specification of every layer. |
+| [`WHITEPAPER.md`](WHITEPAPER.md) | Technical specification of every stage and detector. |
 | [`SYSTEM_BLUEPRINT.md`](SYSTEM_BLUEPRINT.md) | Repository structure, pipeline flow, module map. |
 | [`VERIFICATION.md`](VERIFICATION.md), [`VERIFICATION_SPEC.md`](VERIFICATION_SPEC.md), [`PROOFS.md`](PROOFS.md) | Formal verification: contracts, specification, run records. |
 | [`HARNESS_BLUEPRINT.md`](HARNESS_BLUEPRINT.md) | The integration test harness. |
-| [`AUDIT_LOG.md`](AUDIT_LOG.md) | Findings register and incident reports. |
-| [`DEVLOG.md`](DEVLOG.md) | Engineering log; earlier entries in [`docs/devlog/`](docs/devlog/). |
+| [`AUDIT_LOG.md`](AUDIT_LOG.md) | Findings register. |
+| [`DEVLOG.md`](DEVLOG.md) | Engineering log. |
 | [`llms.txt`](llms.txt) | Index for LLM tooling. |
 
-PayloadGuard is maintained by [PayloadGuard-PLG](https://github.com/PayloadGuard-PLG). Licensed under [MIT](LICENSE).
+PayloadGuard is maintained by [PayloadGuard-PLG](https://github.com/PayloadGuard-PLG) and licensed under [MIT](LICENSE).

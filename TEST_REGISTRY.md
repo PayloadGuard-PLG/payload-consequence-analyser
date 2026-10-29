@@ -1,7 +1,7 @@
 # PayloadGuard — Test Registry
 
-**Last run:** 2026-10-29 19:27 UTC  
-**Result:** 366 passed · 0 skipped · 0 failed · 366 total
+**Last run:** 2026-10-29 20:36 UTC  
+**Result:** 375 passed · 0 skipped · 0 failed · 375 total
 
 Run with: `python -m pytest test_analyzer.py tests/proofs/ --timeout=30 -v`  
 Regenerate this file: `python tools/gen_test_registry.py`
@@ -369,6 +369,11 @@ Regenerate this file: `python tools/gen_test_registry.py`
 
 - ✓ `test_caution_mismatch_escalates_safe_to_review`
 - ✓ `test_deceptive_payload_escalates_safe_to_caution`
+- ✓ `test_docs_claim_hiding_a_sensitive_file_is_flagged`
+- ✓ `test_docs_claim_measures_code_outside_documentation`
+- ✓ `test_docs_claim_on_documentation_only_is_transparent`
+- ✓ `test_docs_claim_with_small_named_code_change_is_transparent`
+- ✓ `test_domain_words_are_not_size_claims`
 - ✓ `test_is_deceptive_true_on_deceptive_payload_status`
 - ✓ `test_is_deceptive_true_only_on_deceptive_payload`
 - ✓ `test_macro_scope_large_diff_adds_advisory_not_mci_penalty`
@@ -376,6 +381,8 @@ Regenerate this file: `python tools/gen_test_registry.py`
 - ✓ `test_matched_keyword_is_first_signal_or_none`
 - ✓ `test_matched_keyword_none_when_no_signals`
 - ✓ `test_mci_score_clamped_at_1_0`
+- ✓ `test_micro_fix_within_churn_limit_is_not_phantom`
+- ✓ `test_micro_remedial_claim_high_insertion_ratio_flags_phantom`
 - ✓ `test_micro_scope_auth_file_acknowledged_in_description_ok`
 - ✓ `test_micro_scope_auth_file_unacknowledged_flags`
 - ✓ `test_micro_scope_large_churn_flags_scope_understated`
@@ -384,11 +391,12 @@ Regenerate this file: `python tools/gen_test_registry.py`
 - ✓ `test_micro_scope_three_extensions_flags_cross_stack`
 - ✓ `test_micro_scope_with_new_def_flags_operation_mutation`
 - ✓ `test_no_description_returns_unverified`
+- ✓ `test_plain_fix_claim_on_additions_is_transparent`
 - ✓ `test_remedial_claim_balanced_ratio_transparent`
-- ✓ `test_remedial_claim_high_insertion_ratio_flags_phantom`
 - ✓ `test_result_contains_required_keys`
 - ✓ `test_score_at_0_5_returns_deceptive_payload`
 - ✓ `test_score_below_0_5_returns_caution_mismatch`
+- ✓ `test_text_and_config_files_under_docs_are_not_documentation`
 - ✓ `test_transparent_with_no_signals_returns_transparent`
 - ✓ `test_two_signals_accumulate_correctly`
 - ✓ `test_unverified_result_contains_required_keys`
@@ -491,6 +499,7 @@ Regenerate this file: `python tools/gen_test_registry.py`
 - ✓ `test_consequence_model_matches_production_and_contracts`
 - ✓ `test_crosshair_structural_drift_contracts`
 - ✓ `test_crosshair_semantic_mci_contracts`
+- ✓ `test_semantic_model_matches_production_and_contracts`
 
 ## tests/proofs/test_z3_properties.py — test_z3_properties
 

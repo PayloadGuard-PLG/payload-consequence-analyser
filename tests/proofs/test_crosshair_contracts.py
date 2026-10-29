@@ -19,7 +19,7 @@ Modules covered:
     consequence_pure  -- Layer 3 consequence scoring (C-01 to C-15)
     temporal_pure     -- Layer 5a temporal drift (T1-T7)
     structural_pure   -- Layer 4 structural dual-gate (S1-S7)
-    semantic_pure     -- Layer 5b MCI cross-correlation (M1-M9)
+    semantic_pure     -- Layer 5b MCI cross-correlation (M1-M11)
 """
 
 import subprocess
@@ -242,13 +242,82 @@ def test_crosshair_structural_drift_contracts():
 @_skip_no_verification
 def test_crosshair_semantic_mci_contracts():
     """
-    compute_mci_pure(): M1-M9 all hold.
+    compute_mci_pure(): M1-M11 all hold.
     status in {UNVERIFIED,TRANSPARENT,CAUTION_MISMATCH,DECEPTIVE_PAYLOAD},
     mci_score in [0,1], DECEPTIVE <-> score >= 0.5,
-    no description -> UNVERIFIED, TRANSPARENT -> score == 0.0.
+    no description -> UNVERIFIED, TRANSPARENT -> score == 0.0,
+    no micro claim -> score 0, change within the micro limits -> score 0.
     """
     _assert_crosshair(
         _run_crosshair("semantic_pure.compute_mci_pure"),
         "semantic_pure.compute_mci_pure",
     )
+
+
+@_skip_no_verification
+def test_semantic_model_matches_production_and_contracts():
+    """
+    The CrossHair model of L5b Phase 3 must score as analyze_transparency() does. Over a grid
+    of descriptions (size, documentation, macro, remedial and plain claims) and diffs (small,
+    large, additions-only, declarations, documentation only, documentation with code,
+    sensitive paths, three file types), the model fed production's claim and measured profile
+    returns production's status and score, and every postcondition holds (M-10/M-11:
+    AUDIT_LOG SEM-02). Deterministic: does not need crosshair-tool.
+    """
+    from unittest.mock import MagicMock
+
+    import analyze
+
+    sys.path.insert(0, str(_VERIFICATION_DIR))
+    try:
+        import semantic_pure
+    finally:
+        sys.path.remove(str(_VERIFICATION_DIR))
+    model = semantic_pure.compute_mci_pure
+
+    def diff(path, added=0, deleted=0, extra=""):
+        d = MagicMock()
+        d.b_path = d.a_path = path
+        d.diff = ("".join(f"+a{i}\n" for i in range(added)) + "".join(f"-d{i}\n" for i in range(deleted)) + extra).encode()
+        return d
+
+    descriptions = ["minor typo fix", "minor style tweak", "docs: update readme", "fix login bug",
+                    "major overhaul of auth", "add export feature", "readme typo fix"]
+    diff_sets = [
+        [diff("src/app.py", 5, 5)],
+        [diff("src/app.py", 100)],
+        [diff("src/app.py", 60, 60)],
+        [diff("src/app.py", extra="+def f():\n+    pass\n")],
+        [diff("docs/guide.md", 200)],
+        [diff("docs/guide.md", 200), diff("src/app.py", 80, extra="+class C:\n")],
+        [diff("src/auth.py", 1)],
+        [diff("a.py", 1), diff("b.js", 1), diff("c.yml", 1)],
+        [diff("README.md", 10), diff("pyproject.toml", 1, 1)],
+    ]
+    for desc in descriptions:
+        for diffs in diff_sets:
+            got = analyze.SemanticTransparencyAnalyzer(desc, diffs=diffs).analyze_transparency()
+            claim, reality = got["semantic_claim"], got["diff_reality"]
+            measured = reality.get("outside_documentation", reality)
+            desc_lower = desc.lower()
+            args = dict(
+                has_description=True,
+                is_micro=claim["scope"] in ("micro", "docs"),
+                is_macro=claim["scope"] == "macro",
+                is_remedial_op=claim["dominant_op"] == "remedial",
+                total_churn=measured["total_churn"],
+                structural_alterations=measured["structural_alterations"],
+                ext_count=measured["ext_count"],
+                insertion_ratio=measured["insertion_ratio"],
+                has_unacknowledged_sensitive=any(
+                    not any(part.lower() in desc_lower for part in Path(p).parts[-2:] if len(part) > 2)
+                    for p in measured["sensitive_paths"]
+                ),
+                churn_limit=analyze.DEFAULT_CONFIG["semantic"]["micro_scope_churn_limit"],
+                fix_ir_thresh=analyze.DEFAULT_CONFIG["semantic"]["insertion_ratio_fix_threshold"],
+            )
+            expected = model(**args)
+            where = (desc, [d.b_path for d in diffs])
+            assert (got["status"], got["mci_score"]) == (expected["status"], expected["mci_score"]), where
+            assert all(_pep316_holds(model, semantic_pure, "post", args, expected)), where
 

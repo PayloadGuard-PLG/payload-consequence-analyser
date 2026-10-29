@@ -38,6 +38,7 @@ from analyze import (
     _parse_added_packages,
     _npm_added_packages,
     _HIDDEN_UNICODE_RE,
+    _SEMANTIC_DOC_FILE_RE,
     _raise_verdict,
     _read_file_at_ref,
     format_markdown_report,
@@ -2709,14 +2710,76 @@ class TestSemanticTransparencyV2(unittest.TestCase):
 
     # --- V_r Phantom Additions ---
 
-    def test_remedial_claim_high_insertion_ratio_flags_phantom(self):
-        # 95% additions — claimed as fix
+    def test_micro_remedial_claim_high_insertion_ratio_flags_phantom(self):
+        # "minor fix" on 100 changed lines, 95% additions
         content = self._make_lines(added=95, deleted=5)
         d = self._make_diff(content, 'src/new_module.py')
-        ana = SemanticTransparencyAnalyzer('fix critical bug', diffs=[d])
+        ana = SemanticTransparencyAnalyzer('minor fix for critical bug', diffs=[d])
         result = ana.analyze_transparency()
         self.assertIn('phantom_additions', result['signals'])
-        self.assertGreater(result['mci_score'], 0.0)
+        self.assertEqual(result['status'], 'DECEPTIVE_PAYLOAD')  # with scope_understated
+
+    def test_plain_fix_claim_on_additions_is_transparent(self):
+        # AUDIT_LOG SEM-02: bug fixes that add code are not a mismatch without a size claim
+        content = self._make_lines(added=95, deleted=5)
+        d = self._make_diff(content, 'src/new_module.py')
+        result = SemanticTransparencyAnalyzer('fix critical bug', diffs=[d]).analyze_transparency()
+        self.assertEqual(result['signals'], [])
+        self.assertEqual(result['status'], 'TRANSPARENT')
+
+    def test_micro_fix_within_churn_limit_is_not_phantom(self):
+        # AUDIT_LOG SEM-02: one added line under "minor typo fix"
+        d = self._make_diff('+added line\n', 'docs/guide.md')
+        result = SemanticTransparencyAnalyzer('minor typo fix', diffs=[d]).analyze_transparency()
+        self.assertEqual(result['status'], 'TRANSPARENT')
+
+    def test_domain_words_are_not_size_claims(self):
+        # AUDIT_LOG SEM-02: "grammar", "cleanup" and "complete" named features in real descriptions
+        content = self._make_lines(added=200, deleted=0) + '\n+def f():\n+    pass\n'
+        d = self._make_diff(content, 'src/parser.py')
+        for desc in ('Strengthen grammar invariants', 'Wait for worker close before scratch cleanup',
+                     'Complete versioned observations'):
+            result = SemanticTransparencyAnalyzer(desc, diffs=[d]).analyze_transparency()
+            self.assertEqual(result['status'], 'TRANSPARENT', desc)
+
+    def test_docs_claim_on_documentation_only_is_transparent(self):
+        diffs = [self._make_diff(self._make_lines(added=300, deleted=40), 'docs/guide.md'),
+                 self._make_diff(self._make_lines(added=20, deleted=0), 'README.md'),
+                 self._make_diff('+x\n', 'docs/diagram.svg')]
+        result = SemanticTransparencyAnalyzer('docs: expand the setup guide', diffs=diffs).analyze_transparency()
+        self.assertEqual(result['semantic_claim']['scope'], 'docs')
+        self.assertEqual(result['diff_reality']['outside_documentation']['total_churn'], 0)
+        self.assertEqual(result['status'], 'TRANSPARENT')
+
+    def test_docs_claim_measures_code_outside_documentation(self):
+        diffs = [self._make_diff(self._make_lines(added=300, deleted=40), 'docs/guide.md'),
+                 self._make_diff(self._make_lines(added=80, deleted=0) + '\n+def f():\n', 'src/app.py')]
+        result = SemanticTransparencyAnalyzer('docs: update the readme', diffs=diffs).analyze_transparency()
+        self.assertEqual(result['diff_reality']['outside_documentation']['total_churn'], 81)
+        self.assertIn('scope_understated', result['signals'])
+        self.assertIn('operation_mutation', result['signals'])
+        self.assertEqual(result['status'], 'DECEPTIVE_PAYLOAD')
+
+    def test_docs_claim_with_small_named_code_change_is_transparent(self):
+        # A release note that also bumps the version: 2 lines outside documentation
+        diffs = [self._make_diff(self._make_lines(added=200, deleted=300), 'README.md'),
+                 self._make_diff('+__version__ = "2"\n-__version__ = "1"\n', 'pkg/version.py')]
+        result = SemanticTransparencyAnalyzer('docs(release): update README and bump version',
+                                              diffs=diffs).analyze_transparency()
+        self.assertEqual(result['status'], 'TRANSPARENT')
+
+    def test_docs_claim_hiding_a_sensitive_file_is_flagged(self):
+        diffs = [self._make_diff('+typo\n', 'README.md'),
+                 self._make_diff('+    return True\n', 'src/auth_handler.py')]
+        result = SemanticTransparencyAnalyzer('docs: fix readme wording', diffs=diffs).analyze_transparency()
+        self.assertIn('hidden_component_modification', result['signals'])
+
+    def test_text_and_config_files_under_docs_are_not_documentation(self):
+        self.assertIsNone(_SEMANTIC_DOC_FILE_RE.search('requirements.txt'))
+        self.assertIsNone(_SEMANTIC_DOC_FILE_RE.search('docs/conf.py'))
+        self.assertIsNone(_SEMANTIC_DOC_FILE_RE.search('docs/research/run.workflow.js'))
+        for path in ('README', 'docs/a.md', 'CHANGELOG.rst', 'LICENSE.txt', 'img/x.png', 'guide.adoc'):
+            self.assertIsNotNone(_SEMANTIC_DOC_FILE_RE.search(path), path)
 
     def test_remedial_claim_balanced_ratio_transparent(self):
         # 50% insertions — consistent with a real fix

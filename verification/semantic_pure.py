@@ -15,6 +15,9 @@ Abstraction decisions:
     against the PR description — abstracted as `has_unacknowledged_sensitive: bool`
   - Macro-scope advisory produces CAUTION_MISMATCH with mci_score == 0.0 — a
     special case captured by the `is_macro` parameter
+  - A documentation claim ("docs", "readme", "changelog") is a micro claim measured
+    on the files outside documentation: `is_micro` is true and the profile inputs
+    are those of the non-documentation files (Phase 2)
 
 This module is NOT imported by production code. It is the verification target.
 
@@ -51,10 +54,13 @@ def compute_mci_pure(
       V_s (scope_understated):          +0.4  if micro AND churn > churn_limit
       V_o (operation_mutation):         +0.3  if micro AND structural_alterations > 0
       V_f (hidden_component_modification): +0.3  if micro AND unacknowledged sensitive path
-      V_r (phantom_additions):          +0.4  if remedial op AND insertion_ratio > fix_ir_thresh
+      V_r (phantom_additions):          +0.4  if micro AND remedial op AND churn > churn_limit
+                                              AND insertion_ratio > fix_ir_thresh
       V_e (cross_stack_micro_claim):    +0.2  if micro AND ext_count >= 3
 
-    Macro scope adds an advisory signal (no mci_score increase).
+    Macro scope adds an advisory signal (no mci_score increase). Every signal requires a
+    micro claim (AUDIT_LOG SEM-02), so a description that does not claim a small change
+    never scores (M-10), and a change within the micro limits never scores (M-11).
 
     pre: total_churn >= 0
     pre: structural_alterations >= 0
@@ -72,6 +78,8 @@ def compute_mci_pure(
     post: implies(__return__["status"] == "DECEPTIVE_PAYLOAD", __return__["mci_score"] >= 0.5)
     post: implies(__return__["status"] == "TRANSPARENT", __return__["mci_score"] == 0.0)
     post: implies(__return__["status"] == "TRANSPARENT", not is_macro)
+    post: implies(not is_micro, __return__["mci_score"] == 0.0)
+    post: implies(total_churn <= churn_limit and structural_alterations == 0 and not has_unacknowledged_sensitive and ext_count < 3, __return__["mci_score"] == 0.0)
     """
     if not has_description:
         return _no_description_case()
@@ -91,7 +99,7 @@ def compute_mci_pure(
         mci_score += 0.3
 
     # V_r — Phantom Additions
-    if is_remedial_op and insertion_ratio > fix_ir_thresh:
+    if is_micro and is_remedial_op and total_churn > churn_limit and insertion_ratio > fix_ir_thresh:
         mci_score += 0.4
 
     # V_e — Cross-stack micro claim
