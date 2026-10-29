@@ -2479,6 +2479,182 @@ class TestRound3BuildActivation:
         assert rep["verdict"]["status"] == "SAFE"
 
 
+_R3_AUTHZ = "def authorize(actor):\n    if not actor['allowed']:\n        raise PermissionError('denied')\n\n"
+_R3_VERIFY = "def verify_token(token):\n    return token == 'trusted'\n\n"
+_R3_UPDATE = "def update(actor, store, value):\n    authorize(actor)\n    store.write(value)\n    return 'done'\n"
+_R3_READ = (
+    "def read_private(token, store):\n    if not verify_token(token):\n"
+    "        raise PermissionError('denied')\n    return store.read()\n"
+)
+_R3_STATE = (
+    "def read_private(actor, store):\n    if not actor['authenticated'] or not actor['active']:\n"
+    "        raise PermissionError('denied')\n    return store.read()\n"
+)
+
+
+def _r3_d06(base, head, extra_head_files=None):
+    rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+        [FileDeltaInput("service.py", change_type="M", base_source=base, head_source=head)],
+        extra_head_files or {},
+    )
+    return [(f.policy_recommendation, e.kind) for f in rep.findings if f.detector_id == DETECTOR_D06_GUARD
+            for e in f.evidence]
+
+
+_R3_GUARD_CASES = {
+    # Round-3 misses and their campaign controls (security-round3/RESULTS.md).
+    "SEC01 swallowed": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    try:\n        authorize(actor)\n    except PermissionError:\n        pass\n"),
+        "GUARD_EXCEPTION_SWALLOWED"),
+    "SEC02 rethrown": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    try:\n        authorize(actor)\n    except PermissionError:\n        raise\n"),
+        None),
+    "suppress()": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    with suppress(PermissionError):\n        authorize(actor)\n"),
+        "GUARD_EXCEPTION_SWALLOWED"),
+    "SEC03 write first": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n    store.write(value)\n", "    store.write(value)\n    authorize(actor)\n"),
+        "GUARD_AFTER_PROTECTED_CALL"),
+    "SEC04 log first": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    store.log_attempt(actor)\n    authorize(actor)\n"),
+        None),
+    "read moved first": (_R3_AUTHZ + _R3_UPDATE.replace("    store.write", "    data = store.load(actor)\n    store.write"),
+                         _R3_AUTHZ + _R3_UPDATE.replace("    authorize(actor)\n",
+                                                        "    data = store.load(actor)\n    authorize(actor)\n"),
+                         None),
+    "SEC06 optional": (_R3_AUTHZ + _R3_UPDATE.replace("value)", "value, enforce=True)", 1),
+                       _R3_AUTHZ + _R3_UPDATE.replace("value)", "value, enforce=True)", 1).replace(
+                           "    authorize(actor)\n", "    if enforce:\n        authorize(actor)\n"),
+                       "GUARD_MADE_CONDITIONAL"),
+    "SEC07 required": (_R3_AUTHZ + _R3_UPDATE.replace("value)", "value, enforce=True)", 1),
+                       _R3_AUTHZ + _R3_UPDATE.replace("value)", "value, enforce=True)", 1).replace(
+                           "    authorize(actor)\n",
+                           "    if not enforce:\n        raise ValueError('required')\n    authorize(actor)\n"),
+                       None),
+    "both branches": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n",
+        "    if actor.get('service'):\n        authorize(actor['owner'])\n    else:\n        authorize(actor)\n"),
+        None),
+    "branch given another guard": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n",
+        "    if actor.get('service'):\n        verify_signature(actor)\n    else:\n        authorize(actor)\n"),
+        None),
+    "early return with effect": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n",
+        "    if actor.get('fast'):\n        store.write(value)\n        return 'done'\n    authorize(actor)\n"),
+        "GUARD_MADE_CONDITIONAL"),
+    "early return of nothing": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    if value is None:\n        return None\n    authorize(actor)\n"),
+        None),
+    "SEC12 lazy": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    check = (authorize(actor) for _ in (1,))\n"),
+        "GUARD_CALL_DEFERRED"),
+    "SEC13 consumed": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    list(authorize(actor) for _ in (1,))\n"),
+        None),
+    "lambda called later": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    check = lambda: authorize(actor)\n    check()\n"),
+        None),
+    "SEC14 or to and": (_R3_STATE, _R3_STATE.replace(" or not actor", " and not actor"), "GUARD_CONDITION_WEAKENED"),
+    "SEC15 reordered": (_R3_STATE, _R3_STATE.replace(
+        "not actor['authenticated'] or not actor['active']", "not actor['active'] or not actor['authenticated']"),
+        None),
+    "SEC08 is False": (_R3_VERIFY + _R3_READ, _R3_VERIFY + _R3_READ.replace(
+        "if not verify_token(token):", "if verify_token(token) is False:"), None),
+    "condition in new terms": (_R3_STATE, _R3_STATE.replace(
+        "not actor['authenticated'] or not actor['active']", "not actor.can_read()"), None),
+    "SEC19 discarded": (_R3_VERIFY + _R3_READ, _R3_VERIFY + _R3_READ.replace(
+        "    if not verify_token(token):\n        raise PermissionError('denied')\n", "    verify_token(token)\n"),
+        "GUARD_RESULT_DISCARDED"),
+    "SEC20 assigned": (_R3_VERIFY + _R3_READ, _R3_VERIFY + _R3_READ.replace(
+        "    if not verify_token(token):\n",
+        "    valid = verify_token(token)\n    if not valid:\n"), None),
+    # SEC10/SEC11: guards moved into helpers.
+    "SEC10 helper": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ
+                     + "def ensure_can_update(actor):\n    authorize(actor)\n\n"
+                     + _R3_UPDATE.replace("    authorize(actor)\n", "    ensure_can_update(actor)\n"), None),
+    "SEC11 no-op helper": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ
+                           + "def ensure_can_update(actor):\n    return True\n\n"
+                           + _R3_UPDATE.replace("    authorize(actor)\n", "    ensure_can_update(actor)\n"),
+                           "GUARD_CALL_REMOVED"),
+    "swallowing helper": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ
+                          + "def ensure_can_update(actor):\n    try:\n        authorize(actor)\n"
+                            "    except PermissionError:\n        pass\n\n"
+                          + _R3_UPDATE.replace("    authorize(actor)\n", "    ensure_can_update(actor)\n"),
+                          "GUARD_CALL_REMOVED"),
+    "conditionally called helper": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ
+                                    + "def ensure_can_update(actor):\n    authorize(actor)\n\n"
+                                    + _R3_UPDATE.replace("    authorize(actor)\n",
+                                                         "    if value:\n        ensure_can_update(actor)\n"),
+                                    "GUARD_CALL_REMOVED"),
+    "predicate helper denies": (_R3_VERIFY + _R3_READ, _R3_VERIFY
+                                + "def require_token(token):\n    if not verify_token(token):\n"
+                                  "        raise PermissionError('denied')\n\n"
+                                + _R3_READ.replace("    if not verify_token(token):\n        raise PermissionError('denied')\n",
+                                                   "    require_token(token)\n"), None),
+    "state clause moved to helper": (_R3_STATE, _R3_STATE.replace(
+        "def read_private(actor, store):\n    if not actor['authenticated'] or not actor['active']:\n"
+        "        raise PermissionError('denied')\n",
+        "def require_reader(actor):\n    if not actor['authenticated'] or not actor['active']:\n"
+        "        raise PermissionError('denied')\n\n"
+        "def read_private(actor, store):\n    require_reader(actor)\n"), None),
+    "state clause weakened in helper": (_R3_STATE, _R3_STATE.replace(
+        "def read_private(actor, store):\n    if not actor['authenticated'] or not actor['active']:\n"
+        "        raise PermissionError('denied')\n",
+        "def require_reader(actor):\n    if not actor['authenticated'] and not actor['active']:\n"
+        "        raise PermissionError('denied')\n\n"
+        "def read_private(actor, store):\n    require_reader(actor)\n"), "GUARD_CLAUSE_REMOVED"),
+    "predicate helper ignores": (_R3_VERIFY + _R3_READ, _R3_VERIFY
+                                 + "def require_token(token):\n    verify_token(token)\n\n"
+                                 + _R3_READ.replace("    if not verify_token(token):\n        raise PermissionError('denied')\n",
+                                                    "    require_token(token)\n"), "GUARD_CALL_REMOVED"),
+}
+
+
+class TestRound3GuardRegressions:
+    """SEC01/03/06/12/14/19 (missed guard regressions) and SEC10 (helper extraction false positive)."""
+
+    @pytest.mark.parametrize("case", sorted(_R3_GUARD_CASES))
+    def test_guard_case(self, case):
+        base, head, expected = _R3_GUARD_CASES[case]
+        found = _r3_d06(base, head)
+        if expected is None:
+            assert found == [], found
+        else:
+            assert (POLICY_BLOCK, expected) in found, found
+
+    def test_helper_in_unchanged_file_is_resolved(self):
+        helpers = "from authz import authorize\n\ndef ensure_can_update(actor):\n    authorize(actor)\n"
+        head = _R3_UPDATE.replace("    authorize(actor)\n", "    ensure_can_update(actor)\n")
+        assert _r3_d06(_R3_UPDATE, head, {"guards.py": helpers}) == []
+
+    def test_ambiguous_helper_must_enforce_in_every_definition(self):
+        good = "def ensure_can_update(actor):\n    authorize(actor)\n"
+        bad = "def ensure_can_update(actor):\n    return True\n"
+        head = _R3_UPDATE.replace("    authorize(actor)\n", "    ensure_can_update(actor)\n")
+        found = _r3_d06(_R3_UPDATE, head, {"a.py": good, "b.py": bad})
+        assert (POLICY_BLOCK, "GUARD_CALL_REMOVED") in found
+
+    def test_execution_facts(self):
+        src = (
+            "def f(a, s, c):\n"
+            "    try:\n        authorize(a)\n    except Exception:\n        log(a)\n"
+            "    gen = (verify(x) for x in a)\n"
+            "    if c:\n        return s.read()\n"
+            "    s.write(1)\n"
+            "    return s.close()\n"
+            "    s.unreachable()\n"
+        )
+        conds = extract_symbols(src, "m.py").symbols[0].guard_conditions
+        facts = {c for c in conds if c.startswith(("call_exec:", "result_discarded:"))}
+        assert "call_exec:0:-:swallowed:authorize" in facts
+        assert "call_exec:1:-:deferred:verify" in facts
+        assert "call_exec:2:-:conditional:s.read" in facts
+        assert "call_exec:3:-:bypassable:s.write" in facts
+        assert "call_exec:5:-:unreachable:s.unreachable" in facts
+        assert "result_discarded:authorize" in facts and "result_discarded:s.read" not in facts
+
+
 class TestRound3SemanticChurn:
     """SEM-01/SEM-04: the L5b diff profiler measures the real patch, not zero churn."""
 

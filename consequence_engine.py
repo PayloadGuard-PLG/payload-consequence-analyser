@@ -1025,6 +1025,104 @@ def _active_base_source(fd: FileDeltaInput, watched) -> str:
     return fd.base_source or ""
 
 
+# ------------------------------------------------------------------
+# D06 execution and condition facts (Python frontend; AUDIT_LOG SEC01-SEC19)
+# ------------------------------------------------------------------
+
+_ENFORCING_ACTIONS = ("raise", "return_deny", "rollback")
+
+# Call-name tokens of operations with side effects, used to tell a protected operation moved
+# ahead of its guard from a read or computation moved ahead of it.
+_EFFECT_CALL_TOKENS = frozenset({
+    "write", "save", "delete", "remove", "update", "insert", "upsert", "commit", "send", "put",
+    "post", "patch", "create", "drop", "truncate", "destroy", "transfer", "pay", "charge",
+    "refund", "grant", "revoke", "publish", "upload", "unlink", "rmtree", "execute", "exec",
+    "system", "popen", "spawn", "kill", "store", "persist", "append", "push", "emit",
+    "dispatch", "deploy", "apply", "approve", "enable", "disable", "reset", "set",
+})
+
+_LOGGING_CALL_QUALIFIERS = frozenset({"logger", "logging", "log", "console", "fmt"})
+
+
+def _call_base(call: str) -> str:
+    return call.rsplit(".", 1)[-1].rsplit("::", 1)[-1]
+
+
+def _call_exec_facts(conds: Tuple[str, ...]) -> Dict[str, Tuple[int, Optional[int], Optional[str]]]:
+    """{callee: (first index, strong index or None, weak reason or None)} from call_exec facts."""
+    out: Dict[str, Tuple[int, Optional[int], Optional[str]]] = {}
+    for c in conds:
+        if c.startswith("call_exec:"):
+            parts = c.split(":", 4)
+            if len(parts) == 5:
+                _, first, strong, weak, callee = parts
+                out[callee] = (int(first), None if strong == "-" else int(strong), None if weak == "-" else weak)
+    return out
+
+
+def _is_effect_call(callee: str) -> bool:
+    qualifier = callee.rsplit(".", 1)[0] if "." in callee else ""
+    if qualifier.rsplit(".", 1)[-1].lower() in _LOGGING_CALL_QUALIFIERS:
+        return False
+    tokens = [
+        t.lower() for part in _call_base(callee).split("_") if part
+        for t in re.findall(r"[A-Z]?[a-z0-9]+|[A-Z]+(?=[A-Z]|$)", part)
+    ]
+    return any(t in _EFFECT_CALL_TOKENS for t in tokens)
+
+
+def _deny_formula(conds: Tuple[str, ...]) -> Optional[list]:
+    """OR of the function's deny_cond formulas, or None when it has none."""
+    branches = []
+    for c in conds:
+        if c.startswith("deny_cond:"):
+            try:
+                _action, formula = json.loads(c[len("deny_cond:"):])
+            except (ValueError, TypeError):
+                continue
+            branches.append(formula)
+    return ["or"] + branches if branches else None
+
+
+def _formula_atoms(f: list, acc: Set[str]) -> Set[str]:
+    if f[0] == "atom":
+        acc.add(f[1])
+    elif f[0] != "const":
+        for sub in f[1:]:
+            _formula_atoms(sub, acc)
+    return acc
+
+
+def _formula_value(f: list, env: Dict[str, bool]) -> bool:
+    op = f[0]
+    if op == "atom":
+        return env[f[1]]
+    if op == "const":
+        return bool(f[1])
+    if op == "not":
+        return not _formula_value(f[1], env)
+    if op == "and":
+        return all(_formula_value(s, env) for s in f[1:])
+    return any(_formula_value(s, env) for s in f[1:])
+
+
+def _weakened_denial_witness(base_f: list, head_f: list, max_atoms: int = 12) -> Optional[Dict[str, bool]]:
+    """An assignment the base denies and the head allows, when both deny on the same terms
+    recombined (connectives, polarity, grouping); None when there is none. A term that was
+    added or removed is left to the guard-removal checks, and a rewrite in new terms is not
+    compared."""
+    base_atoms = _formula_atoms(base_f, set())
+    head_atoms = _formula_atoms(head_f, set())
+    if head_atoms != base_atoms or len(base_atoms) > max_atoms:
+        return None
+    atoms = sorted(base_atoms)
+    for bits in range(1 << len(atoms)):
+        env = {a: bool(bits >> i & 1) for i, a in enumerate(atoms)}
+        if _formula_value(base_f, env) and not _formula_value(head_f, env):
+            return env
+    return None
+
+
 @dataclass(frozen=True)
 class SymbolTransition:
     """Represents a matched or unmatched symbol transition in the SCG."""
@@ -1659,7 +1757,13 @@ class ConsequenceEngine:
         findings.extend(self._detect_d01_parser_incomplete(base_parse_results, head_parse_results))
         findings.extend(self._detect_d02_symlinked_sources(file_deltas))
         findings.extend(self._detect_d02_structural_and_weakening(transitions, file_deltas))
-        findings.extend(self._detect_d06_guard_regressions(transitions))
+        symbol_index: Dict[str, List[SymbolFact]] = {}
+        seen_ids: Set[str] = set()
+        for sym in head_symbols + repo_head_symbols:
+            if sym.symbol_id not in seen_ids:
+                seen_ids.add(sym.symbol_id)
+                symbol_index.setdefault(sym.name, []).append(sym)
+        findings.extend(self._detect_d06_guard_regressions(transitions, symbol_index))
         d04_findings, unresolved_by_symbol = self._detect_d04_public_api_and_callers(
             transitions, repo_head_symbols, repo_call_sites, repo_head_imports
         )
@@ -2019,8 +2123,10 @@ class ConsequenceEngine:
     def _detect_d06_guard_regressions(
         self,
         transitions: List[SymbolTransition],
+        symbol_index: Optional[Dict[str, List[SymbolFact]]] = None,
     ) -> List[ConsequenceFinding]:
         findings: List[ConsequenceFinding] = []
+        symbol_index = symbol_index or {}
 
         def _parse_if_guards(conds: Tuple[str, ...]) -> Dict[str, List[Tuple[str, str]]]:
             parsed: Dict[str, List[Tuple[str, str]]] = {}
@@ -2031,6 +2137,70 @@ class ConsequenceEngine:
                         _, callee, pol, act = parts
                         parsed.setdefault(callee, []).append((pol, act))
             return parsed
+
+        def _enforces(sym: SymbolFact, guard: str, deny_pols: Set[str], depth: int = 0,
+                      seen: Optional[Set[str]] = None) -> bool:
+            """True when ``sym`` enforces ``guard`` on every normal path, itself or through the
+            helpers it calls there (AUDIT_LOG SEC10). A guard the base used as a predicate
+            (``deny_pols`` = polarities it denied on) must still deny on the same polarity."""
+            if sym.is_stub:
+                return False
+            seen = (seen or set()) | {sym.symbol_id}
+            conds = getattr(sym, "guard_conditions", ()) or ()
+            execs = _call_exec_facts(conds)
+
+            def _strong(call: str) -> bool:
+                return not execs or (call in execs and execs[call][1] is not None)
+
+            g_base = _call_base(guard)
+            if deny_pols:
+                for callee, pairs in _parse_if_guards(conds).items():
+                    if _call_base(callee) == g_base and _strong(callee) and any(
+                        p in deny_pols and a in _ENFORCING_ACTIONS for p, a in pairs
+                    ):
+                        return True
+            elif any(_call_base(c) == g_base and _strong(c) for c in sym.calls):
+                return True
+            if depth >= 3:
+                return False
+            for call in sym.calls:
+                if not _strong(call):
+                    continue
+                helpers = [
+                    s for s in symbol_index.get(_call_base(call), ())
+                    if s.symbol_id not in seen and s.kind in ("function", "method")
+                ]
+                if helpers and all(_enforces(s, guard, deny_pols, depth + 1, seen) for s in helpers):
+                    return True
+            return False
+
+        def _helper_has_fact(sym: SymbolFact, fact: str, base_deny: Optional[list], depth: int = 0,
+                             seen: Optional[Set[str]] = None) -> bool:
+            """True when every definition of some helper ``sym`` calls on every path has the guard
+            fact ``fact`` (an identical if_state_guard clause), itself or through its helpers, and
+            does not deny less than ``base_deny`` on the same terms (clause facts omit connectives)."""
+            seen = (seen or set()) | {sym.symbol_id}
+            execs = _call_exec_facts(getattr(sym, "guard_conditions", ()) or ())
+            if depth >= 3:
+                return False
+
+            def _holds(helper: SymbolFact) -> bool:
+                conds = getattr(helper, "guard_conditions", ()) or ()
+                if fact in conds:
+                    helper_deny = _deny_formula(conds)
+                    return not (base_deny and helper_deny and _weakened_denial_witness(base_deny, helper_deny))
+                return _helper_has_fact(helper, fact, base_deny, depth + 1, seen)
+
+            for call in sym.calls:
+                if execs and (call not in execs or execs[call][1] is None):
+                    continue
+                helpers = [
+                    s for s in symbol_index.get(_call_base(call), ())
+                    if s.symbol_id not in seen and s.kind in ("function", "method") and not s.is_stub
+                ]
+                if helpers and all(_holds(s) for s in helpers):
+                    return True
+            return False
 
         for tr in transitions:
             bs = tr.base_symbol
@@ -2056,6 +2226,15 @@ class ConsequenceEngine:
             h_conds = getattr(hs, "guard_conditions", ()) or ()
             b_if = _parse_if_guards(b_conds)
             h_if = _parse_if_guards(h_conds)
+            b_exec = _call_exec_facts(b_conds)
+            h_exec = _call_exec_facts(h_conds)
+
+            def _deny_pols(callee: str) -> Set[str]:
+                return {p for p, a in b_if.get(callee, []) if a in _ENFORCING_ACTIONS}
+
+            # A guard moved into a helper that the function still calls on every path is not
+            # removed (AUDIT_LOG SEC10).
+            removed_calls = [c for c in removed_calls if not _enforces(hs, c, _deny_pols(c))]
 
             weakened_notes: List[str] = []
             ev_items: List[EvidenceItem] = []
@@ -2173,7 +2352,11 @@ class ConsequenceEngine:
             # State-guard clauses (`if (!response.ok) throw ...` / `if s.started { return fmt.Errorf(...) }`)
             b_state_guards = {c for c in b_conds if c.startswith("if_state_guard:")}
             h_state_guards = {c for c in h_conds if c.startswith("if_state_guard:")}
-            removed_state_guards = sorted(b_state_guards - h_state_guards)
+            # A clause moved unchanged into a helper the function still calls is not removed (SEC10).
+            removed_state_guards = sorted(
+                sg for sg in b_state_guards - h_state_guards
+                if not _helper_has_fact(hs, sg, _deny_formula(b_conds))
+            )
             # Only flag if the function did not replace the state guard with a new call-based guard
             added_if_callees = set(h_if.keys()) - set(b_if.keys())
             if removed_state_guards and not added_if_callees and not new_sc and not hs.is_stub:
@@ -2216,6 +2399,77 @@ class ConsequenceEngine:
                         ),
                     )
                 )
+
+            def _evidence(kind: str, detail: str) -> None:
+                ev_items.append(EvidenceItem(kind=kind, file=hs.file_path, line=hs.start_line,
+                                             symbol=hs.qualified_name, detail=detail))
+
+            # Deny condition weakened: some input the base denied is allowed by the head, with
+            # the head's conditions written in the base's terms (AUDIT_LOG SEC14). Reported only
+            # when no check above explained the change.
+            b_deny, h_deny = _deny_formula(b_conds), _deny_formula(h_conds)
+            if b_deny and h_deny and not ev_items:
+                witness = _weakened_denial_witness(b_deny, h_deny)
+                if witness is not None:
+                    shown = ", ".join(f"{a}={v}" for a, v in sorted(witness.items()))
+                    weakened_notes.append("deny condition weakened")
+                    _evidence(
+                        "GUARD_CONDITION_WEAKENED",
+                        f"'{hs.qualified_name}' no longer denies a case the base denied ({shown})",
+                    )
+
+            # The following checks need execution facts on both sides (Python frontend).
+            if b_exec and h_exec:
+                fn = hs.qualified_name
+                added_guards = head_guard_calls - base_guard_calls
+                for g in sorted(base_guard_calls & head_guard_calls):
+                    b_g, h_g = b_exec.get(g), h_exec.get(g)
+                    if b_g is None or h_g is None or b_g[1] is None:
+                        continue
+                    if h_g[1] is None:
+                        # A guard that ran on every path no longer does (SEC01, SEC06, SEC12).
+                        reason = h_g[2]
+                        if reason in ("conditional", "bypassable") and added_guards:
+                            continue  # the branches were given another guard
+                        if _enforces(hs, g, _deny_pols(g)):
+                            continue
+                        kind, detail = {
+                            "swallowed": ("GUARD_EXCEPTION_SWALLOWED",
+                                          f"'{g}()' in '{fn}' now runs where a handler continues after it fails"),
+                            "deferred": ("GUARD_CALL_DEFERRED",
+                                         f"'{g}()' in '{fn}' is inside a generator or lambda that is never "
+                                         "consumed, so it does not run"),
+                            "unreachable": ("GUARD_CALL_UNREACHABLE",
+                                            f"'{g}()' in '{fn}' follows an unconditional return or raise"),
+                            "bypassable": ("GUARD_MADE_CONDITIONAL",
+                                           f"'{g}()' in '{fn}' can be skipped by an earlier return"),
+                        }.get(reason, ("GUARD_MADE_CONDITIONAL", f"'{g}()' in '{fn}' now runs only on some paths"))
+                        weakened_notes.append(f"{g} {reason}")
+                        _evidence(kind, detail)
+                        continue
+                    # A protected operation that followed the guard now precedes it (SEC03).
+                    moved = sorted(
+                        c for c, (first, _s, _w) in b_exec.items()
+                        if first > b_g[1] and _is_effect_call(c) and not _is_guard_call(c)
+                        and c in h_exec and h_exec[c][0] < h_g[1]
+                    )
+                    for c in moved:
+                        weakened_notes.append(f"{c} moved before {g}")
+                        _evidence("GUARD_AFTER_PROTECTED_CALL",
+                                  f"'{c}()' in '{fn}' now runs before the guard '{g}()' it followed")
+
+                # A predicate guard whose result decided a denial is now called and ignored (SEC19).
+                for callee in sorted(b_if):
+                    pols = _deny_pols(callee)
+                    if not pols or callee in h_if or callee not in hs.calls:
+                        continue
+                    if not (_is_guard_call(callee) or _is_security_relevant_name(bs.qualified_name)):
+                        continue
+                    if f"result_discarded:{callee}" not in h_conds or _enforces(hs, callee, pols):
+                        continue
+                    weakened_notes.append(f"{callee} result discarded")
+                    _evidence("GUARD_RESULT_DISCARDED",
+                              f"'{callee}()' in '{fn}' is still called but its result no longer decides a denial")
 
             if not ev_items:
                 continue
