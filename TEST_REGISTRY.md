@@ -1,7 +1,7 @@
 # PayloadGuard — Test Registry
 
-**Last run:** 2026-10-27 16:55 UTC  
-**Result:** 357 passed · 0 skipped · 0 failed · 357 total
+**Last run:** 2026-10-29 19:27 UTC  
+**Result:** 366 passed · 0 skipped · 0 failed · 366 total
 
 Run with: `python -m pytest test_analyzer.py tests/proofs/ --timeout=30 -v`  
 Regenerate this file: `python tools/gen_test_registry.py`
@@ -272,10 +272,15 @@ Regenerate this file: `python tools/gen_test_registry.py`
 
 - ✓ `test_load_allowlist_returns_none_when_absent`
 - ✓ `test_load_allowlist_returns_sets`
+- ✓ `test_npm_added_packages_compares_entries`
+- ✓ `test_npm_added_packages_overrides_and_resolutions`
+- ✓ `test_npm_added_packages_reads_dependency_sections_only`
+- ✓ `test_npm_added_packages_returns_none_when_unparseable`
 - ✓ `test_parse_cargo_package`
 - ✓ `test_parse_go_package`
 - ✓ `test_parse_ignores_diff_header_line`
 - ✓ `test_parse_npm_package`
+- ✓ `test_parse_npm_section_key_is_not_a_package`
 - ✓ `test_parse_pip_ignores_removed_lines`
 - ✓ `test_parse_pip_packages`
 - ✓ `test_sca_inactive_without_allowlist`
@@ -428,6 +433,10 @@ Regenerate this file: `python tools/gen_test_registry.py`
 - ✓ `test_cursor_rule_alwaysapply_without_exec_is_safe`
 - ✓ `test_full_scan_detects_claude_session_hook`
 - ✓ `test_gemini_settings_session_hook_critical`
+- ✓ `test_hidden_characters_are_flagged`
+- ✓ `test_leading_byte_order_mark_is_not_flagged`
+- ✓ `test_plain_ascii_is_not_hidden_unicode`
+- ✓ `test_regex_matches_only_the_intended_code_points`
 - ✓ `test_vscode_tasks_folder_open_critical`
 - ✓ `test_vscode_tasks_no_folder_open_is_safe`
 - ✓ `test_zero_ai_config_inputs_still_safe`

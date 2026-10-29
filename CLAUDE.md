@@ -2,7 +2,13 @@
 
 ## Handover (update this block at the end of every session)
 
-- **Branch state:** `main` at `26804d2`. **v1.6.0 released** from `6c3df91`: tag `v1.6.0` on the PR #110 merge commit (tree identical to the verified tree `f4477970…`; #110 checks passed); "Publish to PyPI" run 40350394223 succeeded; `pip install payloadguard-plg==1.6.0` from PyPI verified in a fresh virtualenv. PR #108 was closed without merging (no-op). The six fix/docs branches of this work are deleted. §V8 merged via PR #111 (`28345bc`); its branch is deleted. Documentation pass merged via PR #112 (`19215fd`); harness history and §H1–§H3 via PRs #113/#114 (`a214166`); §H3 closed via PR #115 (`4c2b606`). §H1 merged via PR #116 (`101126b`) and §H2 via PR #117 (`b2d7436`); the harness workflow pins `40b27dc` (harness PRs #81 and #82, merged; RTA01 expects CAUTION). Handover sync merged via PR #118 (`58a9e28`); §V12 via PR #119 (`041b411`); the following handover sync via PR #120 (`0c3482c`); the documentation restructure via PR #121 (`26804d2`). The merged branches of this work are deleted. Active: `docs/handover-after-readme-split` (this handover sync); not merged.
+- **Branch state:** `main` at `ce44e3e`. **v1.6.0 released** from `6c3df91`: tag `v1.6.0` on the PR #110 merge commit (tree identical to the verified tree `f4477970…`; #110 checks passed); "Publish to PyPI" run 40350394223 succeeded; `pip install payloadguard-plg==1.6.0` from PyPI verified in a fresh virtualenv. PR #108 was closed without merging (no-op). The six fix/docs branches of this work are deleted. §V8 merged via PR #111 (`28345bc`); its branch is deleted. Documentation pass merged via PR #112 (`19215fd`); harness history and §H1–§H3 via PRs #113/#114 (`a214166`); §H3 closed via PR #115 (`4c2b606`). §H1 merged via PR #116 (`101126b`) and §H2 via PR #117 (`b2d7436`); the harness workflow pins `40b27dc` (harness PRs #81 and #82, merged; RTA01 expects CAUTION). Handover sync merged via PR #118 (`58a9e28`); §V12 via PR #119 (`041b411`); the following handover sync via PR #120 (`0c3482c`); the documentation restructure via PR #121 (`26804d2`). The merged branches of this work are deleted. The handover sync after it merged via PR #122 (`ce44e3e`). Active: `fix/round3-audit` (round-3 adversarial evaluation fixes, 7 commits on `ce44e3e`); not pushed, no PR.
+- **Round-3 adversarial evaluation fixes (2026-10-29, branch `fix/round3-audit`):**
+  - Source: `ROUND3_REPORT.md` (external evaluation of `ce44e3e`; untracked in the repository root; fixtures and raw reports held outside the repository). Register: AUDIT_LOG "Adversarial Evaluation Round 3". One commit per group, in order of consequence: `fe32395` MOVE-01 (renames into config/workflow/build/migration paths); `1518386` FP-01 + BUILD-07 (hidden-Unicode regex matched ASCII; npm SCA read JSON section names as packages); `c08d98b` SEM-01/04 (L5b profiled zero churn: no patch text); `e4b3848` TYPE01 + BUILD-01/04/11 (symlinked sources, uncommented build commands, npm hooks, malformed JSON aborting analysis); `e08571c` SEC01/03/06/12/14/19 + SEC10 (Python execution facts and D06 rules; helper delegation); `8553f04` IDX-02 + CTX01 + DUP01 + ENC01 (reference-first caller index and coverage reporting; D01 side grouping; source decoding). Docs commit follows.
+  - Evidence: every campaign case replayed from its recorded commits before/after in all modes: each reported finding changes as intended, every control unchanged. Harness oracle 41/41; mutation suite 16/16; 38 fixtures with live PR bodies (shadow) unchanged. Real-history replay in enforce mode (this repo 74 commits, harness 20, The-Node 200) used to calibrate D06; no new BLOCK. Replay scripts were in the session scratchpad, not committed.
+  - Behaviour changes to note: L5b now fires V_s/V_o/V_r (9/74 and 15/200 real commits raised, exit 0; SEM-02 open); DUP01 makes persistent head parse errors REVIEW (6/200 The-Node commits); FP-01 removes a false CAUTION from 33/200 The-Node commits.
+  - Tests: 504 passed with Z3/CrossHair (`test_analyzer.py` 341, `test_consequence_engine.py` 138, `tests/proofs/` 25); 483 passed, 21 skipped without. Formal models unchanged (L3 scoring, L5b cross-correlation untouched).
+  - Open from this work: SEM-02 (L5b V_r churn floor and micro-scope lexicon calibration); SEC rules are Python-only; SEC17, SEC22, BOOK01, TF01 and the first/second-round findings other than FP-01 not addressed.
 - **Documentation restructure (2026-10-27, PR #121, merged):**
   - `README.md` rewritten around functionality: verdicts and scoring, layers, detections, consequence engine, Action inputs and outputs, CLI, configuration defaults, reports, limitations, verification scope. It no longer carries release notes, test or proof counts, or audit status. The Action inputs it omitted (`app-id`, `private-key`, `installation-id`, `auto-remediate`, `runtime-mode`) are documented; the SARIF note is corrected (CLI only).
   - New `CHANGELOG.md` (user-visible changes, 1.0.0 to Unreleased). New `DEVLOG.md` opens with the state at the cut-over; the former log (1,356 lines) is the closed archive `docs/devlog/DEVLOG-2026-04-22_to_2026-10-27.md`, moved with history.
@@ -87,7 +93,7 @@ everse_sql, empty/missing downgrade() or down() functions, or missing/empty roll
   - `tests/proofs/test_z3_properties.py`: `_MAX_OTHER_SCORE` 19→24.
   - 16 new tests in `TestAIToolingConfigPoisoning` (8 unit, 8 integration; 3 FP-anchor safe cases).
   - Test suite: **274 pass, 0 fail** (`test_analyzer.py` alone; Z3/CrossHair require external install).
-- **Next:** After each live sweep (`regression.yml`), run `collect_history.py` and commit `regression-reports/`. Decide whether D08 on AW04 (SAFE-expected) should block in enforce mode. Consumer repositories pin `40b27dc` (§H1 and §H2 fixes, no release yet) and start in shadow mode. Release when ready: the tag push publishes to PyPI; the GitHub Release must be published in the web UI with the Marketplace option (v1.6.0 has no Release, so Marketplace still shows v1.5.0). Decide §V13 and the documentation items listed in DEVLOG 2026-10-27. Then Sprint 2 (L1-ext: executable magic bytes + compound large-blob detector) and Sprint 3 (harness WS08/WS09/WS10).
+- **Next:** Review and merge `fix/round3-audit`; decide SEM-02 (L5b calibration) before relying on L5b verdicts. After each live sweep (`regression.yml`), run `collect_history.py` and commit `regression-reports/`. Decide whether D08 on AW04 (SAFE-expected) should block in enforce mode. Consumer repositories pin `40b27dc` (§H1 and §H2 fixes, no release yet) and start in shadow mode. Release when ready: the tag push publishes to PyPI; the GitHub Release must be published in the web UI with the Marketplace option (v1.6.0 has no Release, so Marketplace still shows v1.5.0). Decide §V13 and the documentation items listed in DEVLOG 2026-10-27. Then Sprint 2 (L1-ext: executable magic bytes + compound large-blob detector) and Sprint 3 (harness WS08/WS09/WS10).
 - **CI:** `trigger-regression.yml` manual-only (`workflow_dispatch`). Harness `regression.yml` also manual-only.
 - **Harness regression — last verified 2026-06-01 (analyser SHA fe68338, v1.3.0) — 34/34 PASS.**
   - Sprint 1 adds a new detection layer; re-regression required after merge to confirm no regressions on existing 34 cases.
@@ -120,8 +126,8 @@ everse_sql, empty/missing downgrade() or down() functions, or missing/empty roll
   - `scripts/pc-smoke-test.sh`: one-command build+run+verify. Run with `sudo bash scripts/pc-smoke-test.sh`.
 - **Phase 2 Stage 2 (Z3 proofs):** `tests/proofs/test_z3_properties.py`: P1–P10. `_MAX_OTHER_SCORE` updated 19→24 (Sprint 1).
 - **Phase 2 Stage 1 (auto-remediation):** `remediate.py` `WorkflowRemediator` operational.
-- **Test suite:** `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` → **397 passed, 21 skipped** without Z3/CrossHair; **418 passed** with them installed (`tests/proofs/` 25 tests) (2026-10-27).
-- **Open findings:** §2.3 (detached HEAD), §V13 (L5b section directive); see the Open Findings table.
+- **Test suite:** `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` → **483 passed, 21 skipped** without Z3/CrossHair; **504 passed** with them installed (`tests/proofs/` 25 tests) (2026-10-29, `fix/round3-audit`; `main` 418 / 397).
+- **Open findings:** §2.3 (detached HEAD), §V13 (L5b section directive), SEM-02 (L5b calibration); see the Open Findings table.
 - **GitHub App:** App ID 3856270, Installation ID 135500427. Both repos confirmed in scope.
 - **Harness CI:** 41 test cases (38 original + RT01/RT02/RT03), regression runner operational with `--mode runtime`.
 - **Blockers:** None.
@@ -146,17 +152,17 @@ A GitHub Action + Python CLI that analyses pull requests for destructive payload
 |---|---|---|
 | L1 Surface | File/line counts, permission changes, symlinks | `PayloadAnalyzer.analyze()` |
 | L2 Forensic | Critical path regex matching on deleted files + added file content scan | `CRITICAL_PATH_PATTERNS`, `_scan_added_file_content()` |
-| L2b SCA | Manifest diff scanning vs `allowlist.yml` on the target branch (opt-in; keys `python`, `npm`, `go`, `rust`) | `_parse_added_packages()`, `_load_allowlist()` |
-| L2c Actions Poisoning | Added/modified workflow files: base64, credential harvest, dormant triggers (any YAML layout), OIDC elevation, typosquatted consumers | `_scan_github_actions_poisoning()` |
-| L2d AI Config Poisoning | Added/modified AI tooling config files: SessionStart hooks, folder-open tasks, lifecycle script hijacks, binding.gyp shell chains, Cursor NL imperatives, hidden Unicode, MCP local server commands | `_scan_ai_tooling_configs()` |
+| L2b SCA | Manifest diff scanning vs `allowlist.yml` on the target branch (opt-in; keys `python`, `npm`, `go`, `rust`); `package.json` parsed as JSON; renamed manifests included | `_npm_added_packages()`, `_parse_added_packages()`, `_load_allowlist()` |
+| L2c Actions Poisoning | Added/modified/renamed/copied workflow files: base64, credential harvest, dormant triggers (any YAML layout), OIDC elevation, typosquatted consumers | `_scan_github_actions_poisoning()` |
+| L2d AI Config Poisoning | Added/modified/renamed/copied AI tooling config files: SessionStart hooks, folder-open tasks, lifecycle script hijacks, binding.gyp shell chains, Cursor NL imperatives, hidden Unicode (escaped code-point class), MCP local server commands | `_scan_ai_tooling_configs()` |
 | L3 Consequence | Severity scoring → SAFE/REVIEW/CAUTION/DESTRUCTIVE | `_assess_consequence()` |
 | L4 Structural | AST diff — named class/function/constant deletions | `StructuralPayloadAnalyzer` |
 | L4b PLI | Semantic consistency — PR description vs diff, commit vs content, old vs new function | NOT ACTIVE — reverted |
 | L4b Complexity | McCabe V(G) advisory for newly added Python fns | inside `analyze_structural_drift()` |
 | L5a Temporal | Branch age × target velocity drift score | `TemporalDriftAnalyzer` |
-| L5b Semantic | PR-MCI three-phase heuristic — deceptive description detection; raises the L3 verdict | `SemanticTransparencyAnalyzer`, `_apply_semantic_transparency()` |
+| L5b Semantic | PR-MCI three-phase heuristic over a patch diff — deceptive description detection; raises the L3 verdict | `SemanticTransparencyAnalyzer`, `_apply_semantic_transparency()` |
 | L5c Runtime | eBPF tracepoint agent — execve/connect/ptrace/procmem, audit+block | `agent/`, `_load_runtime_events()` |
-| SCG Consequence (`consequence.v1`) | 5-stage symbol matching + D01–D10 differential consequence detectors (`shadow`/`advisory`/`enforce`) | `consequence_engine.py`, `ConsequenceEngine` |
+| SCG Consequence (`consequence.v1`) | 5-stage symbol matching + D01–D10 differential consequence detectors (`shadow`/`advisory`/`enforce`); symlinks analysed through their target; reference-first caller index with coverage report; Python execution facts for D06 | `consequence_engine.py`, `ConsequenceEngine` |
 
 ### Key Files
 
@@ -170,8 +176,8 @@ action.yml                  — GitHub Action composite wrapper
 agent/                      — eBPF runtime defence agent (Go + cilium/ebpf)
 agent/bpf/probe.c           — 4 tracepoint probes + pg_config/egress_allow_ipv4 BPF maps
 scripts/pc-smoke-test.sh    — one-command build+verify on real kernel
-test_analyzer.py            — legacy, layer, policy, Action and packaging pytest suite (332 tests)
-test_consequence_engine.py  — SCG & consequence engine pytest suite (61 tests)
+test_analyzer.py            — legacy, layer, policy, Action and packaging pytest suite (341 tests)
+test_consequence_engine.py  — SCG & consequence engine pytest suite, incl. round-3 real-Git fixtures (138 tests)
 tests/proofs/               — Z3 formal property proofs (P1–P11) + CrossHair pytest wrapper + L3 model parity test
 verification/        — CrossHair verification targets: consequence_pure (C-01–C-15), temporal_pure (T1-T7), structural_pure (S1-S7), semantic_pure (M1-M9)
 allowlist.yml        — SCA package allowlist (user-created, read from the target branch, not in repo by default)
@@ -225,6 +231,7 @@ consequence:
 `__version__ = "1.6.0"` (`analyze.py` / `pyproject.toml`). Tags: `v1.5.0` → `93f94f9`; `v1.6.0` → `6c3df91` (published to PyPI 2026-10-26). PyPI had 1.3.0 as its latest release: the v1.4.0 and v1.5.0 tag builds failed (§V3), so 1.6.0 is the first PyPI release since 1.3.0.
 
 ### Unreleased
+- Round-3 evaluation fixes (branch `fix/round3-audit`, not merged): MOVE-01 renames into active paths analysed; FP-01 hidden-Unicode class corrected; BUILD-07 npm SCA parsed as JSON; SEM-01/04 L5b profiles real patch text; TYPE01 symlinked sources analysed through the target (`D02_STRUCTURAL_DELTA`); BUILD-01/04/11 D05 active lines, npm hooks, malformed L2d JSON; SEC01/03/06/12/14/19 Python D06 execution rules; SEC10 helper delegation; IDX-02/CTX01 reference-first caller index and coverage; DUP01 head parse error policy; ENC01 source decoding. See CHANGELOG Unreleased.
 - §V12: a verdict raised after L3 (L5b semantic transparency, consequence policy) takes the severity, recommendation and lowest score of its new status; the verdict reports the points added as `escalation_score`. Verdicts and exit codes are unchanged.
 - §H2: L2c dormant-trigger detection reads the events from the parsed `on:` field, so inline, flow and later-key layouts of `workflow_dispatch` and `schedule` are detected; the line patterns remain as a fallback.
 - §H1: branch age never decides DESTRUCTIVE. Branch age is applied after every other signal. When those signals total 5 or more it adds in full; otherwise it raises the score at most to 4, so age can lift a verdict to REVIEW or CAUTION but never decides DESTRUCTIVE. The verdict reports `branch_age_score`; the L5b deception escalation raises CAUTION to DESTRUCTIVE only when the content score alone reaches CAUTION. Verified as POST-15/16 (CrossHair, Dafny) and Z3 P11.
@@ -297,6 +304,8 @@ consequence:
 | §2.3 | Single-branch clone / detached HEAD raises BadName exception | MEDIUM | Backlog |
 | §V12 | L5b escalations change only the verdict status; severity, score and recommendation stay at their L3 values (e.g. DESTRUCTIVE [HIGH], score 4, "REVIEW CAREFULLY") | LOW | **RESOLVED** — every escalation after L3 sets severity, recommendation and a score in the new band (`_raise_verdict()`) |
 | §V13 | The L5b report section prints its own "❌ DO NOT MERGE" directive for every DECEPTIVE_PAYLOAD result, also when the verdict is CAUTION (exit 0) | LOW | Open — decision needed |
+| SEM-02 | With real patch text (SEM-01 fix), L5b V_r `phantom_additions` has no churn floor and the micro-scope lexicon matches domain words; add-heavy "fix" PRs rise SAFE → REVIEW (9/74 commits here, 15/200 in The-Node; exit 0) | MEDIUM | Open — calibration decision (L5b modelled in `semantic_pure.py`) |
+| MOVE-01 … ENC01 | Round-3 evaluation findings (16 IDs incl. FP-01) | HIGH–LOW | **Fixed** on `fix/round3-audit` (not merged) — AUDIT_LOG "Adversarial Evaluation Round 3" |
 | §H1 | Harness fixture aging: six CAUTION-expected stable cases reach DESTRUCTIVE for branch age alone against a harness `main` commit dated from 2026-11-22 | MEDIUM | **RESOLVED** in the analyser — branch age never decides DESTRUCTIVE; the harness pin must move to a commit with the fix |
 | §H2 | RTA01 expected REVIEW from a content-scan signal removed in v1.2.0; its inline `on: workflow_dispatch` also evaded the L2c dormant-trigger check | LOW | **RESOLVED** — triggers read from parsed YAML; RTA01 expects CAUTION |
 | §H3 | Harness `REGRESSION_PAT` returned 401; live regression could not run | MEDIUM | **RESOLVED** — secret replaced 2026-10-26; run #27 attempt 3 succeeded |
@@ -389,7 +398,7 @@ broad checks and belong in CI.
 
 - Python 3.11+ (`requires-python >=3.11`; 3.11 in CI and the Action, 3.14 verified locally)
 - Dependencies: `pip install -r requirements.txt` — GitPython, PyYAML, PyJWT, requests, tree-sitter + 6 grammar packages; z3-solver and crosshair-tool for the proof tests
-- Test: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` (418 passed with the proof tools; 397 passed, 21 skipped without)
+- Test: `python -m pytest test_analyzer.py test_consequence_engine.py tests/ -q` (504 passed with the proof tools; 483 passed, 21 skipped without)
 - CI: GitHub Actions via `action.yml` -- runs on every PR in consumer repos
 
 ---
