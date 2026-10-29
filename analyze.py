@@ -25,8 +25,10 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Union
 from dataclasses import dataclass, field
+import io
 import os
 import posixpath
+import tokenize
 import structural_parser
 import consequence_engine
 
@@ -449,19 +451,76 @@ def _resolve_symlink(tree, link_path: str, target: str, max_hops: int = 8):
     return resolved, None
 
 
+def _decode_source(data: bytes, path: str):
+    """(text, error) for source bytes decoded as their language reads them (AUDIT_LOG ENC01).
+
+    Python honours a PEP 263 coding declaration or BOM (default UTF-8); other files are read as
+    UTF-8. Bytes invalid in that encoding are decoded as Latin-1, which keeps every byte
+    distinct, and the error is returned so the parse is reported incomplete. The former
+    decode('utf-8', errors='ignore') dropped such bytes, so distinct identifiers compared equal.
+    """
+    encoding = "utf-8"
+    if path.endswith((".py", ".pyw")):
+        try:
+            encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
+        except SyntaxError as e:
+            # CPython rejects the file with the same message at import.
+            return data.decode("latin-1"), f"rejected by Python ({e})"
+    try:
+        text = data.decode(encoding)
+    except (UnicodeDecodeError, LookupError) as e:
+        return data.decode("latin-1"), f"not valid {encoding} ({e})"
+    return text.removeprefix("﻿"), None
+
+
+_IDENTIFIER_RE = re.compile(r"[^\W\d]\w*")
+
+
+def _files_referencing(commit, names, max_files: int) -> dict:
+    """{path: source} of head source files that mention any of ``names`` as a whole word
+    (git grep on ``commit``), so callers of changed symbols are indexed before the
+    max_repo_files budget is spent on unrelated files (AUDIT_LOG IDX-02)."""
+    words = sorted({n for n in names if _IDENTIFIER_RE.fullmatch(n)})
+    prefix = f"{commit.hexsha}:"
+    paths: list = []
+    for i in range(0, len(words), 100):
+        args = ["-l", "-I", "-w", "-F", "--no-color"]
+        for word in words[i:i + 100]:
+            args += ["-e", word]
+        try:
+            out = commit.repo.git.grep(*args, commit.hexsha)
+        except git.exc.GitCommandError:
+            continue  # exit status 1: no file matches
+        for line in out.splitlines():
+            path = line[len(prefix):] if line.startswith(prefix) else line
+            if structural_parser.language_for_path(path) is not None and path not in paths:
+                paths.append(path)
+    files = {}
+    for path in sorted(paths)[:max_files]:
+        try:
+            obj = commit.tree / path
+            if not _is_symlink_mode(obj.mode):
+                files[path] = _decode_source(obj.data_stream.read(), path)[0]
+        except Exception:
+            continue
+    return files
+
+
 def _delta_side(blob, mode, path, tree):
-    """(content, symlink target) of one side of a diff. A symlink is read through its target in
-    ``tree``, the content a checkout that follows symlinks executes (AUDIT_LOG TYPE01); content is
-    None when the target cannot be resolved."""
+    """(content, symlink target, decode error) of one side of a diff. A symlink is read through
+    its target in ``tree``, the content a checkout that follows symlinks executes (AUDIT_LOG
+    TYPE01); content is None when the target cannot be resolved."""
     if blob is None:
-        return None, None
+        return None, None, None
     if _is_symlink_mode(mode):
         target = blob.data_stream.read().decode("utf-8", errors="replace")
         resolved, target_blob = _resolve_symlink(tree, path, target)
         if target_blob is None:
-            return None, resolved
-        return target_blob.data_stream.read().decode("utf-8", errors="ignore"), resolved
-    return blob.data_stream.read().decode("utf-8", errors="ignore"), None
+            return None, resolved, None
+        text, error = _decode_source(target_blob.data_stream.read(), resolved)
+        return text, resolved, error
+    text, error = _decode_source(blob.data_stream.read(), path)
+    return text, None, error
 
 
 def _blob_text(blob):
@@ -1383,8 +1442,8 @@ class PayloadAnalyzer:
                 if structural_parser.language_for_path(path) is None:
                     continue
                 try:
-                    original = d.a_blob.data_stream.read().decode('utf-8', errors='ignore')
-                    modified = d.b_blob.data_stream.read().decode('utf-8', errors='ignore')
+                    original = _decode_source(d.a_blob.data_stream.read(), path)[0]
+                    modified = _decode_source(d.b_blob.data_stream.read(), path)[0]
                     result = StructuralPayloadAnalyzer(
                         original, modified,
                         file_path=path,
@@ -1529,18 +1588,18 @@ class PayloadAnalyzer:
                     for d in diffs:
                         fpath = d.b_path or d.a_path or ""
                         old_p = d.a_path if d.change_type == "R" else None
-                        base_src = head_src = base_link = head_link = None
+                        base_src = head_src = base_link = head_link = base_err = head_err = None
                         # 'T' is a type change (regular file <-> symlink); both sides exist (AUDIT_LOG TYPE01).
                         if d.change_type in ("D", "M", "R", "T"):
                             try:
-                                base_src, base_link = _delta_side(
+                                base_src, base_link, base_err = _delta_side(
                                     d.a_blob, getattr(d, "a_mode", None), d.a_path, merge_base[0].tree
                                 )
                             except Exception:
                                 base_src = None
                         if d.change_type in ("A", "M", "R", "C", "T"):
                             try:
-                                head_src, head_link = _delta_side(
+                                head_src, head_link, head_err = _delta_side(
                                     d.b_blob, getattr(d, "b_mode", None), fpath, branch_commit.tree
                                 )
                             except Exception:
@@ -1557,32 +1616,45 @@ class PayloadAnalyzer:
                                 lines_deleted=f_del,
                                 base_symlink_target=base_link,
                                 head_symlink_target=head_link,
+                                base_decode_error=base_err,
+                                head_decode_error=head_err,
                             )
                         )
 
+                    # Head source files for the cross-file caller index. Every source file is
+                    # counted so the report can state how much of the repository was indexed
+                    # (AUDIT_LOG IDX-02); symlinks are not indexed as files of their own.
                     repo_head_files: dict[str, str] = {}
+                    repo_source_file_count = 0
                     try:
-                        count_blobs = 0
                         for item in branch_commit.tree.traverse():
-                            if getattr(item, "type", None) != "blob":
+                            if getattr(item, "type", None) != "blob" or _is_symlink_mode(getattr(item, "mode", None)):
                                 continue
                             if structural_parser.language_for_path(item.path) is None:
                                 continue
-                            if count_blobs >= max_repo_files:
-                                break
+                            repo_source_file_count += 1
+                            if len(repo_head_files) >= max_repo_files:
+                                continue
                             try:
-                                repo_head_files[item.path] = item.data_stream.read().decode("utf-8", errors="ignore")
-                                count_blobs += 1
+                                repo_head_files[item.path] = _decode_source(item.data_stream.read(), item.path)[0]
                             except Exception:
                                 pass
                     except Exception:
-                        pass
+                        repo_source_file_count = 0
+
+                    def _reference_loader(names):
+                        return _files_referencing(branch_commit, names, max_repo_files)
 
                     c_engine = consequence_engine.ConsequenceEngine(
                         mode=consequence_mode,
                         max_repo_files=max_repo_files,
                     )
-                    c_report = c_engine.analyze_deltas(file_deltas, repo_head_files)
+                    c_report = c_engine.analyze_deltas(
+                        file_deltas,
+                        repo_head_files,
+                        reference_loader=_reference_loader,
+                        repo_source_file_count=repo_source_file_count or None,
+                    )
                     consequence_report_dict = c_report.to_dict()
 
                     # In enforce mode, if legacy L4 flagged CRITICAL solely due to pure renames/moves

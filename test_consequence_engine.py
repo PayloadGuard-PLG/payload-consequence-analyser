@@ -2655,6 +2655,164 @@ class TestRound3GuardRegressions:
         assert "result_discarded:authorize" in facts and "result_discarded:s.read" not in facts
 
 
+_R3_API_BASE = "def publish(item):\n    return item\n"
+_R3_API_HEAD = "def publish(item, metadata):\n    return item, metadata\n"
+_R3_CALLER = "from api import publish\n\ndef run():\n    return publish('x')\n"
+
+
+class TestRound3CallerIndexCoverage:
+    """IDX-02 (caller beyond the index budget), CTX01 (unparsed indexed file), DUP01 (head error)."""
+
+    def _sig_findings(self, rep):
+        return [f for f in rep.findings if f.consequence_class == "PUBLIC_API_SIGNATURE_BREAK"]
+
+    def _filler(self, n):
+        return {f"aaa/filler_{i:03d}.py": f"def filler_{i}():\n    return {i}\n" for i in range(n)}
+
+    def test_caller_beyond_budget_is_reported_as_unchecked(self):
+        files = {**self._filler(6), "zzz/caller.py": _R3_CALLER}
+        rep = ConsequenceEngine(mode="enforce", max_repo_files=5).analyze_deltas(
+            [FileDeltaInput("api.py", change_type="M", base_source=_R3_API_BASE, head_source=_R3_API_HEAD)], files,
+        )
+        sig = self._sig_findings(rep)
+        assert [f.policy_recommendation for f in sig] == [POLICY_REVIEW]
+        assert "CALLER_INDEX_INCOMPLETE" in {e.kind for e in sig[0].evidence}
+        assert rep.capabilities["reachability"]["state"] == "partial"
+        cov = rep.graph_summary["caller_index"]
+        assert (cov["indexed_files"], cov["source_files"], cov["truncated"]) == (6, 8, True)
+
+    def test_referencing_files_are_indexed_first(self):
+        files = {**self._filler(6), "zzz/caller.py": _R3_CALLER}
+        seen = []
+
+        def loader(names):
+            seen.append(set(names))
+            return {"zzz/caller.py": _R3_CALLER}
+
+        rep = ConsequenceEngine(mode="enforce", max_repo_files=5).analyze_deltas(
+            [FileDeltaInput("api.py", change_type="M", base_source=_R3_API_BASE, head_source=_R3_API_HEAD)],
+            files, reference_loader=loader,
+        )
+        assert seen == [{"publish"}]
+        assert [f.policy_recommendation for f in self._sig_findings(rep)] == [POLICY_BLOCK]
+
+    def test_complete_index_is_available_without_note(self):
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("api.py", change_type="M", base_source=_R3_API_BASE, head_source=_R3_API_HEAD)],
+            {"other.py": "def other():\n    return 1\n"}, repo_source_file_count=2,
+        )
+        sig = self._sig_findings(rep)
+        assert [f.policy_recommendation for f in sig] == [POLICY_REVIEW]
+        assert "CALLER_INDEX_INCOMPLETE" not in {e.kind for e in sig[0].evidence}
+        assert rep.capabilities["reachability"]["state"] == "available"
+
+    def test_unparsed_indexed_file_is_reported(self):
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("api.py", change_type="M", base_source=_R3_API_BASE, head_source=_R3_API_HEAD)],
+            {"consumer.py": "def run(:\n    publish('x')\n"},
+        )
+        index = [f for f in rep.findings if f.finding_id == "PG-D01-INDEX"]
+        assert [f.policy_recommendation for f in index] == [POLICY_WARN]
+        assert index[0].affected_files == ("consumer.py",)
+        assert rep.capabilities["reachability"]["state"] == "partial"
+        assert rep.parser_completeness["complete"] is True  # changed files parsed
+        assert rep.graph_summary["caller_index"]["unparsed_files"][0]["status"] == PARSER_STATUS_PARSE_ERROR
+
+    def test_unparsed_index_without_api_change_is_not_a_finding(self):
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("api.py", change_type="M", base_source=_R3_API_BASE,
+                            head_source=_R3_API_BASE + "\n# note\n")],
+            {"consumer.py": "def run(:\n"},
+        )
+        assert not [f for f in rep.findings if f.finding_id == "PG-D01-INDEX"]
+        assert rep.capabilities["reachability"]["state"] == "partial"
+
+    def test_head_parse_error_survives_identical_base_error(self):
+        broken = "def check(:\n    pass\n"
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("security.py", change_type="M", base_source=broken, head_source=broken + "# x\n")]
+        )
+        d01 = [f for f in rep.findings if f.detector_id == DETECTOR_D01_PARSER]
+        assert [f.policy_recommendation for f in d01] == [POLICY_REVIEW]
+        assert "(base and head)" in d01[0].summary
+
+    def test_base_only_parse_error_stays_a_warning(self):
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("security.py", change_type="M", base_source="def check(:\n",
+                            head_source="def check():\n    pass\n")]
+        )
+        d01 = [f for f in rep.findings if f.detector_id == DETECTOR_D01_PARSER]
+        assert [f.policy_recommendation for f in d01] == [POLICY_WARN]
+
+    def test_git_grep_finds_caller_past_the_budget(self, tmp_path):
+        filler = {f"aaa/filler_{i:03d}.py": f"def filler_{i}():\n    return {i}\n" for i in range(8)}
+
+        def base_files():
+            return {**filler, "api.py": _R3_API_BASE, "zzz/caller.py": _R3_CALLER,
+                    "payloadguard.yml": "consequence:\n  max_repo_files: 5\n"}
+
+        root = _r3_repo(tmp_path, base_files(),
+                        lambda repo, root: _r3_stage(repo, root, {"api.py": _R3_API_HEAD}))
+        from analyze import PayloadAnalyzer, load_config
+
+        cfg = load_config(str(root), ref="main")
+        cfg.consequence["mode"] = "enforce"
+        rep = PayloadAnalyzer(str(root), "feature", "main", config=cfg).analyze(pr_description="Require metadata")
+        sig = [f for f in rep["consequence_analysis"]["findings"]
+               if f["consequence_class"] == "PUBLIC_API_SIGNATURE_BREAK"]
+        assert [f["policy_recommendation"] for f in sig] == [POLICY_BLOCK]
+        cov = rep["consequence_analysis"]["graph_summary"]["caller_index"]
+        assert cov["source_files"] == 10 and cov["truncated"] is True
+        assert rep["verdict"]["status"] == "DESTRUCTIVE"
+
+
+class TestRound3SourceEncoding:
+    """ENC01: source bytes are decoded as their language reads them, never lossily."""
+
+    def test_decode_source(self):
+        from analyze import _decode_source
+
+        latin1 = "# -*- coding: latin-1 -*-\ndef check_\xe1():\n    pass\n".encode("latin-1")
+        assert _decode_source(latin1, "api.py") == (latin1.decode("latin-1"), None)
+        assert _decode_source("def ok(): pass\n".encode("utf-8-sig"), "a.py") == ("def ok(): pass\n", None)
+        assert _decode_source("const a = 1;\n".encode("utf-8-sig"), "a.js") == ("const a = 1;\n", None)
+        text, error = _decode_source(b"def check_\xe1():\n    pass\n", "api.py")
+        assert text == "def check_\xe1():\n    pass\n" and "invalid or missing encoding declaration" in error
+        text, error = _decode_source(b"x = 1\n\n\ns = 'caf\xe9'\n", "late.py")
+        assert text == "x = 1\n\n\ns = 'caf\xe9'\n" and "not valid utf-8" in error
+        text, error = _decode_source(b"const check_\xe1 = 1;\n", "api.js")
+        assert text == "const check_\xe1 = 1;\n" and "not valid utf-8" in error
+        assert "unknown encoding" in _decode_source(b"# coding: no-such-codec\nx = 1\n", "a.py")[1]
+
+    def test_decode_errors_mark_the_parse_incomplete(self):
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas([
+            FileDeltaInput("api.py", change_type="M", base_source="def a():\n    pass\n",
+                           head_source="def a():\n    pass\n", head_decode_error="not valid utf-8"),
+            FileDeltaInput("ui.js", change_type="M", base_source="function a() {}\n",
+                           head_source="function a() {}\n", head_decode_error="not valid utf-8"),
+        ])
+        statuses = {f.affected_files[0]: (f.policy_recommendation, f.evidence[0].kind)
+                    for f in rep.findings if f.detector_id == DETECTOR_D01_PARSER}
+        assert statuses == {"api.py": (POLICY_REVIEW, PARSER_STATUS_PARSE_ERROR), "ui.js": (POLICY_WARN, "DECODE_ERROR")}
+
+    def test_declared_latin1_rename_is_a_rename(self, tmp_path):
+        base = "# -*- coding: latin-1 -*-\ndef check_\xe1(user):\n    return user\n".encode("latin-1")
+        head = "# -*- coding: latin-1 -*-\ndef check_(user):\n    return user\n".encode("latin-1")
+        root = _r3_repo(tmp_path, {"api.py": base}, lambda repo, root: _r3_stage(repo, root, {"api.py": head}))
+        ca = _r3_analyze(root, "enforce", "Rename the check")["consequence_analysis"]
+        assert ca["graph_summary"]["transition_counts"] == {"RENAMED": 1}
+        assert ca["parser_completeness"]["complete"] is True
+
+    def test_undeclared_latin1_python_is_a_head_parse_error(self, tmp_path):
+        head = b"def check_\xe1(user):\n    return user\n"
+        root = _r3_repo(tmp_path, {"api.py": "def check(user):\n    return user\n"},
+                        lambda repo, root: _r3_stage(repo, root, {"api.py": head}))
+        ca = _r3_analyze(root, "enforce", "Rename the check")["consequence_analysis"]
+        d01 = [f for f in ca["findings"] if f["detector_id"] == DETECTOR_D01_PARSER]
+        assert [f["policy_recommendation"] for f in d01] == [POLICY_REVIEW]
+        assert ca["parser_completeness"]["complete"] is False
+
+
 class TestRound3SemanticChurn:
     """SEM-01/SEM-04: the L5b diff profiler measures the real patch, not zero churn."""
 

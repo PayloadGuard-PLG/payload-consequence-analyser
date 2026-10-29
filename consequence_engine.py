@@ -31,7 +31,7 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -996,10 +996,30 @@ class FileDeltaInput:
     # (None when the target cannot be resolved inside the repository).
     base_symlink_target: Optional[str] = None
     head_symlink_target: Optional[str] = None
+    # Set when a side's bytes are not valid in the encoding its language reads; the source is
+    # then a lossless Latin-1 decoding (AUDIT_LOG ENC01).
+    base_decode_error: Optional[str] = None
+    head_decode_error: Optional[str] = None
 
 
 # A symlink at a source path whose target is outside the repository, missing or a directory.
 PARSER_STATUS_SYMLINK_UNRESOLVED = "SYMLINK_UNRESOLVED"
+# Source bytes that are not valid in the encoding a non-Python language reads (Python reports
+# such a file as a parse error, as CPython does).
+PARSER_STATUS_DECODE_ERROR = "DECODE_ERROR"
+
+
+def _with_decode_error(pr: ParseResult, error: Optional[str]) -> ParseResult:
+    """Mark a parse of incorrectly encoded source incomplete; its symbols are kept for matching."""
+    if error is None or not pr.complete:
+        return pr
+    return replace(
+        pr,
+        status=PARSER_STATUS_PARSE_ERROR if pr.language == "python" else PARSER_STATUS_DECODE_ERROR,
+        complete=False,
+        incomplete_reason=f"Source bytes are {error}",
+        error_detail=error,
+    )
 
 
 def _unresolved_symlink_result(file_path: str, target: str) -> ParseResult:
@@ -1648,11 +1668,18 @@ class ConsequenceEngine:
         self,
         file_deltas: List[FileDeltaInput],
         repo_head_files: Optional[Dict[str, str]] = None,
+        reference_loader=None,
+        repo_source_file_count: Optional[int] = None,
     ) -> ConsequenceReport:
         """
         Run the full SCG differential consequence pipeline over a list of FileDeltaInputs
         and an optional dictionary of `{file_path: source_text}` representing the
         repository's `head` tree (for cross-file caller verification).
+
+        ``reference_loader(names)`` returns `{file_path: source_text}` of head files that
+        mention any of the changed symbol names; they are indexed before ``repo_head_files``.
+        ``repo_source_file_count`` is the number of source files in the head tree, used to
+        report how much of it the caller index covers.
         """
         t_start = time.perf_counter()
         stage_timing: Dict[str, float] = {}
@@ -1683,14 +1710,14 @@ class ConsequenceEngine:
 
             b_path = fd.old_path or fd.file_path
             if fd.base_source is not None and _needs_structural_parse(b_path):
-                pr_base = extract_symbols(fd.base_source, b_path)
+                pr_base = _with_decode_error(extract_symbols(fd.base_source, b_path), fd.base_decode_error)
                 base_parse_results[b_path] = pr_base
                 base_symbols.extend(pr_base.symbols)
             elif fd.base_symlink_target is not None and _needs_structural_parse(b_path):
                 base_parse_results[b_path] = _unresolved_symlink_result(b_path, fd.base_symlink_target)
 
             if fd.head_source is not None and _needs_structural_parse(fd.file_path):
-                pr_head = extract_symbols(fd.head_source, fd.file_path)
+                pr_head = _with_decode_error(extract_symbols(fd.head_source, fd.file_path), fd.head_decode_error)
                 head_parse_results[fd.file_path] = pr_head
                 head_symbols.extend(pr_head.symbols)
             elif fd.head_symlink_target is not None and _needs_structural_parse(fd.file_path):
@@ -1703,6 +1730,15 @@ class ConsequenceEngine:
                 renamed_file_map.setdefault(del_paths[0], add_paths[0])
 
         stage_timing["parse_changed_files"] = (time.perf_counter() - t0) * 1000.0
+
+        # ------------------------------------------------------------------
+        # Stage C: 5-Stage Symbol Matching Pipeline (before the index, which uses its result)
+        # ------------------------------------------------------------------
+        t2 = time.perf_counter()
+        transitions, container_rename_map = match_symbols_5_stage(
+            base_symbols, head_symbols, renamed_file_map
+        )
+        stage_timing["symbol_matching"] = (time.perf_counter() - t2) * 1000.0
 
         # ------------------------------------------------------------------
         # Stage B: Parse repository head files for cross-file call graph
@@ -1720,33 +1756,55 @@ class ConsequenceEngine:
             repo_head_symbols.extend(pr.symbols)
             repo_head_imports[fpath] = list(pr.imports)
 
+        # Files that mention a changed symbol are indexed first, so the max_repo_files budget
+        # is not spent on unrelated files before a caller is reached (AUDIT_LOG IDX-02).
+        changed_names = {
+            tr.base_symbol.name for tr in transitions
+            if tr.base_symbol is not None and tr.transition_kind not in ("UNCHANGED", "ADDED")
+        }
+        reference_files: Dict[str, str] = {}
+        if reference_loader is not None and changed_names:
+            try:
+                reference_files = dict(reference_loader(changed_names))
+            except Exception:
+                reference_files = {}
+        candidates = sorted(p for p in reference_files if p not in parsed_head_paths) + sorted(
+            p for p in repo_head_files if p not in parsed_head_paths and p not in reference_files
+        )
+        candidates = [p for p in candidates if language_for_path(p) is not None]
+
         # Parse remaining unmodified head files up to max_repo_files
         count_extra = 0
-        for fpath in sorted(repo_head_files.keys()):
-            if fpath in parsed_head_paths:
-                continue
-            if language_for_path(fpath) is None:
-                continue
+        index_incomplete: List[ParseResult] = []
+        for fpath in candidates:
             if count_extra >= self.max_repo_files:
                 break
-            src = repo_head_files[fpath]
+            src = reference_files.get(fpath, repo_head_files.get(fpath))
             if src:
                 pr = extract_symbols(src, fpath)
                 repo_call_sites.extend(pr.call_sites)
                 repo_head_symbols.extend(pr.symbols)
                 repo_head_imports[fpath] = list(pr.imports)
                 count_extra += 1
+                if not pr.complete:
+                    index_incomplete.append(pr)
+
+        # How much of the head's source the index covers (AUDIT_LOG IDX-02, CTX01).
+        indexed_paths = {p for p in parsed_head_paths if language_for_path(p) is not None} | set(candidates[:count_extra])
+        source_total = max(repo_source_file_count or 0, len(indexed_paths) + max(0, len(candidates) - count_extra))
+        index_truncated = len(indexed_paths) < source_total
+        index_coverage = {
+            "indexed_files": len(indexed_paths),
+            "source_files": source_total,
+            "truncated": index_truncated,
+            "max_repo_files": self.max_repo_files,
+            "unparsed_files": [
+                {"file_path": pr.file_path, "status": pr.status, "reason": pr.incomplete_reason}
+                for pr in index_incomplete
+            ],
+        }
 
         stage_timing["index_repo_call_sites"] = (time.perf_counter() - t1) * 1000.0
-
-        # ------------------------------------------------------------------
-        # Stage C: 5-Stage Symbol Matching Pipeline
-        # ------------------------------------------------------------------
-        t2 = time.perf_counter()
-        transitions, container_rename_map = match_symbols_5_stage(
-            base_symbols, head_symbols, renamed_file_map
-        )
-        stage_timing["symbol_matching"] = (time.perf_counter() - t2) * 1000.0
 
         # ------------------------------------------------------------------
         # Stage D: Run Detectors D01 - D09
@@ -1767,6 +1825,10 @@ class ConsequenceEngine:
         d04_findings, unresolved_by_symbol = self._detect_d04_public_api_and_callers(
             transitions, repo_head_symbols, repo_call_sites, repo_head_imports
         )
+        if d04_findings and (index_truncated or index_incomplete):
+            d04_findings = [self._note_index_coverage(f, index_coverage) for f in d04_findings]
+            if index_incomplete:
+                findings.append(self._index_parse_finding(index_coverage))
         findings.extend(d04_findings)
         findings.extend(
             self._detect_d03_compound_and_threshold_gaming(
@@ -1817,10 +1879,17 @@ class ConsequenceEngine:
             syntax_reason=syntax_reason,
             symbolic_state=CAPABILITY_AVAILABLE if all_prs else CAPABILITY_PARTIAL,
             symbolic_reason="5-stage SCG symbol matching across changed files",
-            reachability_state=CAPABILITY_AVAILABLE if repo_head_files else CAPABILITY_PARTIAL,
+            reachability_state=(
+                CAPABILITY_AVAILABLE
+                if (repo_head_files or reference_files) and not index_truncated and not index_incomplete
+                else CAPABILITY_PARTIAL
+            ),
             reachability_reason=(
-                f"Cross-file call index over {len(repo_call_sites)} call sites in head"
-                if repo_head_files
+                f"Cross-file call index over {len(repo_call_sites)} call sites in "
+                f"{index_coverage['indexed_files']} of {index_coverage['source_files']} head source file(s)"
+                + (f" (max_repo_files={self.max_repo_files})" if index_truncated else "")
+                + (f"; {len(index_incomplete)} indexed file(s) could not be parsed" if index_incomplete else "")
+                if (repo_head_files or reference_files)
                 else "Changed-file call sites indexed"
             ),
             flow_state=CAPABILITY_PARTIAL,
@@ -1841,6 +1910,7 @@ class ConsequenceEngine:
             "transition_counts": counts_by_kind,
             "container_renames": container_rename_map,
             "renamed_files": renamed_file_map,
+            "caller_index": index_coverage,
         }
 
         parser_completeness = {
@@ -1880,66 +1950,121 @@ class ConsequenceEngine:
         head_prs: Dict[str, ParseResult],
     ) -> List[ConsequenceFinding]:
         findings: List[ConsequenceFinding] = []
-        seen: Set[Tuple[str, str]] = set()
-
+        # One finding per (file, status). When base and head fail the same way the finding is the
+        # head's, so a still-broken head keeps its REVIEW (AUDIT_LOG DUP01).
+        sides_by_key: Dict[Tuple[str, str], List[str]] = {}
+        result_by_key: Dict[Tuple[str, str], ParseResult] = {}
         for side, prs in (("base", base_prs), ("head", head_prs)):
             for fpath, pr in sorted(prs.items()):
                 if pr.complete:
                     continue
                 key = (fpath, pr.status)
-                if key in seen:
-                    continue
-                seen.add(key)
+                sides_by_key.setdefault(key, []).append(side)
+                result_by_key[key] = pr
 
-                is_head_error = side == "head" and pr.status in (
-                    PARSER_STATUS_PARSE_ERROR, PARSER_STATUS_SYMLINK_UNRESOLVED,
+        for key in sorted(sides_by_key, key=lambda k: (sides_by_key[k][0] == "head", k)):
+            fpath, _status = key
+            pr = result_by_key[key]
+            sides = sides_by_key[key]
+            side = " and ".join(sides)
+            is_head_error = "head" in sides and pr.status in (
+                PARSER_STATUS_PARSE_ERROR, PARSER_STATUS_SYMLINK_UNRESOLVED,
+            )
+            sev = SEVERITY_MEDIUM if is_head_error else SEVERITY_LOW
+            pol = POLICY_REVIEW if is_head_error else POLICY_WARN
+            if pr.status == PARSER_STATUS_UNSUPPORTED_EXTENSION:
+                remediation = (
+                    f"No structural parser is registered for '{Path(fpath).suffix}' files, so the "
+                    f"symbol-level detectors did not analyse '{fpath}'. Review its changes manually."
                 )
-                sev = SEVERITY_MEDIUM if is_head_error else SEVERITY_LOW
-                pol = POLICY_REVIEW if is_head_error else POLICY_WARN
-                if pr.status == PARSER_STATUS_UNSUPPORTED_EXTENSION:
-                    remediation = (
-                        f"No structural parser is registered for '{Path(fpath).suffix}' files, so the "
-                        f"symbol-level detectors did not analyse '{fpath}'. Review its changes manually."
-                    )
-                elif pr.status == PARSER_STATUS_SYMLINK_UNRESOLVED:
-                    remediation = (
-                        f"'{fpath}' is a symlink to '{pr.error_detail}', which is not a file in the "
-                        "repository, so the code it loads was not analysed. Review the link target."
-                    )
-                else:
-                    remediation = (
-                        f"Fix syntax errors in '{fpath}' or ensure the '{pr.language}' Tree-sitter grammar "
-                        "is installed before relying on structural safety guarantees."
-                    )
+            elif pr.status == PARSER_STATUS_SYMLINK_UNRESOLVED:
+                remediation = (
+                    f"'{fpath}' is a symlink to '{pr.error_detail}', which is not a file in the "
+                    "repository, so the code it loads was not analysed. Review the link target."
+                )
+            else:
+                remediation = (
+                    f"Fix syntax errors in '{fpath}' or ensure the '{pr.language}' Tree-sitter grammar "
+                    "is installed before relying on structural safety guarantees."
+                )
 
-                findings.append(
-                    ConsequenceFinding(
-                        finding_id=f"PG-D01-{fpath}-{pr.status}",
-                        detector_id=DETECTOR_D01_PARSER,
-                        consequence_class="ANALYSIS_INCOMPLETE",
-                        tier=TIER_INCOMPLETE,
-                        confidence=CONFIDENCE_UNKNOWN,
-                        severity=sev,
-                        policy_recommendation=pol,
-                        summary=(
-                            f"Structural analysis of '{fpath}' ({side}) is incomplete "
-                            f"({pr.status}): {pr.incomplete_reason}"
+            findings.append(
+                ConsequenceFinding(
+                    finding_id=f"PG-D01-{fpath}-{pr.status}",
+                    detector_id=DETECTOR_D01_PARSER,
+                    consequence_class="ANALYSIS_INCOMPLETE",
+                    tier=TIER_INCOMPLETE,
+                    confidence=CONFIDENCE_UNKNOWN,
+                    severity=sev,
+                    policy_recommendation=pol,
+                    summary=(
+                        f"Structural analysis of '{fpath}' ({side}) is incomplete "
+                        f"({pr.status}): {pr.incomplete_reason}"
+                    ),
+                    affected_files=(fpath,),
+                    affected_symbols=(),
+                    evidence=(
+                        EvidenceItem(
+                            kind=pr.status,
+                            file=fpath,
+                            line=1,
+                            symbol=None,
+                            detail=f"{pr.incomplete_reason} ({pr.error_detail or 'no detail'})",
                         ),
-                        affected_files=(fpath,),
-                        affected_symbols=(),
-                        evidence=(
-                            EvidenceItem(
-                                kind=pr.status,
-                                file=fpath,
-                                line=1,
-                                symbol=None,
-                                detail=f"{pr.incomplete_reason} ({pr.error_detail or 'no detail'})",
-                            ),
-                        ),
-                        remediation=remediation,
-                    )
+                    ),
+                    remediation=remediation,
                 )
+            )
         return findings
+
+    @staticmethod
+    def _index_detail(cov: Dict[str, Any]) -> str:
+        detail = f"indexed {cov['indexed_files']} of {cov['source_files']} head source file(s)"
+        if cov["truncated"]:
+            detail += f", limited by max_repo_files={cov['max_repo_files']}"
+        if cov["unparsed_files"]:
+            detail += f"; {len(cov['unparsed_files'])} indexed file(s) could not be parsed"
+        return detail
+
+    def _note_index_coverage(self, finding: ConsequenceFinding, cov: Dict[str, Any]) -> ConsequenceFinding:
+        """State on a D04 finding that found no breaking caller that the caller index was
+        incomplete (AUDIT_LOG IDX-02, CTX01); a BLOCK finding already names its callers."""
+        if finding.policy_recommendation == POLICY_BLOCK:
+            return finding
+        detail = self._index_detail(cov)
+        return replace(
+            finding,
+            summary=f"{finding.summary} Callers outside the caller index were not checked ({detail}).",
+            evidence=finding.evidence + (
+                EvidenceItem(kind="CALLER_INDEX_INCOMPLETE", file=finding.affected_files[0] if finding.affected_files else "",
+                             line=1, symbol=None, detail=detail),
+            ),
+        )
+
+    def _index_parse_finding(self, cov: Dict[str, Any]) -> ConsequenceFinding:
+        """D01 for unchanged files in the caller index that did not parse (AUDIT_LOG CTX01)."""
+        files = [u["file_path"] for u in cov["unparsed_files"]]
+        shown = ", ".join(files[:5]) + (f" and {len(files) - 5} more" if len(files) > 5 else "")
+        return ConsequenceFinding(
+            finding_id="PG-D01-INDEX",
+            detector_id=DETECTOR_D01_PARSER,
+            consequence_class="ANALYSIS_INCOMPLETE",
+            tier=TIER_INCOMPLETE,
+            confidence=CONFIDENCE_UNKNOWN,
+            severity=SEVERITY_LOW,
+            policy_recommendation=POLICY_WARN,
+            summary=(
+                f"{len(files)} unchanged file(s) in the caller index could not be parsed ({shown}); "
+                "callers of the changed API in them were not checked."
+            ),
+            affected_files=tuple(files),
+            affected_symbols=(),
+            evidence=tuple(
+                EvidenceItem(kind=u["status"], file=u["file_path"], line=1, symbol=None, detail=u["reason"] or "")
+                for u in cov["unparsed_files"]
+            ),
+            remediation="Review callers in the unparsed files manually or fix their syntax.",
+        )
 
     # ------------------------------------------------------------------
     # D02: Source file replaced by, or re-pointed as, a symlink
