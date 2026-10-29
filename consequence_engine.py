@@ -990,6 +990,18 @@ class FileDeltaInput:
     lines_deleted: int = 0
 
 
+def _active_base_source(fd: FileDeltaInput, watched) -> str:
+    """Base content a path-scoped detector compares the head against (AUDIT_LOG MOVE-01).
+
+    ``watched(path)`` says whether the detector inspects files at ``path``. A rename from a
+    path it does not inspect makes the whole head content newly active, so it is compared
+    against an empty base.
+    """
+    if fd.change_type in ("R", "C") and fd.old_path and not watched(fd.old_path):
+        return ""
+    return fd.base_source or ""
+
+
 @dataclass(frozen=True)
 class SymbolTransition:
     """Represents a matched or unmatched symbol transition in the SCG."""
@@ -2810,9 +2822,10 @@ class ConsequenceEngine:
 
             # 1. Check package.json lifecycle scripts & dependency drift
             if bname == "package.json" and fd.head_source:
+                base_text = _active_base_source(fd, lambda p: Path(p).name == "package.json")
                 try:
                     head_pkg = json.loads(fd.head_source)
-                    base_pkg = json.loads(fd.base_source) if fd.base_source else {}
+                    base_pkg = json.loads(base_text) if base_text else {}
                 except Exception:
                     head_pkg, base_pkg = {}, {}
 
@@ -2932,7 +2945,7 @@ class ConsequenceEngine:
 
             # 3. Check build wrapper scripts (mvnw, gradlew, Makefile, build.sh)
             if bname.lower() in _BUILD_WRAPPER_BASENAMES and fd.head_source:
-                base_s = fd.base_source or ""
+                base_s = _active_base_source(fd, lambda p: Path(p).name.lower() in _BUILD_WRAPPER_BASENAMES)
                 head_s = fd.head_source
                 suspicious_matches = []
                 for idx, line in enumerate(head_s.splitlines(), start=1):
@@ -3035,7 +3048,9 @@ class ConsequenceEngine:
                 continue
             if not fd.head_source:
                 continue
-            base_src = fd.base_source or ""
+            base_src = _active_base_source(
+                fd, lambda p: bool(_WORKFLOW_OR_ACTION_PATH_RE.search(p.replace("\\", "/")))
+            )
             head_src = fd.head_source
 
             # 1. Untrusted GitHub expression interpolation inside `run:` shell blocks (W02)
@@ -3474,8 +3489,9 @@ class ConsequenceEngine:
                 continue
             head = _analyze_migration_source(fd.file_path, fd.head_source)
             base_keys: Set[Any] = set()
-            if fd.base_source:
-                base = _analyze_migration_source(fd.old_path or fd.file_path, fd.base_source)
+            base_text = _active_base_source(fd, _is_migration_file)
+            if base_text:
+                base = _analyze_migration_source(fd.old_path or fd.file_path, base_text)
                 base_keys = {ev["key"] for ev in base.events}
             new_events = [
                 ev for ev in head.events

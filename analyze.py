@@ -378,6 +378,10 @@ _CURSOR_EXEC_IMPERATIVE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Change types whose head content is active at the head path. A rename or copy activates
+# content at a config or workflow path just as an addition does (AUDIT_LOG MOVE-01).
+_ACTIVATING_CHANGE_TYPES = ('A', 'M', 'R', 'C')
+
 # Package.json lifecycle keys that auto-execute on install/build.
 _PACKAGE_LIFECYCLE_KEYS = frozenset({
     'preinstall', 'install', 'postinstall', 'prepare', 'prepack', 'postpack',
@@ -1395,7 +1399,7 @@ class PayloadAnalyzer:
                                 base_src = d.a_blob.data_stream.read().decode("utf-8", errors="ignore")
                             except Exception:
                                 base_src = None
-                        if d.b_blob is not None and d.change_type in ("A", "M", "R"):
+                        if d.b_blob is not None and d.change_type in ("A", "M", "R", "C"):
                             try:
                                 head_src = d.b_blob.data_stream.read().decode("utf-8", errors="ignore")
                             except Exception:
@@ -1824,12 +1828,13 @@ class PayloadAnalyzer:
         return flags
 
     def _scan_ai_tooling_configs(self, diffs) -> list:
-        """Scan added and modified AI tooling config files for auto-execution poisoning signals."""
+        """Scan AI tooling config files that are added, modified, or renamed or copied into a
+        config path for auto-execution poisoning signals (AUDIT_LOG MOVE-01)."""
         if not self.config.actions.get("enabled", True):
             return []
         flags = []
         for d in diffs:
-            if d.change_type not in ('A', 'M'):
+            if d.change_type not in _ACTIVATING_CHANGE_TYPES:
                 continue
             path = d.b_path or d.a_path or ''
             if not isinstance(path, str) or not _AI_CONFIG_PATH_RE.search(path):
@@ -1999,9 +2004,10 @@ class PayloadAnalyzer:
 
 
 def _iter_workflow_file_diffs(diffs):
-    """Yield (path, content, diff) for each added/modified workflow file in diffs."""
+    """Yield (path, content, diff) for each workflow file in diffs that is added, modified, or
+    renamed or copied into the workflow directory (AUDIT_LOG MOVE-01)."""
     for d in diffs:
-        if d.change_type not in ('A', 'M'):
+        if d.change_type not in _ACTIVATING_CHANGE_TYPES:
             continue
         path = d.b_path or d.a_path or ''
         if not isinstance(path, str) or not re.search(_ACTIONS_WORKFLOW_PATTERN, path):
