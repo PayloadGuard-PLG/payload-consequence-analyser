@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Union
 from dataclasses import dataclass, field
 import os
+import posixpath
 import structural_parser
 import consequence_engine
 
@@ -416,6 +417,51 @@ _MANIFEST_ALLOWLIST_KEY = {
 def _manifest_type(path: str):
     """SCA manifest type of ``path`` ('pip', 'npm', ...), or None."""
     return next((mt for pat, mt in _MANIFEST_PATTERNS.items() if re.search(pat, path)), None)
+
+
+_GIT_SYMLINK_MODE = 0o120000
+
+
+def _is_symlink_mode(mode) -> bool:
+    return isinstance(mode, int) and mode & 0o170000 == _GIT_SYMLINK_MODE
+
+
+def _resolve_symlink(tree, link_path: str, target: str, max_hops: int = 8):
+    """Resolve a Git symlink inside ``tree``: (resolved path, blob), with blob None when the link
+    leaves the tree, is absolute, dangles, names a directory or exceeds ``max_hops``."""
+    path = link_path
+    resolved = target
+    for _ in range(max_hops):
+        if target.startswith("/"):
+            return target, None
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
+        if resolved == ".." or resolved.startswith("../"):
+            return resolved, None
+        try:
+            obj = tree / resolved
+        except KeyError:
+            return resolved, None
+        if getattr(obj, "type", None) != "blob":
+            return resolved, None
+        if not _is_symlink_mode(obj.mode):
+            return resolved, obj
+        path, target = resolved, obj.data_stream.read().decode("utf-8", errors="replace")
+    return resolved, None
+
+
+def _delta_side(blob, mode, path, tree):
+    """(content, symlink target) of one side of a diff. A symlink is read through its target in
+    ``tree``, the content a checkout that follows symlinks executes (AUDIT_LOG TYPE01); content is
+    None when the target cannot be resolved."""
+    if blob is None:
+        return None, None
+    if _is_symlink_mode(mode):
+        target = blob.data_stream.read().decode("utf-8", errors="replace")
+        resolved, target_blob = _resolve_symlink(tree, path, target)
+        if target_blob is None:
+            return None, resolved
+        return target_blob.data_stream.read().decode("utf-8", errors="ignore"), resolved
+    return blob.data_stream.read().decode("utf-8", errors="ignore"), None
 
 
 def _blob_text(blob):
@@ -1483,16 +1529,20 @@ class PayloadAnalyzer:
                     for d in diffs:
                         fpath = d.b_path or d.a_path or ""
                         old_p = d.a_path if d.change_type == "R" else None
-                        base_src = None
-                        head_src = None
-                        if d.a_blob is not None and d.change_type in ("D", "M", "R"):
+                        base_src = head_src = base_link = head_link = None
+                        # 'T' is a type change (regular file <-> symlink); both sides exist (AUDIT_LOG TYPE01).
+                        if d.change_type in ("D", "M", "R", "T"):
                             try:
-                                base_src = d.a_blob.data_stream.read().decode("utf-8", errors="ignore")
+                                base_src, base_link = _delta_side(
+                                    d.a_blob, getattr(d, "a_mode", None), d.a_path, merge_base[0].tree
+                                )
                             except Exception:
                                 base_src = None
-                        if d.b_blob is not None and d.change_type in ("A", "M", "R", "C"):
+                        if d.change_type in ("A", "M", "R", "C", "T"):
                             try:
-                                head_src = d.b_blob.data_stream.read().decode("utf-8", errors="ignore")
+                                head_src, head_link = _delta_side(
+                                    d.b_blob, getattr(d, "b_mode", None), fpath, branch_commit.tree
+                                )
                             except Exception:
                                 head_src = None
                         f_add, f_del = per_file_numstat.get(fpath, (0, 0))
@@ -1505,6 +1555,8 @@ class PayloadAnalyzer:
                                 head_source=head_src,
                                 lines_added=f_add,
                                 lines_deleted=f_del,
+                                base_symlink_target=base_link,
+                                head_symlink_target=head_link,
                             )
                         )
 
@@ -2144,11 +2196,22 @@ def _scan_mutable_action_refs(diffs) -> list:
 # Each function inspects one config surface and returns a list of signal dicts.
 # ==============================================================================
 
-def _check_agent_settings_json(content: str) -> list:
-    """Return signals from .claude/settings.json or .gemini/settings.json hook commands."""
+def _json_object(content: str):
+    """Parsed JSON object, or None when ``content`` is not JSON or not an object.
+
+    Valid JSON of another shape (an array, null) must not abort the analysis (AUDIT_LOG BUILD-11).
+    """
     try:
         data = json.loads(content)
     except (json.JSONDecodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _check_agent_settings_json(content: str) -> list:
+    """Return signals from .claude/settings.json or .gemini/settings.json hook commands."""
+    data = _json_object(content)
+    if data is None:
         return []
     hooks_root = data.get('hooks', {})
     if not isinstance(hooks_root, dict):
@@ -2158,7 +2221,7 @@ def _check_agent_settings_json(content: str) -> list:
         if not isinstance(hook_list, list):
             continue
         for entry in hook_list:
-            if not isinstance(entry, dict):
+            if not isinstance(entry, dict) or not isinstance(entry.get('hooks', []), list):
                 continue
             for hook in entry.get('hooks', []):
                 if not isinstance(hook, dict) or hook.get('type') != 'command':
@@ -2175,15 +2238,15 @@ def _check_agent_settings_json(content: str) -> list:
 
 def _check_vscode_tasks(content: str) -> list:
     """Return signals from .vscode/tasks.json folder-open tasks with critical commands."""
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
+    data = _json_object(content)
+    if data is None or not isinstance(data.get('tasks', []), list):
         return []
     signals = []
     for task in data.get('tasks', []):
         if not isinstance(task, dict):
             continue
-        if task.get('runOptions', {}).get('runOn') != 'folderOpen':
+        run_options = task.get('runOptions')
+        if not isinstance(run_options, dict) or run_options.get('runOn') != 'folderOpen':
             continue
         cmd = task.get('command', '')
         if isinstance(cmd, str) and _AI_HOOK_CRITICAL_CMDS.search(cmd):
@@ -2207,9 +2270,8 @@ def _check_cursor_rule(content: str) -> list:
 
 def _check_package_json_scripts(content: str) -> list:
     """Return signals from package.json lifecycle scripts with critical commands."""
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
+    data = _json_object(content)
+    if data is None:
         return []
     scripts = data.get('scripts', {})
     if not isinstance(scripts, dict):
@@ -2225,9 +2287,8 @@ def _check_package_json_scripts(content: str) -> list:
 
 def _check_composer_json(content: str) -> list:
     """Return signals from composer.json lifecycle scripts with critical commands."""
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
+    data = _json_object(content)
+    if data is None:
         return []
     scripts = data.get('scripts', {})
     if not isinstance(scripts, dict):
@@ -2260,9 +2321,8 @@ def _check_binding_gyp(content: str) -> list:
 
 def _check_mcp_json(content: str) -> list:
     """Return signals from mcp.json server entries running repo-local scripts."""
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
+    data = _json_object(content)
+    if data is None:
         return []
     servers = data.get('mcpServers', data.get('servers', {}))
     if not isinstance(servers, dict):

