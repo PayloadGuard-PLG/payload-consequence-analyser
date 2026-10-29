@@ -11,7 +11,7 @@ Three orthogonal verification methods cover the pure scoring logic across four a
 | L3 Consequence | `_assess_consequence()` | `verification/consequence_pure.py` | C-01–C-15 |
 | L4 Structural | `analyze_structural_drift()` | `verification/structural_pure.py` | S1–S7 |
 | L5a Temporal | `analyze_drift()` | `verification/temporal_pure.py` | T1–T7 |
-| L5b Semantic | `analyze_transparency()` phase 3 | `verification/semantic_pure.py` | M1–M9 |
+| L5b Semantic | `analyze_transparency()` phase 3 | `verification/semantic_pure.py` | M1–M11 |
 
 ### Z3 SMT Proofs (Phase 1)
 
@@ -154,7 +154,7 @@ where a single deletion produces a high ratio.
 
 ---
 
-### Layer 5b — Semantic MCI Cross-Correlation (M1–M9)
+### Layer 5b — Semantic MCI Cross-Correlation (M1–M11)
 
 **Target:** `SemanticTransparencyAnalyzer.analyze_transparency()` Phase 3 → `verification/semantic_pure.py`
 
@@ -190,6 +190,10 @@ description — abstracted as `has_unacknowledged_sensitive: bool`.
 | M-07 | `DECEPTIVE_PAYLOAD -> mci_score >= 0.5` | DECEPTIVE_PAYLOAD is only produced by score ≥ 0.5 |
 | M-08 | `TRANSPARENT -> mci_score == 0.0` | TRANSPARENT verdict always has zero MCI |
 | M-09 | `TRANSPARENT -> not is_macro` | Macro-scope claims are never fully transparent |
+| M-10 | `not is_micro -> mci_score == 0.0` | Only a claim of a small (or documentation) change can score; an ordinary description is never a mismatch (AUDIT_LOG SEM-02) |
+| M-11 | `total_churn <= churn_limit and structural_alterations == 0 and not has_unacknowledged_sensitive and ext_count < 3 -> mci_score == 0.0` | A change within the micro limits never scores, whatever the claim |
+
+A documentation claim ("docs", "readme", "changelog") reaches the model as `is_micro` with the profile of the files outside documentation (Phase 2). `tests/proofs/test_crosshair_contracts.py` checks, without CrossHair, that the model returns production's status and score on a 63-case grid of descriptions and diffs.
 
 ---
 

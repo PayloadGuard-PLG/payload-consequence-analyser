@@ -228,13 +228,13 @@ arithmetic).
 | `consequence_pure` | 0 | 454 s | 2 (C-12 `deletion_dim`, `_age_score` bound) | 15 (C-01–C-11, POST-12, POST-15, POST-16, `_content_score` bound) | 0 |
 | `structural_pure` | 0 | 224 s | 0 | 7 (S-01–S-07) | 0 |
 | `temporal_pure` | 0 | 219 s | 0 | 7 (T-01–T-07) | 0 |
-| `semantic_pure` | 0 | 11 s | 9 (M-01–M-09) | 0 | 0 |
+| `semantic_pure` | 0 | 12 s | 10 (M-01–M-10) | 1 (M-11) | 0 |
 
 Before the §V10 fix, `temporal_pure` exited 1 with a counterexample
 (`analyze_drift_pure(0, float("inf"), 0.25, 0.5)` → `drift_score` NaN, violating T-02 and T-05).
 The five pytest wrappers in `tests/proofs/` use a 10 s budget and did not reach that input.
 
-The `consequence_pure` row is from the 2026-10-27 re-run after the §H1 fix (`2bd08af`), which added POST-15, POST-16 and the `_content_score` and `_age_score` helpers (17 conditions; 13 on 2026-10-26, 366 s). The other three modules are unchanged since the 2026-10-26 run. `tests/proofs/test_crosshair_contracts.py` also checks, without CrossHair, that the model scores exactly as `_assess_consequence()` on a 20,736-input grid and that every postcondition holds there.
+The `consequence_pure` row is from the 2026-10-27 re-run after the §H1 fix (`2bd08af`), which added POST-15, POST-16 and the `_content_score` and `_age_score` helpers (17 conditions; 13 on 2026-10-26, 366 s). The `semantic_pure` row is from the 2026-10-29 re-run after the SEM-02 calibration (`da16490`), which changed the V_r condition and added M-10 and M-11; with the previous V_r rule CrossHair refutes both (`compute_mci_pure(True, False, True, True, 0, 0, 0, 0.5, False, churn_limit=0, fix_ir_thresh=0.0)` returns score 0.4). `structural_pure` and `temporal_pure` are unchanged since the 2026-10-26 run. `tests/proofs/test_crosshair_contracts.py` also checks, without CrossHair, that the model scores exactly as `_assess_consequence()` on a 20,736-input grid and that every postcondition holds there.
 
 ### L3 Contracts (C-01–C-15)
 
@@ -293,7 +293,7 @@ returning a NaN drift score (`AUDIT_LOG.md` §V10); `TemporalDriftAnalyzer.analy
 raises `ValueError` for non-finite inputs. Dafny's `real` has no infinity or NaN, so
 `temporal_drift.dfy` was unaffected.
 
-### L5b Contracts (M1–M9)
+### L5b Contracts (M1–M11)
 
 Source: [`verification/semantic_pure.py`](verification/semantic_pure.py)
 
@@ -308,6 +308,8 @@ Source: [`verification/semantic_pure.py`](verification/semantic_pure.py)
 | M-07 | `DECEPTIVE_PAYLOAD → mci_score >= 0.5` |
 | M-08 | `TRANSPARENT → mci_score == 0.0` |
 | M-09 | `TRANSPARENT → not is_macro` |
+| M-10 | `not is_micro → mci_score == 0.0` |
+| M-11 | `churn ≤ churn_limit ∧ no declarations ∧ no unacknowledged sensitive file ∧ ext_count < 3 → mci_score == 0.0` |
 
 ---
 

@@ -56,7 +56,7 @@ CI workflow: https://github.com/PayloadGuard-PLG/payload-consequence-analyser/ac
 - Consequence model: contracts C-01–C-15 (verdict bijection, score bounds, safety-critical floors, empty-input guarantee, branch age never decides DESTRUCTIVE)
 - Structural drift: contracts S1–S7 (dual-gate biconditional — DESTRUCTIVE requires both ratio > threshold AND count >= min)
 - Temporal drift: contracts T1–T7 (drift_score >= 0, status bijection, zero inputs → CURRENT; velocity must be finite)
-- Semantic transparency: contracts M1–M9 (mci_score in [0,1], DECEPTIVE iff score >= 0.5, no description → UNVERIFIED)
+- Semantic transparency: contracts M1–M11 (mci_score in [0,1], DECEPTIVE iff score >= 0.5, no description → UNVERIFIED, no claim of a small change → score 0)
 - Total: 40 postconditions, 0 counterexamples (11 confirmed over all paths; consequence_pure re-run 2026-10-27 after the §H1 fix)
 - Contract files: verification/consequence_pure.py, structural_pure.py, temporal_pure.py, semantic_pure.py
 
@@ -106,7 +106,7 @@ Verdict thresholds: DESTRUCTIVE >= 5, CAUTION >= 3, REVIEW >= 1, SAFE = 0.
 - L4 Structural: AST diff — named class/function/constant deletions for Python, JS/TS (incl. .mjs/.cjs/.mts/.cts), Go, Rust, Java (VERIFIED: CrossHair S1–S7, Dafny S1–S7)
 - L4b Complexity: McCabe V(G) advisory for added Python functions, no score impact
 - L5a Temporal: branch_age_days × target_commits_per_day → drift_score → CURRENT/STALE/DANGEROUS (VERIFIED: CrossHair T1–T7, Dafny T1–T8)
-- L5b Semantic: PR-MCI three-phase heuristic — mci_score in [0,1], DECEPTIVE_PAYLOAD if >= 0.5 (VERIFIED: CrossHair M1–M9)
+- L5b Semantic: PR-MCI three-phase heuristic — mci_score in [0,1], DECEPTIVE_PAYLOAD if >= 0.5 (VERIFIED: CrossHair M1–M11); signals require a description that claims a small or documentation-only change
 - L5c Runtime: eBPF tracepoints — execve, egress connect, ptrace, /proc/mem — audit or block mode
 
 Consequence engine (consequence.v1): 5-stage Semantic Change Graph symbol matching and detectors D01 (parser completeness), D02 (body weakening; source file replaced by a symlink), D03 (compound loss), D04 (public API break, with caller-index coverage), D05 (build/dependency delta), D06 (guard regression; for Python also swallowed, reordered, conditional, deferred and ignored guards and weakened denial conditions), D08 (workflow integrity), D09 (test erosion), D10 (migration persistence loss).
