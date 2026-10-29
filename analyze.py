@@ -192,20 +192,35 @@ _ACTIONS_GITHUB_ENV_INJECTION = re.compile(
 #   V_s  Scope Adequacy        — description verbosity vs diff churn
 #   V_o  Operation Mutation    — claimed op type vs structural alterations
 #   V_f  File-Type Verify      — sensitive files in diff not acknowledged
-#   V_r  Phantom Additions     — remedial claim + high insertion ratio
+#   V_r  Phantom Additions     — micro remedial claim + large, almost all-addition diff
 #   V_e  Cross-stack micro     — micro claim touches ≥3 distinct file types
+# Every signal requires a micro claim (AUDIT_LOG SEM-02).
 # ==============================================================================
 
+# Words that claim the change is small. 'grammar' and 'cleanup' were removed: in real
+# descriptions they named what the code does ("output grammar", "scratch cleanup"), not the
+# size of the change (AUDIT_LOG SEM-02).
 _SEMANTIC_MICRO_SCOPE = frozenset({
     'typo', 'minor', 'trivial', 'small', 'cosmetic', 'syntax', 'formatting',
-    'cleanup', 'whitespace', 'indent', 'comment', 'docs', 'readme', 'changelog',
-    'spelling', 'grammar', 'style', 'lint', 'nit', 'docstring',
+    'whitespace', 'indent', 'comment', 'spelling', 'style', 'lint', 'nit', 'docstring',
 })
+# Words that claim the change is documentation. Such a claim is a micro claim about the files
+# outside documentation: the micro signals are measured on those files only.
+_SEMANTIC_DOCS_SCOPE = frozenset({'docs', 'readme', 'changelog'})
+# 'complete' was removed: in real descriptions it was a verb or ordinary adjective
+# ("Complete versioned observations", "complete replay"), not a scope claim.
 _SEMANTIC_MACRO_SCOPE = frozenset({
-    'massive', 'major', 'complete', 'total', 'overhaul', 'rewrite', 'rework',
+    'massive', 'major', 'total', 'overhaul', 'rewrite', 'rework',
     'architecture', 'architectural', 'global', 'substantial', 'large',
     'significant', 'comprehensive', 'entire',
 })
+# Documentation and its image assets. Files under docs/ with other extensions (conf.py,
+# scripts) and .txt files (requirements.txt) are not documentation.
+_SEMANTIC_DOC_FILE_RE = re.compile(
+    r'\.(?:md|mdx|rst|adoc|png|jpe?g|gif|svg|webp)$'
+    r'|(?:^|/)(?:README|CHANGELOG|CHANGES|HISTORY|LICENSE|NOTICE|AUTHORS|CONTRIBUTING)(?:\.(?:md|rst|txt|adoc))?$',
+    re.IGNORECASE,
+)
 _SEMANTIC_ADDITIVE_STEMS    = frozenset({'add', 'implement', 'creat', 'introduc', 'integrat', 'build', 'extend', 'new'})
 _SEMANTIC_DESTRUCTIVE_STEMS = frozenset({'remov', 'delet', 'drop', 'deprecat', 'destroy', 'clean', 'purg', 'strip'})
 _SEMANTIC_MUTATIVE_STEMS    = frozenset({'updat', 'modif', 'refactor', 'rewrit', 'restructur', 'bump', 'chang', 'migrat', 'replac'})
@@ -974,6 +989,8 @@ class SemanticTransparencyAnalyzer:
             scope = 'micro'
         elif raw & _SEMANTIC_MACRO_SCOPE:
             scope = 'macro'
+        elif raw & _SEMANTIC_DOCS_SCOPE:
+            scope = 'docs'
 
         dominant_op = 'unspecified'
         for op_name, op_set in [
@@ -990,8 +1007,11 @@ class SemanticTransparencyAnalyzer:
 
     # ── Phase 2: Diff Profiler ────────────────────────────────────────────────
 
-    def _profile_diff(self) -> dict:
-        """Extract Diff Reality Object: churn, extensions, structural alterations."""
+    def _profile_diff(self, outside_docs: bool = False) -> dict:
+        """Extract Diff Reality Object: churn, extensions, structural alterations.
+
+        With ``outside_docs`` only files that are not documentation are profiled.
+        """
         lines_added = lines_deleted = structural_alterations = 0
         extensions: set = set()
         sensitive_paths: list = []
@@ -1004,6 +1024,8 @@ class SemanticTransparencyAnalyzer:
             path = d.b_path or getattr(d, 'a_path', '') or ''
             if not isinstance(path, str):
                 path = ''
+            if outside_docs and _SEMANTIC_DOC_FILE_RE.search(path):
+                continue
             if path:
                 ext = Path(path).suffix.lower()
                 if ext:
@@ -1063,21 +1085,29 @@ class SemanticTransparencyAnalyzer:
         churn_limit   = self.config.get('micro_scope_churn_limit', 50)
         fix_ir_thresh = self.config.get('insertion_ratio_fix_threshold', 0.9)
 
+        # A documentation claim says the change outside documentation is micro, so the micro
+        # signals measure only the files that are not documentation (AUDIT_LOG SEM-02).
+        is_micro = claim['scope'] in ('micro', 'docs')
+        measured = reality
+        if claim['scope'] == 'docs':
+            measured = self._profile_diff(outside_docs=True)
+            reality['outside_documentation'] = measured
+
         # V_s — Scope Adequacy: micro claim but large churn
-        if claim['scope'] == 'micro' and reality['total_churn'] > churn_limit:
+        if is_micro and measured['total_churn'] > churn_limit:
             signals.append('scope_understated')
             mci_score += 0.4
 
         # V_o — Operation Mutation: micro claim + new structural declarations
-        if claim['scope'] == 'micro' and reality['structural_alterations'] > 0:
+        if is_micro and measured['structural_alterations'] > 0:
             signals.append('operation_mutation')
             mci_score += 0.3
 
         # V_f — Hidden Component: sensitive file modified but not named in description
-        if reality['sensitive_paths'] and claim['scope'] == 'micro':
+        if measured['sensitive_paths'] and is_micro:
             desc_lower = self.pr_description.lower()
             unacknowledged = [
-                p for p in reality['sensitive_paths']
+                p for p in measured['sensitive_paths']
                 if not any(part.lower() in desc_lower
                            for part in Path(p).parts[-2:] if len(part) > 2)
             ]
@@ -1085,13 +1115,17 @@ class SemanticTransparencyAnalyzer:
                 signals.append('hidden_component_modification')
                 mci_score += 0.3
 
-        # V_r — Phantom Additions: "fix" claim but diff is almost entirely additions
-        if claim['dominant_op'] == 'remedial' and reality['insertion_ratio'] > fix_ir_thresh:
+        # V_r — Phantom Additions: a micro "fix" whose large diff is almost entirely additions.
+        # Without the micro claim and the churn limit it fired on ordinary bug fixes that add code
+        # (AUDIT_LOG SEM-02).
+        if (is_micro and claim['dominant_op'] == 'remedial'
+                and measured['total_churn'] > churn_limit
+                and measured['insertion_ratio'] > fix_ir_thresh):
             signals.append('phantom_additions')
             mci_score += 0.4
 
         # V_e — Cross-stack micro claim: touches ≥3 distinct file types
-        if claim['scope'] == 'micro' and reality['ext_count'] >= 3:
+        if is_micro and measured['ext_count'] >= 3:
             signals.append('cross_stack_micro_claim')
             mci_score += 0.2
 
