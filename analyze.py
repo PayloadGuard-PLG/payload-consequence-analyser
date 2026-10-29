@@ -25,7 +25,10 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Union
 from dataclasses import dataclass, field
+import io
 import os
+import posixpath
+import tokenize
 import structural_parser
 import consequence_engine
 
@@ -351,9 +354,11 @@ _AI_HOOK_CRITICAL_CMDS = re.compile(
     re.IGNORECASE,
 )
 
-# Hidden Unicode: zero-width chars, bidi controls, invisible tag block.
+# Hidden Unicode: zero-width chars, bidi controls and isolates, BOM, invisible tag block
+# (U+E0000-U+E007F). Written as escapes: the former literal class contained the range
+# '0'-U+E007, which matched ordinary ASCII text (AUDIT_LOG FP-01).
 _HIDDEN_UNICODE_RE = re.compile(
-    r'[​-‍‪-‮⁦-⁩﻿0-f]'
+    '[\u200b-\u200d\u202a-\u202e\u2066-\u2069\ufeff\U000e0000-\U000e007f]'
 )
 
 # Gemfile top-level execution primitives.
@@ -377,6 +382,10 @@ _CURSOR_EXEC_IMPERATIVE_RE = re.compile(
     r'(`[^`]+`|run\s+`|\bnode\s+\S|\bcurl\s+\S|\bexecute\b)',
     re.IGNORECASE,
 )
+
+# Change types whose head content is active at the head path. A rename or copy activates
+# content at a config or workflow path just as an addition does (AUDIT_LOG MOVE-01).
+_ACTIVATING_CHANGE_TYPES = ('A', 'M', 'R', 'C')
 
 # Package.json lifecycle keys that auto-execute on install/build.
 _PACKAGE_LIFECYCLE_KEYS = frozenset({
@@ -406,6 +415,126 @@ _MANIFEST_ALLOWLIST_KEY = {
     "npm": "npm", "go": "go", "cargo": "rust",
 }
 
+
+def _manifest_type(path: str):
+    """SCA manifest type of ``path`` ('pip', 'npm', ...), or None."""
+    return next((mt for pat, mt in _MANIFEST_PATTERNS.items() if re.search(pat, path)), None)
+
+
+_GIT_SYMLINK_MODE = 0o120000
+
+
+def _is_symlink_mode(mode) -> bool:
+    return isinstance(mode, int) and mode & 0o170000 == _GIT_SYMLINK_MODE
+
+
+def _resolve_symlink(tree, link_path: str, target: str, max_hops: int = 8):
+    """Resolve a Git symlink inside ``tree``: (resolved path, blob), with blob None when the link
+    leaves the tree, is absolute, dangles, names a directory or exceeds ``max_hops``."""
+    path = link_path
+    resolved = target
+    for _ in range(max_hops):
+        if target.startswith("/"):
+            return target, None
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
+        if resolved == ".." or resolved.startswith("../"):
+            return resolved, None
+        try:
+            obj = tree / resolved
+        except KeyError:
+            return resolved, None
+        if getattr(obj, "type", None) != "blob":
+            return resolved, None
+        if not _is_symlink_mode(obj.mode):
+            return resolved, obj
+        path, target = resolved, obj.data_stream.read().decode("utf-8", errors="replace")
+    return resolved, None
+
+
+def _decode_source(data: bytes, path: str):
+    """(text, error) for source bytes decoded as their language reads them (AUDIT_LOG ENC01).
+
+    Python honours a PEP 263 coding declaration or BOM (default UTF-8); other files are read as
+    UTF-8. Bytes invalid in that encoding are decoded as Latin-1, which keeps every byte
+    distinct, and the error is returned so the parse is reported incomplete. The former
+    decode('utf-8', errors='ignore') dropped such bytes, so distinct identifiers compared equal.
+    """
+    encoding = "utf-8"
+    if path.endswith((".py", ".pyw")):
+        try:
+            encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
+        except SyntaxError as e:
+            # CPython rejects the file with the same message at import.
+            return data.decode("latin-1"), f"rejected by Python ({e})"
+    try:
+        text = data.decode(encoding)
+    except (UnicodeDecodeError, LookupError) as e:
+        return data.decode("latin-1"), f"not valid {encoding} ({e})"
+    return text.removeprefix("﻿"), None
+
+
+_IDENTIFIER_RE = re.compile(r"[^\W\d]\w*")
+
+
+def _files_referencing(commit, names, max_files: int) -> dict:
+    """{path: source} of head source files that mention any of ``names`` as a whole word
+    (git grep on ``commit``), so callers of changed symbols are indexed before the
+    max_repo_files budget is spent on unrelated files (AUDIT_LOG IDX-02)."""
+    words = sorted({n for n in names if _IDENTIFIER_RE.fullmatch(n)})
+    prefix = f"{commit.hexsha}:"
+    paths: list = []
+    for i in range(0, len(words), 100):
+        args = ["-l", "-I", "-w", "-F", "--no-color"]
+        for word in words[i:i + 100]:
+            args += ["-e", word]
+        try:
+            out = commit.repo.git.grep(*args, commit.hexsha)
+        except git.exc.GitCommandError:
+            continue  # exit status 1: no file matches
+        for line in out.splitlines():
+            path = line[len(prefix):] if line.startswith(prefix) else line
+            if structural_parser.language_for_path(path) is not None and path not in paths:
+                paths.append(path)
+    files = {}
+    for path in sorted(paths)[:max_files]:
+        try:
+            obj = commit.tree / path
+            if not _is_symlink_mode(obj.mode):
+                files[path] = _decode_source(obj.data_stream.read(), path)[0]
+        except Exception:
+            continue
+    return files
+
+
+def _delta_side(blob, mode, path, tree):
+    """(content, symlink target, decode error) of one side of a diff. A symlink is read through
+    its target in ``tree``, the content a checkout that follows symlinks executes (AUDIT_LOG
+    TYPE01); content is None when the target cannot be resolved."""
+    if blob is None:
+        return None, None, None
+    if _is_symlink_mode(mode):
+        target = blob.data_stream.read().decode("utf-8", errors="replace")
+        resolved, target_blob = _resolve_symlink(tree, path, target)
+        if target_blob is None:
+            return None, resolved, None
+        text, error = _decode_source(target_blob.data_stream.read(), resolved)
+        return text, resolved, error
+    text, error = _decode_source(blob.data_stream.read(), path)
+    return text, None, error
+
+
+def _blob_text(blob):
+    """UTF-8 text of a Git blob, or None when the blob is absent or unreadable."""
+    if blob is None:
+        return None
+    try:
+        data = blob.data_stream.read()
+    except Exception:
+        return None
+    if not isinstance(data, (bytes, bytearray)):
+        return None
+    return bytes(data).decode('utf-8', errors='replace')
+
 _TOML_SKIP_KEYS = {"name", "version", "edition", "authors", "description", "license", "readme", "build"}
 _JSON_SKIP_KEYS = {
     "version", "description", "name", "main", "scripts", "keywords",
@@ -431,8 +560,10 @@ def _parse_added_packages(diff_text: str, manifest_type: str) -> list:
                 if pkg not in _TOML_SKIP_KEYS:
                     packages.append(pkg)
         elif manifest_type == "npm":
-            m = re.match(r'^"([^"]+)"\s*:', content)
-            if m:
+            # A key whose value opens an object or array names a section, not a package
+            # (AUDIT_LOG BUILD-07). Used only when package.json does not parse as JSON.
+            m = re.match(r'^"([^"]+)"\s*:\s*([{\[])?', content)
+            if m and not m.group(2):
                 pkg = m.group(1)
                 if pkg not in _JSON_SKIP_KEYS:
                     packages.append(pkg)
@@ -447,6 +578,61 @@ def _parse_added_packages(diff_text: str, manifest_type: str) -> list:
                 if pkg not in _TOML_SKIP_KEYS:
                     packages.append(pkg)
     return packages
+
+
+_NPM_DEPENDENCY_SECTIONS = (
+    "dependencies", "devDependencies", "peerDependencies", "optionalDependencies",
+)
+_NPM_OVERRIDE_SECTIONS = ("overrides", "resolutions")
+
+
+def _npm_package_name(key: str) -> str:
+    """Package name from an overrides/resolutions key: 'a/**/@s/b@^1' -> '@s/b'."""
+    segments = [s for s in key.split("/") if s and s != "**"]
+    if not segments:
+        return key
+    name = "/".join(segments[-2:]) if len(segments) >= 2 and segments[-2].startswith("@") else segments[-1]
+    at = name.rfind("@")
+    return name[:at] if at > 0 else name
+
+
+def _npm_dependency_entries(text: str):
+    """Set of (section, package, spec) entries in a package.json, or None when it is not a JSON object."""
+    data = json.loads(text) if text.strip() else {}
+    if not isinstance(data, dict):
+        return None
+    entries = set()
+    for section in _NPM_DEPENDENCY_SECTIONS:
+        deps = data.get(section)
+        if isinstance(deps, dict):
+            for name, spec in deps.items():
+                entries.add((section, name, json.dumps(spec, sort_keys=True)))
+
+    def _walk_overrides(section, node):
+        for key, value in node.items():
+            if key != ".":
+                entries.add((section, _npm_package_name(key), json.dumps(value, sort_keys=True)))
+            if isinstance(value, dict):
+                _walk_overrides(section, value)
+
+    for section in _NPM_OVERRIDE_SECTIONS:
+        if isinstance(data.get(section), dict):
+            _walk_overrides(section, data[section])
+    return entries
+
+
+def _npm_added_packages(base_text: str, head_text: str):
+    """Packages added or re-specified in a package.json's dependency, overrides and resolutions
+    sections (AUDIT_LOG BUILD-07). Returns None when either side does not parse, so the caller
+    falls back to the diff-line parser."""
+    try:
+        base = _npm_dependency_entries(base_text)
+        head = _npm_dependency_entries(head_text)
+    except (ValueError, TypeError):
+        return None
+    if base is None or head is None:
+        return None
+    return sorted({name for _section, name, _spec in head - base})
 
 
 def _normalize_yaml_content(content: str) -> str:
@@ -1256,8 +1442,8 @@ class PayloadAnalyzer:
                 if structural_parser.language_for_path(path) is None:
                     continue
                 try:
-                    original = d.a_blob.data_stream.read().decode('utf-8', errors='ignore')
-                    modified = d.b_blob.data_stream.read().decode('utf-8', errors='ignore')
+                    original = _decode_source(d.a_blob.data_stream.read(), path)[0]
+                    modified = _decode_source(d.b_blob.data_stream.read(), path)[0]
                     result = StructuralPayloadAnalyzer(
                         original, modified,
                         file_path=path,
@@ -1330,21 +1516,35 @@ class PayloadAnalyzer:
             sca_manifests_scanned: list = []
             if allowlist is not None:
                 for d in diffs:
-                    if d.change_type not in ('A', 'M'):
+                    if d.change_type not in _ACTIVATING_CHANGE_TYPES:
                         continue
                     path = d.b_path or d.a_path or ''
-                    manifest_type = next(
-                        (mt for pat, mt in _MANIFEST_PATTERNS.items() if re.search(pat, path)),
-                        None,
-                    )
+                    manifest_type = _manifest_type(path)
                     if manifest_type is None:
                         continue
                     sca_manifests_scanned.append(path)
                     allowlist_key = _MANIFEST_ALLOWLIST_KEY.get(manifest_type, manifest_type)
                     allowed = allowlist.get(allowlist_key, set())
+                    # A manifest renamed from a path of another type is new in full (AUDIT_LOG MOVE-01).
+                    old_path = d.a_path if d.change_type in ('R', 'C') else None
+                    activated = d.change_type == 'A' or (
+                        old_path is not None and _manifest_type(old_path) != manifest_type
+                    )
                     try:
-                        diff_text = self.repo.git.diff(merge_base[0].hexsha, branch_ref, '--', path)
-                        added_pkgs = _parse_added_packages(diff_text, manifest_type)
+                        added_pkgs = None
+                        if manifest_type == "npm":
+                            head_text = _blob_text(d.b_blob)
+                            base_text = "" if activated else _blob_text(d.a_blob)
+                            if head_text is not None and base_text is not None:
+                                added_pkgs = _npm_added_packages(base_text, head_text)
+                        if added_pkgs is None:
+                            if old_path is not None and not activated:
+                                diff_text = self.repo.git.diff(
+                                    '-M', merge_base[0].hexsha, branch_ref, '--', old_path, path
+                                )
+                            else:
+                                diff_text = self.repo.git.diff(merge_base[0].hexsha, branch_ref, '--', path)
+                            added_pkgs = _parse_added_packages(diff_text, manifest_type)
                         seen = set()
                         for pkg in added_pkgs:
                             if pkg not in allowed and pkg not in seen:
@@ -1388,16 +1588,20 @@ class PayloadAnalyzer:
                     for d in diffs:
                         fpath = d.b_path or d.a_path or ""
                         old_p = d.a_path if d.change_type == "R" else None
-                        base_src = None
-                        head_src = None
-                        if d.a_blob is not None and d.change_type in ("D", "M", "R"):
+                        base_src = head_src = base_link = head_link = base_err = head_err = None
+                        # 'T' is a type change (regular file <-> symlink); both sides exist (AUDIT_LOG TYPE01).
+                        if d.change_type in ("D", "M", "R", "T"):
                             try:
-                                base_src = d.a_blob.data_stream.read().decode("utf-8", errors="ignore")
+                                base_src, base_link, base_err = _delta_side(
+                                    d.a_blob, getattr(d, "a_mode", None), d.a_path, merge_base[0].tree
+                                )
                             except Exception:
                                 base_src = None
-                        if d.b_blob is not None and d.change_type in ("A", "M", "R"):
+                        if d.change_type in ("A", "M", "R", "C", "T"):
                             try:
-                                head_src = d.b_blob.data_stream.read().decode("utf-8", errors="ignore")
+                                head_src, head_link, head_err = _delta_side(
+                                    d.b_blob, getattr(d, "b_mode", None), fpath, branch_commit.tree
+                                )
                             except Exception:
                                 head_src = None
                         f_add, f_del = per_file_numstat.get(fpath, (0, 0))
@@ -1410,32 +1614,47 @@ class PayloadAnalyzer:
                                 head_source=head_src,
                                 lines_added=f_add,
                                 lines_deleted=f_del,
+                                base_symlink_target=base_link,
+                                head_symlink_target=head_link,
+                                base_decode_error=base_err,
+                                head_decode_error=head_err,
                             )
                         )
 
+                    # Head source files for the cross-file caller index. Every source file is
+                    # counted so the report can state how much of the repository was indexed
+                    # (AUDIT_LOG IDX-02); symlinks are not indexed as files of their own.
                     repo_head_files: dict[str, str] = {}
+                    repo_source_file_count = 0
                     try:
-                        count_blobs = 0
                         for item in branch_commit.tree.traverse():
-                            if getattr(item, "type", None) != "blob":
+                            if getattr(item, "type", None) != "blob" or _is_symlink_mode(getattr(item, "mode", None)):
                                 continue
                             if structural_parser.language_for_path(item.path) is None:
                                 continue
-                            if count_blobs >= max_repo_files:
-                                break
+                            repo_source_file_count += 1
+                            if len(repo_head_files) >= max_repo_files:
+                                continue
                             try:
-                                repo_head_files[item.path] = item.data_stream.read().decode("utf-8", errors="ignore")
-                                count_blobs += 1
+                                repo_head_files[item.path] = _decode_source(item.data_stream.read(), item.path)[0]
                             except Exception:
                                 pass
                     except Exception:
-                        pass
+                        repo_source_file_count = 0
+
+                    def _reference_loader(names):
+                        return _files_referencing(branch_commit, names, max_repo_files)
 
                     c_engine = consequence_engine.ConsequenceEngine(
                         mode=consequence_mode,
                         max_repo_files=max_repo_files,
                     )
-                    c_report = c_engine.analyze_deltas(file_deltas, repo_head_files)
+                    c_report = c_engine.analyze_deltas(
+                        file_deltas,
+                        repo_head_files,
+                        reference_loader=_reference_loader,
+                        repo_source_file_count=repo_source_file_count or None,
+                    )
                     consequence_report_dict = c_report.to_dict()
 
                     # In enforce mode, if legacy L4 flagged CRITICAL solely due to pure renames/moves
@@ -1512,9 +1731,16 @@ class PayloadAnalyzer:
             ).analyze_drift()
 
             # LAYER 5b: SEMANTIC TRANSPARENCY (v2 — PR-MCI heuristic engine)
+            # The diff profiler reads patch text, which `diffs` does not carry: without it every
+            # change measured zero churn and no added declarations (AUDIT_LOG SEM-01). The patch
+            # diffs are used here only; GitPython leaves their change_type unset.
+            try:
+                patch_diffs = merge_base[0].diff(branch_ref, create_patch=True)
+            except Exception:
+                patch_diffs = diffs
             semantic = SemanticTransparencyAnalyzer(
                 pr_description=pr_description,
-                diffs=diffs,
+                diffs=patch_diffs,
                 config=self.config.semantic,
             ).analyze_transparency()
             _apply_semantic_transparency(verdict, semantic)
@@ -1824,12 +2050,13 @@ class PayloadAnalyzer:
         return flags
 
     def _scan_ai_tooling_configs(self, diffs) -> list:
-        """Scan added and modified AI tooling config files for auto-execution poisoning signals."""
+        """Scan AI tooling config files that are added, modified, or renamed or copied into a
+        config path for auto-execution poisoning signals (AUDIT_LOG MOVE-01)."""
         if not self.config.actions.get("enabled", True):
             return []
         flags = []
         for d in diffs:
-            if d.change_type not in ('A', 'M'):
+            if d.change_type not in _ACTIVATING_CHANGE_TYPES:
                 continue
             path = d.b_path or d.a_path or ''
             if not isinstance(path, str) or not _AI_CONFIG_PATH_RE.search(path):
@@ -1859,7 +2086,8 @@ class PayloadAnalyzer:
             elif filename == 'mcp.json':
                 signals.extend(_check_mcp_json(content))
 
-            if _HIDDEN_UNICODE_RE.search(content):
+            # A byte order mark at the start of the file is encoding metadata, not hidden text.
+            if _HIDDEN_UNICODE_RE.search(content.removeprefix('﻿')):
                 signals.append({'type': 'hidden_unicode', 'pattern': 'non-printing Unicode character'})
 
             if signals:
@@ -1999,9 +2227,10 @@ class PayloadAnalyzer:
 
 
 def _iter_workflow_file_diffs(diffs):
-    """Yield (path, content, diff) for each added/modified workflow file in diffs."""
+    """Yield (path, content, diff) for each workflow file in diffs that is added, modified, or
+    renamed or copied into the workflow directory (AUDIT_LOG MOVE-01)."""
     for d in diffs:
-        if d.change_type not in ('A', 'M'):
+        if d.change_type not in _ACTIVATING_CHANGE_TYPES:
             continue
         path = d.b_path or d.a_path or ''
         if not isinstance(path, str) or not re.search(_ACTIONS_WORKFLOW_PATTERN, path):
@@ -2039,11 +2268,22 @@ def _scan_mutable_action_refs(diffs) -> list:
 # Each function inspects one config surface and returns a list of signal dicts.
 # ==============================================================================
 
-def _check_agent_settings_json(content: str) -> list:
-    """Return signals from .claude/settings.json or .gemini/settings.json hook commands."""
+def _json_object(content: str):
+    """Parsed JSON object, or None when ``content`` is not JSON or not an object.
+
+    Valid JSON of another shape (an array, null) must not abort the analysis (AUDIT_LOG BUILD-11).
+    """
     try:
         data = json.loads(content)
     except (json.JSONDecodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _check_agent_settings_json(content: str) -> list:
+    """Return signals from .claude/settings.json or .gemini/settings.json hook commands."""
+    data = _json_object(content)
+    if data is None:
         return []
     hooks_root = data.get('hooks', {})
     if not isinstance(hooks_root, dict):
@@ -2053,7 +2293,7 @@ def _check_agent_settings_json(content: str) -> list:
         if not isinstance(hook_list, list):
             continue
         for entry in hook_list:
-            if not isinstance(entry, dict):
+            if not isinstance(entry, dict) or not isinstance(entry.get('hooks', []), list):
                 continue
             for hook in entry.get('hooks', []):
                 if not isinstance(hook, dict) or hook.get('type') != 'command':
@@ -2070,15 +2310,15 @@ def _check_agent_settings_json(content: str) -> list:
 
 def _check_vscode_tasks(content: str) -> list:
     """Return signals from .vscode/tasks.json folder-open tasks with critical commands."""
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
+    data = _json_object(content)
+    if data is None or not isinstance(data.get('tasks', []), list):
         return []
     signals = []
     for task in data.get('tasks', []):
         if not isinstance(task, dict):
             continue
-        if task.get('runOptions', {}).get('runOn') != 'folderOpen':
+        run_options = task.get('runOptions')
+        if not isinstance(run_options, dict) or run_options.get('runOn') != 'folderOpen':
             continue
         cmd = task.get('command', '')
         if isinstance(cmd, str) and _AI_HOOK_CRITICAL_CMDS.search(cmd):
@@ -2102,9 +2342,8 @@ def _check_cursor_rule(content: str) -> list:
 
 def _check_package_json_scripts(content: str) -> list:
     """Return signals from package.json lifecycle scripts with critical commands."""
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
+    data = _json_object(content)
+    if data is None:
         return []
     scripts = data.get('scripts', {})
     if not isinstance(scripts, dict):
@@ -2120,9 +2359,8 @@ def _check_package_json_scripts(content: str) -> list:
 
 def _check_composer_json(content: str) -> list:
     """Return signals from composer.json lifecycle scripts with critical commands."""
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
+    data = _json_object(content)
+    if data is None:
         return []
     scripts = data.get('scripts', {})
     if not isinstance(scripts, dict):
@@ -2155,9 +2393,8 @@ def _check_binding_gyp(content: str) -> list:
 
 def _check_mcp_json(content: str) -> list:
     """Return signals from mcp.json server entries running repo-local scripts."""
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
+    data = _json_object(content)
+    if data is None:
         return []
     servers = data.get('mcpServers', data.get('servers', {}))
     if not isinstance(servers, dict):

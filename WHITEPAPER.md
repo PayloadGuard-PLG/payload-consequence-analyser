@@ -138,12 +138,12 @@ git.Repo(workspace)
   │       added_file_flags = _scan_added_file_content(diffs)
   │
   ├─[L2b] SCA — Dependency Scanning (opt-in)
-  │        manifest_diffs = added/modified requirements*.txt|package.json|go.mod|Cargo.toml|Gemfile
+  │        manifest_diffs = added/modified/renamed requirements*.txt|pyproject.toml|package.json|go.mod|Cargo.toml
   │        unverified     = packages not in allowlist.yml
-  │        score          = +3 per unique unverified package
+  │        score          = +3 once when any package is unverified
   │
   ├─[L2c] Actions Poisoning Detection
-  │        workflow_diffs = added/modified .github/workflows/**/*.yml
+  │        workflow_diffs = added/modified/renamed/copied .github/workflows/**/*.yml
   │        signals        = base64_payload | credential_harvest | prt_with_write |
   │                         dormant_trigger | forged_bot_author | oidc_elevation |
   │                         dangerous_prt
@@ -160,7 +160,7 @@ git.Repo(workspace)
   │
   ├─[L5b] Semantic Transparency
   │        Phase 1: _extract_claim(pr_description) → scope, dominant_op, raw_tokens
-  │        Phase 2: _profile_diff(diffs) → churn, insertion_ratio, ext_count,
+  │        Phase 2: _profile_diff(patch diffs) → churn, insertion_ratio, ext_count,
   │                                        structural_alterations, sensitive_paths
   │        Phase 3: cross-correlate → mci_score ∈ [0,1]
   │        mci_score ≥ 0.5 → DECEPTIVE_PAYLOAD (escalates verdict)
@@ -257,9 +257,13 @@ authorization[^/]*\.(py|js|ts)
 
 **Algorithm:**
 ```python
-for diff in diffs where change_type in ('A', 'M'):
+for diff in diffs where change_type in ('A', 'M', 'R', 'C'):
     if path matches _MANIFEST_PATTERNS:
-        added_packages = _parse_added_packages(diff)
+        # package.json: JSON entries added or changed in dependencies, devDependencies,
+        # peerDependencies, optionalDependencies, overrides, resolutions (_npm_added_packages);
+        # other manifests, or package.json that does not parse: added diff lines.
+        # A manifest renamed from a path of another type is compared with an empty base.
+        added_packages = _npm_added_packages(base, head) or _parse_added_packages(diff)
         for pkg in added_packages:
             if pkg not in allowlist[ecosystem_key]:      # python | npm | go | rust
                 unverified_packages.add(pkg)
@@ -280,7 +284,7 @@ Any unverified package adds +3 points once, regardless of how many are listed, s
 
 **Purpose:** Detect CI pipeline poisoning in added or modified workflow files. This layer targets the specific techniques used to poison GitHub Actions pipelines — base64 payload delivery, credential exfiltration, privilege escalation — which are invisible to structural drift analysis (which operates on source code ASTs, not YAML) and to L2 forensic analysis (which operates on file deletions, not content of added files).
 
-**Scope:** All added (`A`) and modified (`M`) files matching `.github/workflows/**/*.yml`, `.github/workflows/**/*.yaml`, `.github/actions/**/*.yml`, `.github/actions/**/*.yaml`.
+**Scope:** All added (`A`), modified (`M`), renamed (`R`) and copied (`C`) files matching `.github/workflows/**/*.yml`, `.github/workflows/**/*.yaml`, `.github/actions/**/*.yml`, `.github/actions/**/*.yaml`.
 
 **Signal types:**
 
@@ -311,7 +315,7 @@ A single CRITICAL signal is sufficient to reach DESTRUCTIVE (score ≥ 5). A sin
 
 ### 4.2d Layer 2d — AI Tooling Configuration Poisoning
 
-**Purpose:** Detect added or modified configuration that makes developer tools or package managers execute commands when a repository is opened, installed or loaded by an AI coding assistant.
+**Purpose:** Detect added, modified, renamed or copied configuration that makes developer tools or package managers execute commands when a repository is opened, installed or loaded by an AI coding assistant.
 
 **Surfaces (`_AI_CONFIG_PATH_RE`):** `.claude/settings.json`, `.gemini/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `mcp.json`, `composer.json`, `Gemfile`, `binding.gyp`, `package.json`.
 
@@ -325,9 +329,9 @@ A single CRITICAL signal is sufficient to reach DESTRUCTIVE (score ≥ 5). A sin
 | `binding_gyp_command_substitution` | `_check_binding_gyp` | CRITICAL |
 | `cursor_nl_exec_imperative` | `_check_cursor_rule` | HIGH |
 | `mcp_local_server_command` | `_check_mcp_json` | HIGH |
-| `hidden_unicode` | all surfaces | HIGH |
+| `hidden_unicode` | all surfaces: U+200B–U+200D, U+202A–U+202E, U+2066–U+2069, U+FEFF (not as the first character), U+E0000–U+E007F | HIGH |
 
-**Scoring:** any CRITICAL signal adds +5 (DESTRUCTIVE floor, Dafny POST-12); otherwise any HIGH signal adds +3. These paths are excluded from the added-file content scanner, so a signal is not scored twice.
+**Scoring:** any CRITICAL signal adds +5 (DESTRUCTIVE floor, Dafny POST-12); otherwise any HIGH signal adds +3. These paths are excluded from the added-file content scanner, so a signal is not scored twice. JSON surfaces are read with `_json_object()`; valid JSON of an unexpected shape is skipped rather than aborting the analysis.
 
 **Outputs:** `ai_config_poisoning` dict with `flagged_configs` list and `total`.
 
@@ -442,7 +446,7 @@ Sanitises markdown (strips code fences, inline code, link syntax, formatting cha
 
 **Phase 2 — Diff Profiler** (`_profile_diff`):
 
-Walks GitPython diff objects. For each diff: extracts file extension; checks path against `_SEMANTIC_SENSITIVE_PATHS` (`.github/workflows/`, auth files, package manifests, Dockerfiles, schema/migration files, secrets); counts added and deleted lines from the unified diff bytes; detects structural additions (lines matching `+def `, `+class `, `+async def `, `+function `, `+interface `, `+struct `).
+Walks a GitPython patch diff (`create_patch=True`; the diff used by the other layers carries no patch text). For each diff: extracts file extension; checks path against `_SEMANTIC_SENSITIVE_PATHS` (`.github/workflows/`, auth files, package manifests, Dockerfiles, schema/migration files, secrets); counts added and deleted lines from the unified diff bytes; detects structural additions (lines matching `+def `, `+class `, `+async def `, `+function `, `+interface `, `+struct `).
 
 Computes: `total_churn = lines_added + lines_deleted`, `insertion_ratio = lines_added / total_churn`.
 
@@ -521,15 +525,18 @@ Unlike L1–L4, L5b adds no evidence points: it raises the verdict produced by L
    - Stage 4: Container rename by member overlap (cascading to members), function rename with identical body hash and signature, same-scope replacement by a no-op stub (`RENAMED` / `RENAMED_AND_GUTTED` / `AMBIGUOUS`)
    - Stage 5: Unmatched symbols classified as `REMOVED` or `ADDED`
 3. **Detectors `D01`–`D10`:**
-   - `D01_PARSER_INCOMPLETE`: syntax errors, missing grammars, and changed source in languages without a parser (`ANALYSIS_INCOMPLETE`; WARN, or REVIEW for a head-side parse error).
+   - `D01_PARSER_INCOMPLETE`: syntax errors, missing grammars, changed source in languages without a parser, source bytes invalid in the language's encoding, symlinks that do not resolve inside the repository (`ANALYSIS_INCOMPLETE`; one finding per file and status, WARN, or REVIEW when the head has a parse error or unresolved link); unparsable files in the caller index when `D04` reports an API change (`PG-D01-INDEX`, WARN).
+   - `D02_STRUCTURAL_DELTA`: a source file replaced by, or re-pointed as, a symlink (`SOURCE_REPLACED_BY_SYMLINK`, REVIEW); the symbol-level detectors analyse the link target's content.
    - `D02_BODY_WEAKENING` / `D02_AMBIGUOUS_REFACTOR`: surviving, renamed or moved symbols gutted to no-op stubs; ambiguous refactors reported as incomplete.
    - `D03_COMPOUND_LOSS`: distributed deletion (`A03`) and threshold-gaming dilution (`A06`) after renames and moves are reconciled.
-   - `D04_PUBLIC_API_BREAK`: removed or incompatible exported symbols with surviving callers, including import-alias resolution.
-   - `D05_BUILD_DEPENDENCY_DELTA`: build wrapper tampering, lifecycle scripts, manifest changes without lockfile updates.
-   - `D06_GUARD_REGRESSION`: removed decorators and rollback calls, guard polarity inversion, boolean short-circuits, state-guard removal, early-return bypass, swallowed exceptions.
+   - `D04_PUBLIC_API_BREAK`: removed or incompatible exported symbols with surviving callers, including import-alias resolution. The caller index covers at most `max_repo_files` head files, those naming a changed symbol first; `graph_summary.caller_index` reports its coverage, and a finding without a breaking caller states when the index was incomplete.
+   - `D05_BUILD_DEPENDENCY_DELTA`: build wrapper tampering (head lines compared with the base's active lines), npm scripts that run without being named, manifest changes without lockfile updates.
+   - `D06_GUARD_REGRESSION`: removed decorators and rollback calls, guard polarity inversion, boolean short-circuits, state-guard removal, early-return bypass, swallowed exceptions. For Python, execution facts (`call_exec`, `result_discarded`, `deny_cond`) also report a guard that no longer runs on every path (swallowed, conditional, deferred, unreachable), a side-effecting call moved ahead of its guard, a predicate whose result is ignored, and a denial condition that admits an input it denied before on the same terms. A guard call or clause moved into a helper that enforces it on every path is not reported as removed.
    - `D08_WORKFLOW_INTEGRITY`: `run:` expression injection, `pull_request_target` untrusted checkout, SHA pin downgrade, gate weakening, `workflow_run` artifact poisoning, unpinned third-party actions.
    - `D09_TEST_EROSION`: tautological assertion replacement and newly skipped tests.
    - `D10_MIGRATION_PERSISTENCE_LOSS`: `TRUNCATE` / `DROP DATABASE|SCHEMA`, irreversible and forward-only drops across SQL and migration frameworks.
+
+   `D05`, `D08` and `D10` compare a file renamed from a path they do not inspect against an empty base. Changed and indexed sources are decoded as their language reads them (Python per PEP 263, otherwise UTF-8); invalid bytes are decoded as Latin-1, which keeps them distinct, and reported through `D01`.
 
 **Policy modes (`consequence.mode`, `--consequence-mode`, the Action's `consequence-mode` input, or `PAYLOADGUARD_CONSEQUENCE_MODE`):** `shadow` (default — findings are reported in JSON, CLI, Markdown and SARIF without altering the legacy L3 verdict), `advisory` (BLOCK/REVIEW findings become verdict flags and raise SAFE to REVIEW; never exit 2), `enforce` (any BLOCK finding sets DESTRUCTIVE, exit 2; REVIEW findings raise SAFE to REVIEW; a legacy L4 CRITICAL is suppressed when parsing is complete and the SCG finds only renames and moves).
 

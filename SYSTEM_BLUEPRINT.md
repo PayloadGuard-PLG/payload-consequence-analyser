@@ -76,8 +76,8 @@ payload-consequence-analyser/
 ├── action.yml                        # GitHub Action composite wrapper (inputs, outputs, steps)
 ├── pyproject.toml                    # package: payloadguard-plg v1.6.0 (py-modules incl. consequence_engine; requires-python >=3.11); entry payloadguard=analyze:main
 ├── requirements.txt                  # Python runtime + test dependencies
-├── test_analyzer.py                  # pytest suite: 332 pass (policy, Action-path, packaging and escalation tests included)
-├── test_consequence_engine.py        # pytest suite: 61 pass (SymbolFact v1, SCG matching, D01–D10, SARIF)
+├── test_analyzer.py                  # pytest suite: 341 pass (policy, Action-path, packaging and escalation tests included)
+├── test_consequence_engine.py        # pytest suite: 138 pass (SymbolFact v1, SCG matching, D01–D10, SARIF, round-3 Git fixtures)
 ├── part1.txt                         # stale scratch artifact — candidate for removal
 │
 ├── AUDIT_LOG.md                      # architectural findings + incident reports (source of truth)
@@ -261,15 +261,18 @@ PayloadAnalyzer.analyze()
   │   ├── reads blob content, scans for CI trigger patterns + shell execution patterns
   │   └── content_flags count (+2/match, capped +4 in scoring)
   │
-  ├── L2b SCA  →  _parse_added_packages(diff_text, manifest_type)
-  │   ├── parses requirements*.txt / pyproject.toml / package.json / go.mod / Cargo.toml diffs
+  ├── L2b SCA  →  _npm_added_packages(base, head) | _parse_added_packages(diff_text, manifest_type)
+  │   ├── package.json: parsed as JSON on both sides; entries added or changed in the dependency,
+  │   │     overrides and resolutions sections (diff-line parser as fallback when JSON does not parse)
+  │   ├── requirements*.txt / pyproject.toml / go.mod / Cargo.toml: added diff lines
+  │   ├── added, modified, renamed and copied manifests; one renamed from another file type is new in full
   │   ├── loads allowlist.yml from the target branch via _load_allowlist(repo_path, ref=target)
   │   │     (keys: python, npm, go, rust; L2b is skipped when the file is absent)
   │   └── unverified_dependencies = packages in diff not in the ecosystem's allowlist
   │
   ├── L2c Actions poisoning  →  _scan_github_actions_poisoning(diffs)
   │   ├── iterates workflow files via _iter_workflow_file_diffs(diffs)
-  │   │     (yields path, content, diff for A/M files matching .github/workflows/*)
+  │   │     (yields path, content, diff for A/M/R/C files matching .github/workflows/*)
   │   ├── normalizes content via _normalize_yaml_content(content)
   │   │     (collapses multiline YAML block scalars to single lines)
   │   └── signals detected:
@@ -283,7 +286,8 @@ PayloadAnalyzer.analyze()
   │       └── dangerous_trigger_pull_request_target  HIGH  pull_request_target alone
   │
   └── L2d AI tooling config poisoning  →  _scan_ai_tooling_configs(diffs)
-      ├── matches paths via _AI_CONFIG_PATH_RE (9 surfaces)
+      ├── added, modified, renamed and copied files; matches paths via _AI_CONFIG_PATH_RE (9 surfaces)
+      ├── JSON read via _json_object(); values of unexpected type are skipped, not dereferenced
       ├── dispatches to surface-specific helper function per file
       └── signals detected (helper → signal type → severity):
           ├── _check_agent_settings_json   command_in_session_hook       CRITICAL
@@ -304,7 +308,8 @@ PayloadAnalyzer.analyze()
           ├── _check_mcp_json              mcp_local_server_command        HIGH
           │     server command launching repo-local script
           └── (all surfaces)              hidden_unicode                   HIGH
-                _HIDDEN_UNICODE_RE matches zero-width/bidi/tag-block chars
+                _HIDDEN_UNICODE_RE: U+200B–U+200D, U+202A–U+202E, U+2066–U+2069, U+FEFF
+                (not as the first character), U+E0000–U+E007F
 ```
 
 ---
@@ -356,13 +361,13 @@ PayloadAnalyzer.analyze()
   SemanticTransparencyAnalyzer.analyze_transparency()
   ├── Phase 1 — Linguistic Lexer
   │   └── classifies PR description: micro-scope language (fix/patch/update/minor/cleanup/typo…)
-  ├── Phase 2 — Diff Profiler
+  ├── Phase 2 — Diff Profiler (patch diff: merge_base.diff(branch, create_patch=True))
   │   └── computes: churn, insertion_ratio, structural_additions, sensitive_files_touched, file_type_count
   └── Phase 3 — Cross-Correlation → mci_score ∈ [0,1]
         V_s: scope_understated       +0.4  micro-scope language + churn > 50 lines
         V_o: operation_mutation      +0.3  micro-scope language + structural additions in diff
-        V_f: phantom_additions       +0.4  remedial claim + insertion ratio > 90%
-        V_r: hidden_component_modification  +0.3  sensitive file not named in description
+        V_f: hidden_component_modification  +0.3  micro-scope language + sensitive file not named in description
+        V_r: phantom_additions       +0.4  remedial claim + insertion ratio > 90%
         V_e: cross_stack_micro_claim +0.2  micro-scope language + ≥3 distinct file types
       mci_score ≥ 0.5 → DECEPTIVE_PAYLOAD (escalates verdict; see Step 8)
       mci_score > 0   → CAUTION_MISMATCH
@@ -452,28 +457,43 @@ PayloadAnalyzer.analyze()
 ### Step 8b — SCG Differential Consequence Engine (`consequence.v1`)
 
 ```
-  ConsequenceEngine.analyze_deltas(file_deltas, repo_head_files)
+  ConsequenceEngine.analyze_deltas(file_deltas, repo_head_files, reference_loader, repo_source_file_count)
+  ├── Inputs (analyze.py): each side read via _delta_side(); symlinks resolved inside the commit tree and
+  │     analysed as their target; type changes (T) carry both sides; source decoded by _decode_source()
+  │     (Python per PEP 263, otherwise UTF-8; invalid bytes decoded as Latin-1 and marked incomplete)
   ├── Stage A: Parse changed files via structural_parser.extract_symbols()
-  │     └── emits SymbolFact v1 (qualified_name, signature, body_hash, calls, guard_conditions, imports)
-  ├── Stage B: Index repository head files (up to max_repo_files=200) for cross-file call sites & import aliases
-  ├── Stage C: 5-Stage Symbol Matching Pipeline (match_symbols_5_stage)
+  │     └── emits SymbolFact v1 (qualified_name, signature, body_hash, calls, guard_conditions, imports);
+  │         Python guard_conditions add call_exec, result_discarded and deny_cond facts
+  ├── Stage C: 5-Stage Symbol Matching Pipeline (match_symbols_5_stage), run before the index
   │     ├── Stage 1: Exact (symbol_id, kind) match (UNCHANGED / MODIFIED / GUTTED)
   │     ├── Stage 2: Same qualified name in a git-renamed file (MOVED / MOVED_AND_GUTTED)
   │     ├── Stage 3: Cross-file move: same qualified name, or same name with matching signature/body (MOVED / MOVED_AND_GUTTED)
   │     ├── Stage 4: Container member-overlap rename, identical body-hash + signature rename, same-scope stub replacement
   │     │            (RENAMED / RENAMED_AND_GUTTED / MOVED / AMBIGUOUS)
   │     └── Stage 5: Residual unmatched REMOVED and ADDED symbols
+  ├── Stage B: Index head files for cross-file call sites & import aliases, up to max_repo_files=200:
+  │     files naming a changed symbol first (reference_loader: git grep), then the rest;
+  │     graph_summary.caller_index reports indexed/source files, truncation and unparsed files
   ├── Stage D: Deterministic Consequence Detectors (D01–D10)
-  │     ├── D01_PARSER_INCOMPLETE       syntax errors, missing grammars, and changed source in languages without a parser
+  │     ├── D01_PARSER_INCOMPLETE       syntax errors, missing grammars, changed source in languages without a parser,
+  │     │                               decode errors, unresolvable symlinks (one finding per file and status, head policy);
+  │     │                               PG-D01-INDEX for unparsable indexed files when D04 reports an API change
+  │     ├── D02_STRUCTURAL_DELTA        source file replaced by, or re-pointed as, a symlink (REVIEW)
   │     ├── D02_BODY_WEAKENING          surviving or renamed/moved symbols gutted to no-op stubs; ambiguous refactors
   │     ├── D03_COMPOUND_LOSS           cross-file distributed loss (A03) & threshold-gaming dilution (A06)
-  │     ├── D04_PUBLIC_API_BREAK        unresolved callers (incl. import aliases), signature tightening, export removal
-  │     ├── D05_BUILD_DEPENDENCY_DELTA  build wrapper tampering, lifecycle scripts, manifest changes without lockfiles
-  │     ├── D06_GUARD_REGRESSION        decorator/rollback removal, polarity inversion, short-circuits, early-return bypass, swallowed exceptions
+  │     ├── D04_PUBLIC_API_BREAK        unresolved callers (incl. import aliases), signature tightening, export removal;
+  │     │                               findings without a breaking caller note an incomplete caller index
+  │     ├── D05_BUILD_DEPENDENCY_DELTA  build wrapper tampering (active lines compared whole), npm lifecycle scripts run
+  │     │                               unnamed, manifest changes without lockfiles
+  │     ├── D06_GUARD_REGRESSION        decorator/rollback removal, polarity inversion, short-circuits, early-return bypass,
+  │     │                               swallowed exceptions; Python: guard swallowed, made conditional, deferred or
+  │     │                               unreachable, moved after a side effect, result discarded, deny condition weakened;
+  │     │                               guards moved into a helper that enforces them are not removed
   │     ├── D08_WORKFLOW_INTEGRITY      run: expression injection, pull_request_target untrusted checkout, SHA pin downgrade,
   │     │                               gate weakening, workflow_run artifacts, unpinned third-party actions
   │     ├── D09_TEST_EROSION            tautological assertion replacement, newly skipped tests
   │     └── D10_MIGRATION_PERSISTENCE_LOSS  TRUNCATE / DROP DATABASE|SCHEMA, irreversible and forward-only drops
+  │     (D05, D08 and D10 compare a file renamed from a path they do not watch against an empty base)
   └── Policy mode integration:
         ├── shadow   (default): attaches consequence_analysis to report; zero impact on legacy verdict
         ├── advisory: BLOCK/REVIEW findings become verdict flags; SAFE → REVIEW; never exit 2
@@ -548,7 +568,7 @@ PayloadAnalyzer.analyze()
        ↓
   Fix in: analyze.py (the relevant layer or signal)
        ↓
-  Verify: python -m pytest test_analyzer.py test_consequence_engine.py tests/proofs/ -q  (397 pass, 21 skip without Z3/CrossHair; 418 pass with them)
+  Verify: python -m pytest test_analyzer.py test_consequence_engine.py tests/proofs/ -q  (483 pass, 21 skip without Z3/CrossHair; 504 pass with them)
        ↓
   Update: AUDIT_LOG.md (RESOLVED), CLAUDE.md (remove from Open Findings), DEVLOG.md (session entry)
 ```
@@ -557,14 +577,14 @@ PayloadAnalyzer.analyze()
 
 ## Formal Verification Summary
 
-418 tests pass with Z3 and CrossHair installed (`test_analyzer.py` 332, `test_consequence_engine.py` 61, `tests/proofs/` 25); without them 397 pass and 21 of the 25 proof tests skip. Last proof runs: 2026-10-27 (see `PROOFS.md`).
+504 tests pass with Z3 and CrossHair installed (`test_analyzer.py` 341, `test_consequence_engine.py` 138, `tests/proofs/` 25); without them 483 pass and 21 of the 25 proof tests skip. Last proof runs: 2026-10-27 (see `PROOFS.md`).
 
 | Method | Coverage | Last result | Run command |
 |---|---|---|---|
 | CrossHair | C-01–C-15 (L3), S1–S7 (L4), T1–T7 (L5a), M1–M9 (L5b) — 40 postconditions | 0 counterexamples | `cd verification && crosshair check <module> --analysis_kind PEP316 --per_condition_timeout 30` |
 | Z3 SMT | P1–P11 (L3, L2c) | 18 tests passed | `pytest tests/proofs/test_z3_properties.py -v` |
 | Dafny | POST-1–12, POST-15/16 (L3), S1–S7 (L4), T1–T8 (L5a) | 11 verified, 0 errors (CI run #19) | `dafny verify verification/dafny/assess_consequence.dfy` |
-| pytest (unit, integration, SCG) | all layers, `consequence.v1`, Action path, packaging | 393 passed | `python -m pytest test_analyzer.py test_consequence_engine.py -v` |
+| pytest (unit, integration, SCG) | all layers, `consequence.v1`, Action path, packaging | 479 passed | `python -m pytest test_analyzer.py test_consequence_engine.py -v` |
 | pytest (proofs) | Z3 properties (18), CrossHair wrappers (5), temporal contract regression, L3 model parity | 25 passed | `python -m pytest tests/proofs/ -v` |
 
 Skips occur only when the proof tools are missing: 21 of the 25 proof tests.

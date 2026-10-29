@@ -118,13 +118,13 @@ Rules that shape the result:
 |---|---|---|
 | **L1 Surface** | File and line counts, permission changes, symlinks and submodules. | Counts feed L3; permission and symlink changes are reported. |
 | **L2 Forensic** | Deleted critical-path and security-critical files; content scan of added non-code files for CI triggers and shell execution patterns. | Scored. |
-| **L2b Dependencies** | Packages added to `requirements*.txt`, `pyproject.toml`, `package.json`, `go.mod` and `Cargo.toml`, checked against `allowlist.yml`. Runs only when `allowlist.yml` exists on the target branch. | Scored. |
-| **L2c Actions poisoning** | Added or modified workflow files: base64 payloads, credential harvesting, dormant `workflow_dispatch` / `schedule` triggers that run shell commands (any YAML layout), forged bot authors, OIDC token elevation, typosquatted action consumers, `pull_request_target` misuse. | Scored. |
-| **L2d AI config poisoning** | Added or modified AI tooling configuration: `.claude/settings.json`, `.gemini/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, `package.json` lifecycle scripts, `composer.json`, `Gemfile`, `binding.gyp`, `mcp.json`. | Scored. |
+| **L2b Dependencies** | Packages added to `requirements*.txt`, `pyproject.toml`, `package.json`, `go.mod` and `Cargo.toml` (including manifests renamed into place), checked against `allowlist.yml`. `package.json` is parsed as JSON: entries added or changed in `dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies`, `overrides` and `resolutions`. Runs only when `allowlist.yml` exists on the target branch. | Scored. |
+| **L2c Actions poisoning** | Workflow files added, modified, or renamed or copied into `.github/workflows/`: base64 payloads, credential harvesting, dormant `workflow_dispatch` / `schedule` triggers that run shell commands (any YAML layout), forged bot authors, OIDC token elevation, typosquatted action consumers, `pull_request_target` misuse. | Scored. |
+| **L2d AI config poisoning** | AI tooling configuration added, modified, or renamed or copied into place: `.claude/settings.json`, `.gemini/settings.json`, `.cursor/rules/*.mdc`, `.vscode/tasks.json`, `package.json` lifecycle scripts, `composer.json`, `Gemfile`, `binding.gyp`, `mcp.json`. Also reports zero-width, bidirectional-control, byte-order-mark (not at the start of the file) and Unicode tag characters. | Scored. |
 | **L3 Consequence** | Combines the signals above into the score and verdict. | Decides the verdict. |
 | **L4 Structural** | AST comparison: deleted classes, functions and constants, per file and across files. Fires when the deleted share reaches `thresholds.structural.deletion_ratio` and the count reaches `min_deleted_nodes`. Also reports McCabe complexity of newly added Python functions (advisory). | CRITICAL result scores +5. |
 | **L5a Temporal** | Drift score from branch age and commit velocity on the target, classified `CURRENT` (below 250), `STALE` (250–1,000) or `DANGEROUS` (1,000 and above). | Reported. Branch age itself is scored in L3. |
-| **L5b Semantic** | Heuristic comparison of the PR description with the diff profile (no LLM). Results: `TRANSPARENT`, `CAUTION_MISMATCH`, `DECEPTIVE_PAYLOAD`, `UNVERIFIED` (no description). | `UNVERIFIED` and `CAUTION_MISMATCH` raise `SAFE` to `REVIEW`. `DECEPTIVE_PAYLOAD` raises `SAFE` or `REVIEW` to `CAUTION`, and `CAUTION` to `DESTRUCTIVE` only when the content score alone is at least 3. |
+| **L5b Semantic** | Heuristic comparison of the PR description with the profile of the patch (lines added and removed, new declarations, file types, sensitive paths; no LLM). Results: `TRANSPARENT`, `CAUTION_MISMATCH`, `DECEPTIVE_PAYLOAD`, `UNVERIFIED` (no description). | `UNVERIFIED` and `CAUTION_MISMATCH` raise `SAFE` to `REVIEW`. `DECEPTIVE_PAYLOAD` raises `SAFE` or `REVIEW` to `CAUTION`, and `CAUTION` to `DESTRUCTIVE` only when the content score alone is at least 3. |
 | **L5c Runtime** | Optional eBPF agent for the CI runner: `execve`, outbound connections, `ptrace` and process-memory access, in audit or block mode with an egress allowlist. | Events are listed in the JSON report; no score. |
 | **Consequence engine** | Differential detectors `D01`–`D10` ([below](#consequence-engine)). | Findings; verdict only in `advisory` or `enforce` mode. |
 
@@ -136,9 +136,11 @@ Rules that shape the result:
 | Gutted functions | `D02` | A security or authentication method is reduced to `pass`, `...` or `return None`, in place or after a rename. | `BLOCK` |
 | Distributed loss and threshold gaming | `D03` | One security function removed per file across five files; deleted methods padded with trivial getters. | `BLOCK` |
 | Broken callers and API breaks | `D04` | An exported function is deleted or its required parameters change while callers, including aliased imports, still use the old contract. | `BLOCK` |
-| Build wrapper tampering | `D05` | `curl … \| sh` or a reverse shell added to `mvnw`, `gradlew`, `Makefile` or `build.sh`. | `BLOCK` |
+| Build wrapper tampering | `D05` | `curl … \| sh` or a reverse shell added to, or uncommented in, `mvnw`, `gradlew`, `Makefile` or `build.sh`, or such a file renamed into place. | `BLOCK` |
+| Lifecycle script change | `D05` | An npm script that runs without being named (`preinstall`, `install`, `postinstall`, `dependencies`, `prepare`, `prepack`, `postpack`, `prepublish`, `prepublishOnly`, `publish`, `postpublish`) is added or changed. | `REVIEW` |
 | Dependency drift | `D05` | A dependency is added to a manifest without a lockfile update. | `REVIEW` |
-| Security guard regression | `D06` | `@require_auth` removed, `self._rollback()` dropped, `if not verify()` inverted, `and False` or `\|\| true` inserted. | `BLOCK` |
+| Source replaced by a symlink | `D02` | `auth.py` becomes a symlink to another implementation; the target's content is analysed. | `REVIEW` |
+| Security guard regression | `D06` | `@require_auth` removed, `self._rollback()` dropped, `if not verify()` inverted, `and False` or `\|\| true` inserted. Python also: the guard's exception swallowed, a write moved before the guard, the guard made conditional or placed in a generator that never runs, `or` changed to `and` in a denial, a verifier's result ignored. A guard moved into a helper that still enforces it is not reported. | `BLOCK` |
 | Untrusted expression injection | `D08` | `${{ github.event.pull_request.title }}` interpolated into a `run:` block. | `BLOCK` |
 | Pull request checkout with privileges | `D08` | `pull_request_target` combined with a checkout of the pull request head. | `BLOCK` |
 | Action pin downgrade | `D08` | A 40-character commit SHA replaced by a tag or branch (`@v4`, `@main`). | `REVIEW` |
@@ -171,8 +173,9 @@ Each symbol ends in one transition: `UNCHANGED`, `MODIFIED`, `GUTTED`, `MOVED`, 
 
 | Detector | Consequence classes | Policy |
 |---|---|---|
-| `D01_PARSER_INCOMPLETE` | `ANALYSIS_INCOMPLETE`: syntax errors, missing grammar, unsupported extension | `WARN` / `REVIEW` |
+| `D01_PARSER_INCOMPLETE` | `ANALYSIS_INCOMPLETE`: syntax errors, missing grammar, unsupported extension, invalid encoding, unresolvable symlink, unparsable files in the caller index | `WARN` / `REVIEW` |
 | `D02_BODY_WEAKENING` | `BODY_GUTTED`, `RENAME_WITH_BODY_WEAKENING`, `AMBIGUOUS_REFACTOR` | `BLOCK` / `WARN` |
+| `D02_STRUCTURAL_DELTA` | `SOURCE_REPLACED_BY_SYMLINK` | `REVIEW` |
 | `D03_COMPOUND_LOSS` | `DISTRIBUTED_SYMBOL_LOSS`, `THRESHOLD_GAMING_DELETION` | `BLOCK` / `REVIEW` |
 | `D04_PUBLIC_API_BREAK` | `UNRESOLVED_CALLER`, `PUBLIC_API_REMOVAL`, `PUBLIC_API_SIGNATURE_BREAK` | `BLOCK` / `REVIEW` |
 | `D05_BUILD_DEPENDENCY_DELTA` | `BUILD_WRAPPER_TAMPERING`, `BUILD_SCRIPT_MODIFICATION`, `DEPENDENCY_LOCKFILE_MISMATCH` | `BLOCK` / `REVIEW` |
@@ -182,6 +185,8 @@ Each symbol ends in one transition: `UNCHANGED`, `MODIFIED`, `GUTTED`, `MOVED`, 
 | `D10_MIGRATION_PERSISTENCE_LOSS` | `CATASTROPHIC_DATA_WIPEOUT`, `IRREVERSIBLE_PERSISTENCE_DROP`, `DESTRUCTIVE_PERSISTENCE_MIGRATION` | `BLOCK` / `REVIEW` |
 
 Every finding carries the file, line, source snippet, affected symbols and a remediation.
+
+Symlinks are resolved inside the repository and analysed as the content they point to. Source is decoded as its language reads it (Python by its coding declaration, otherwise UTF-8); bytes invalid in that encoding are kept and the file is reported as incompletely analysed. To verify callers across files, the engine indexes head files that mention a changed symbol first, then other files, up to `max_repo_files`; `graph_summary.caller_index` reports how many source files were indexed, and a `D04` finding that found no breaking caller says when the index was incomplete.
 
 ### Consequence modes
 
@@ -281,7 +286,7 @@ Exit codes: `0` for `SAFE`, `REVIEW` and `CAUTION`; `1` for an analysis error; `
 consequence:
   enabled: true
   mode: shadow                        # shadow | advisory | enforce
-  max_repo_files: 200                 # head files indexed to verify callers across files
+  max_repo_files: 200                 # head files indexed to verify callers (files naming a changed symbol first)
 
 thresholds:
   branch_age_days: [90, 180, 365]     # +1 / +2 / +3
@@ -339,7 +344,8 @@ rust:            # Cargo.toml
 
 ## Limitations
 
-- **Structural coverage:** Python, JavaScript, TypeScript, Go, Rust and Java. Other source languages are reported as incomplete (`D01`), not analysed.
+- **Structural coverage:** Python, JavaScript, TypeScript, Go, Rust and Java. Other source languages are reported as incomplete (`D01`), not analysed. The `D06` checks for swallowed, reordered, conditional, deferred and ignored guards and for weakened denial conditions use control-flow facts the Python parser produces; other languages get the remaining `D06` checks.
+- **No dataflow analysis:** values are not tracked between statements, so, for example, request data reaching a SQL string is not detected, and an `assert` used as a guard is treated as enforced although `python -O` removes it.
 - **Shadow by default:** consequence findings do not change the verdict until `advisory` or `enforce` is set. The layers outside the consequence engine score in every mode.
 - **Heuristics:** L5b and the content scans are pattern based. They raise the cost of hiding a payload; they do not prove intent. L5b needs a PR description to say anything.
 - **History required:** the comparison needs the merge base, so the checkout must be a full clone (`fetch-depth: 0`). A single-branch clone or detached HEAD can raise a `BadName` error (open finding §2.3).

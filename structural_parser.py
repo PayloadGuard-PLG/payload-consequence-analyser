@@ -23,6 +23,7 @@ Supported:  .py  .js  .jsx  .ts  .tsx  .go  .rs  .java
 
 import ast
 import hashlib
+import json
 import re
 import sys
 from dataclasses import asdict, dataclass, field
@@ -770,6 +771,252 @@ def _is_python_trivial_assert(
     return _eval_python_const_bool(test_node, const_bools) is True
 
 
+def _python_call_name(call: ast.Call) -> str:
+    """Callee label as recorded in SymbolFact.calls ('name' or 'qualifier.name')."""
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        try:
+            qualifier = ast.unparse(call.func.value)
+        except Exception:
+            qualifier = ""
+        return f"{qualifier}.{call.func.attr}" if qualifier else call.func.attr
+    return ""
+
+
+def _python_is_trivial_value(node: Optional[ast.AST]) -> bool:
+    """True for a return value that carries no data: None, a constant, an empty literal."""
+    if node is None or isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return not node.elts
+    if isinstance(node, ast.Dict):
+        return not node.keys
+    return False
+
+
+def _python_call_execution_facts(body: list) -> List[str]:
+    """Describe how each call in a function body executes (AUDIT_LOG SEC01/03/06/12/19).
+
+    Emits, per distinct callee:
+      call_exec:<first>:<strong>:<weak>:<callee>
+        first   top-level statement index of the first occurrence
+        strong  top-level statement index of the first occurrence that runs on every normal path
+                with its exceptions propagating, or '-'
+        weak    when there is no strong occurrence, why the first occurrence is not strong:
+                swallowed (in a try body whose handler continues, or under suppress()), deferred
+                (in a generator expression or lambda that is never consumed), conditional (in a
+                branch, handler or loop), bypassable (after a branch that can return with a call
+                or a value), unreachable (after an unconditional return or raise); else '-'
+      result_discarded:<callee>   every occurrence is a bare expression statement
+    """
+    compound = (ast.If, ast.Try, ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.While, ast.Match)
+    if hasattr(ast, "TryStar"):
+        compound = compound + (ast.TryStar,)
+    nested_defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    loaded = {
+        n.id for s in body for n in ast.walk(s)
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+    }
+    occurrences: List[Tuple[str, int, Optional[str]]] = []
+    discarded: Dict[str, bool] = {}
+    bare_calls: set = set()
+
+    def _expr(node: Optional[ast.AST], idx: int, reason: Optional[str], consumed: bool = False) -> None:
+        if node is None:
+            return
+        if isinstance(node, (ast.GeneratorExp, ast.Lambda)) and not consumed:
+            reason = reason or "deferred"
+        if isinstance(node, ast.Call):
+            name = _python_call_name(node)
+            if name:
+                occurrences.append((name, idx, reason))
+                discarded[name] = discarded.get(name, True) and id(node) in bare_calls
+            _expr(node.func, idx, reason)
+            for arg in list(node.args) + [kw.value for kw in node.keywords]:
+                # A generator or lambda passed to a call is consumed by it (list(...), any(...)).
+                _expr(arg, idx, reason, consumed=True)
+            return
+        for child in ast.iter_child_nodes(node):
+            if not isinstance(child, ast.stmt):
+                _expr(child, idx, reason)
+
+    def _blocks_of(stmt: ast.stmt):
+        for name in ("body", "orelse", "finalbody"):
+            block = getattr(stmt, name, None)
+            if block:
+                yield block
+        for handler in getattr(stmt, "handlers", None) or []:
+            yield handler.body
+        for case in getattr(stmt, "cases", None) or []:
+            yield case.body
+
+    def _leaky_exit(stmt: ast.stmt) -> bool:
+        """A compound statement with a branch that returns after a call or with a value."""
+        for block in _blocks_of(stmt):
+            returns = [s for s in block if isinstance(s, ast.Return)]
+            if returns:
+                has_call = any(
+                    isinstance(n, ast.Call)
+                    for s in block if not isinstance(s, nested_defs)
+                    for n in ast.walk(s)
+                )
+                if has_call or any(not _python_is_trivial_value(r.value) for r in returns):
+                    return True
+            if any(isinstance(s, compound) and _leaky_exit(s) for s in block):
+                return True
+        return False
+
+    def _branch(stmts: list, idx: int, reason: Optional[str]) -> set:
+        """Record a branch's calls as conditional; return the calls strong within the branch."""
+        start = len(occurrences)
+        _block(stmts, lambda _p: idx, reason)
+        strong_here = {n for n, _i, r in occurrences[start:] if r is None}
+        occurrences[start:] = [(n, i, "conditional" if r is None else r) for n, i, r in occurrences[start:]]
+        return strong_here
+
+    def _block(stmts: list, idx_of, reason: Optional[str]) -> None:
+        for pos, stmt in enumerate(stmts):
+            idx = idx_of(pos)
+            if isinstance(stmt, nested_defs):
+                continue
+            if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                bare_calls.add(id(stmt.value))
+            if isinstance(stmt, ast.If):
+                _expr(stmt.test, idx, reason)
+                in_body = _branch(stmt.body, idx, reason)
+                in_else = _branch(stmt.orelse, idx, reason)
+                # A call made in both branches is made on every path through the statement.
+                for name in sorted(in_body & in_else):
+                    occurrences.append((name, idx, None))
+            elif isinstance(stmt, (ast.Try,) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())):
+                swallows = any(
+                    _python_stmt_action(h.body) in ("noop", "branch", "return_allow") for h in stmt.handlers
+                )
+                _block(stmt.body, lambda _p: idx, reason or ("swallowed" if swallows else None))
+                for handler in stmt.handlers:
+                    _branch(handler.body, idx, reason)
+                if swallows:
+                    _branch(stmt.orelse, idx, reason)
+                else:
+                    _block(stmt.orelse, lambda _p: idx, reason)
+                _block(stmt.finalbody, lambda _p: idx, reason)
+            elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+                suppresses = False
+                for item in stmt.items:
+                    _expr(item.context_expr, idx, reason)
+                    if isinstance(item.context_expr, ast.Call) and \
+                            _python_call_name(item.context_expr).rsplit(".", 1)[-1] == "suppress":
+                        suppresses = True
+                _block(stmt.body, lambda _p: idx, reason or ("swallowed" if suppresses else None))
+            elif isinstance(stmt, (ast.For, ast.AsyncFor)):
+                _expr(stmt.iter, idx, reason)
+                _branch(stmt.body, idx, reason)
+                _branch(stmt.orelse, idx, reason)
+            elif isinstance(stmt, ast.While):
+                _expr(stmt.test, idx, reason)
+                _branch(stmt.body, idx, reason)
+                _branch(stmt.orelse, idx, reason)
+            elif isinstance(stmt, ast.Match):
+                _expr(stmt.subject, idx, reason)
+                for case in stmt.cases:
+                    _branch(case.body, idx, reason)
+            elif (
+                isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name) and stmt.targets[0].id in loaded
+                and isinstance(stmt.value, (ast.GeneratorExp, ast.Lambda))
+            ):
+                # A generator or lambda bound to a name the function reads later is treated as consumed.
+                _expr(stmt.value, idx, reason, consumed=True)
+            else:
+                _expr(stmt, idx, reason)
+            if isinstance(stmt, (ast.Return, ast.Raise)):
+                rest = stmts[pos + 1:]
+                if rest:
+                    _block(rest, lambda p, b=pos + 1: idx_of(b + p), "unreachable")
+                return
+            if reason is None and isinstance(stmt, compound) and _leaky_exit(stmt):
+                reason = "bypassable"
+
+    _block(body, lambda p: p, None)
+
+    first: Dict[str, int] = {}
+    strong: Dict[str, int] = {}
+    weak: Dict[str, Tuple[int, str]] = {}
+    for name, idx, reason in occurrences:
+        first[name] = min(first.get(name, idx), idx)
+        if reason is None:
+            strong[name] = min(strong.get(name, idx), idx)
+        elif name not in weak or idx < weak[name][0]:
+            weak[name] = (idx, reason)
+    facts = []
+    for name in first:
+        s = strong.get(name)
+        w = "-" if s is not None else weak[name][1]
+        facts.append(f"call_exec:{first[name]}:{'-' if s is None else s}:{w}:{name}")
+        if discarded.get(name):
+            facts.append(f"result_discarded:{name}")
+    return facts
+
+
+def _python_bool_formula(node: ast.AST) -> list:
+    """Boolean structure of a condition as nested lists: ['and'|'or', ...], ['not', x],
+    ['const', bool] or ['atom', text]. Comparisons with True/False/None normalise as in
+    the D06 polarity check, so `x is False` and `not x` are the same formula."""
+    if isinstance(node, ast.BoolOp):
+        return ["and" if isinstance(node.op, ast.And) else "or"] + [_python_bool_formula(v) for v in node.values]
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return ["not", _python_bool_formula(node.operand)]
+    if isinstance(node, ast.Constant):
+        return ["const", bool(node.value)]
+    if isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.comparators[0], ast.Constant):
+        op, val = node.ops[0], node.comparators[0].value
+        if (isinstance(op, (ast.Eq, ast.Is)) and (val is False or val is None)) or (
+            isinstance(op, (ast.NotEq, ast.IsNot)) and val is True
+        ):
+            return ["not", _python_bool_formula(node.left)]
+        if (isinstance(op, (ast.Eq, ast.Is)) and val is True) or (
+            isinstance(op, (ast.NotEq, ast.IsNot)) and (val is False or val is None)
+        ):
+            return _python_bool_formula(node.left)
+    try:
+        text = re.sub(r"\s+", "", ast.unparse(node))
+    except Exception:
+        text = ast.dump(node)
+    return ["atom", text]
+
+
+def _python_deny_condition_facts(body: list) -> List[str]:
+    """deny_cond:<json [action, formula]> for each if/elif branch in the function's straight-line
+    body (also inside with-blocks and try bodies) that raises, returns a denial or rolls back.
+    The formula includes the negated conditions of earlier branches of the same chain
+    (AUDIT_LOG SEC14)."""
+    facts: List[str] = []
+
+    def _chain(stmt: ast.If, prior: list) -> None:
+        test = _python_bool_formula(stmt.test)
+        action = _python_stmt_action(stmt.body)
+        if action in ("raise", "return_deny", "rollback"):
+            formula = ["and"] + prior + [test] if prior else test
+            facts.append("deny_cond:" + json.dumps([action, formula], separators=(",", ":")))
+        if len(stmt.orelse) == 1 and isinstance(stmt.orelse[0], ast.If):
+            _chain(stmt.orelse[0], prior + [["not", test]])
+
+    def _walk(stmts: list) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, ast.If):
+                _chain(stmt, [])
+            elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+                _walk(stmt.body)
+            elif isinstance(stmt, ast.Try):
+                _walk(stmt.body)
+            if isinstance(stmt, (ast.Return, ast.Raise)):
+                return
+
+    _walk(body)
+    return facts
+
+
 def _python_extract_guard_conditions(
     node: ast.AST,
     module_const_bools: Optional[Dict[str, bool]] = None,
@@ -995,6 +1242,8 @@ def _python_extract_guard_conditions(
                 _walk_stmts(getattr(stmt, "orelse", []))
 
     _walk_stmts(body)
+    conditions.extend(_python_call_execution_facts(body))
+    conditions.extend(_python_deny_condition_facts(body))
     if effective_asserts > 0 or trivial_asserts > 0:
         conditions.append(f"test_assertions:{effective_asserts}:{trivial_asserts}")
     if has_skip_call:
